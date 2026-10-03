@@ -190,7 +190,6 @@ class AppState extends ChangeNotifier {
           : options.reasoningEffort,
       mcp: (p != null && p.mcp.isNotEmpty) ? p.mcp : options.mcp,
       skills: (p != null && p.skills.isNotEmpty) ? p.skills : options.skills,
-      compress: options.compress,
     );
     notifyListeners();
   }
@@ -350,10 +349,15 @@ class AppState extends ChangeNotifier {
     ));
   }
 
-  /// 让电脑端删除会话里的某一条消息（按 chat_show 下标）。
-  bool deleteMessageOnDesktop(String conversationId, int index) {
+  /// 让电脑端删除会话里的某一条消息。
+  ///
+  /// 同时把 messageId 发过去 —— 电脑端会**优先用它现查本窗口的下标**，
+  /// 因为手机拿到的 index 来自数据库分页读取，和窗口内存里的下标可能不一致。
+  /// index 只作为查不到 id 时的回退。
+  bool deleteMessageOnDesktop(String conversationId, int index,
+      {String messageId = ''}) {
     if (!_client.isConnected) return false;
-    if (index < 0) return false;
+    if (index < 0 && messageId.isEmpty) return false;
     lastMessageAction = null;
     notifyListeners();
     return _client.send(Envelope(
@@ -366,6 +370,7 @@ class AppState extends ChangeNotifier {
         'action': 'deleteMessage',
         'conversationId': conversationId,
         'index': index,
+        if (messageId.isNotEmpty) 'messageId': messageId,
       },
     ));
   }
@@ -447,7 +452,9 @@ class AppState extends ChangeNotifier {
     final convId = meta.conversationId.isNotEmpty
         ? meta.conversationId
         : (m.conversationId ?? _activeConversationId ?? '');
-    final ok = deleteMessageOnDesktop(convId, meta.index);
+    // 带上 messageId：电脑端优先按 id 在自己窗口里查下标，避免分页错位删错行
+    final ok = deleteMessageOnDesktop(convId, meta.index,
+        messageId: meta.messageId);
     if (ok) {
       messages.removeWhere((x) => x.id == m.id);
       _persistHistory();

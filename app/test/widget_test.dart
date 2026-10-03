@@ -23,7 +23,6 @@ void main() {
         reasoningEffort: 'high',
         mcp: ['fs', 'shell'],
         skills: ['code-review'],
-        compress: true,
         promptKey: 'AI',
       );
       final back = ChatOptions.fromJson(o.toJson());
@@ -31,7 +30,6 @@ void main() {
       expect(back.reasoningEffort, 'high');
       expect(back.mcp, ['fs', 'shell']);
       expect(back.skills, ['code-review']);
-      expect(back.compress, isTrue);
       expect(back.promptKey, 'AI');
     });
   });

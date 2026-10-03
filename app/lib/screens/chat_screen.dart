@@ -111,6 +111,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   itemBuilder: (context, i) => _Bubble(
                     msg: state.messages[i],
                     onOpenFile: _openFile,
+                    // 电脑端的「重新回答」只对最后一条生效，这里同步这个规则
+                    isLast: i == state.messages.length - 1,
                   ),
                 ),
         ),
@@ -154,8 +156,13 @@ class _EmptyChat extends StatelessWidget {
 class _Bubble extends StatelessWidget {
   final ChatMessage msg;
   final Future<void> Function(FileMeta) onOpenFile;
+  final bool isLast;
 
-  const _Bubble({required this.msg, required this.onOpenFile});
+  const _Bubble({
+    required this.msg,
+    required this.onOpenFile,
+    this.isLast = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -242,7 +249,8 @@ class _Bubble extends StatelessWidget {
                 ),
               ),
             // 气泡下方的操作栏（对齐电脑端气泡底部的按钮）
-            if (!msg.pending) _ActionBar(msg: msg, outgoing: outgoing),
+            if (!msg.pending)
+              _ActionBar(msg: msg, outgoing: outgoing, isLast: isLast),
           ],
         ),
       ),
@@ -258,14 +266,21 @@ class _Bubble extends StatelessWidget {
 class _ActionBar extends StatelessWidget {
   final ChatMessage msg;
   final bool outgoing;
-  const _ActionBar({required this.msg, required this.outgoing});
+  final bool isLast;
+  const _ActionBar({
+    required this.msg,
+    required this.outgoing,
+    this.isLast = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    // 「重新回答」「删除这条」要能定位到电脑端那条消息
-    final canReask = !outgoing && msg.isDesktopAssistant;
+    // 「重新回答」要能定位到电脑端那条消息，而且电脑端只允许重答最后一条
+    // （reaskAI 内部对非最后一条会直接 return，所以这里也不显示，避免点了没反应）
+    final canReask =
+        !outgoing && msg.isDesktopAssistant && isLast && msg.role == ChatRole.assistant;
+    // 「删除这条」只要拿得到定位信息就行，不限位置
     final canDelete = msg.isDesktopAssistant;
-    final isAssistant = msg.role == ChatRole.assistant;
 
     return Padding(
       padding: const EdgeInsets.only(top: 6),
@@ -281,7 +296,7 @@ class _ActionBar extends StatelessWidget {
               ));
             }
           }),
-          if (isAssistant && canReask)
+          if (canReask)
             _act(context, Icons.refresh_rounded, '重新回答', () async {
               final state = context.read<AppState>();
               final ok = state.reaskChatMessage(msg);

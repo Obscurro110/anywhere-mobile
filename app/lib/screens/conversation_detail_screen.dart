@@ -324,7 +324,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
     // 优先走「让电脑端窗口删」——和你在电脑上点删除是同一个逻辑，
     // 不会因为索引/压缩导致删错行。没开窗口才退回直接改数据。
     if (state.activeConversationId == widget.conversation.id) {
-      final sent = state.deleteMessageOnDesktop(widget.conversation.id, m.index);
+      final sent = state.deleteMessageOnDesktop(widget.conversation.id, m.index,
+          messageId: m.id);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(

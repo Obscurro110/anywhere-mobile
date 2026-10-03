@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..481e403
+index 0000000..e8f350f
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,1448 @@
+@@ -0,0 +1,1482 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -778,20 +778,33 @@ index 0000000..481e403
 +  }
 +}
 +
-+/** 读 config → 交给 mutate 改 → 落盘。返回落盘后的 config。 */
-+async function mutateConfig(mutate) {
-+  if (!ctx?.dataApi?.getConfig || !ctx?.dataApi?.updateConfigWithoutFeatures) {
-+    throw new Error('config_api_unavailable')
-+  }
-+  const res = await ctx.dataApi.getConfig()
-+  const config = res?.config && typeof res.config === 'object' ? res.config : {}
-+  if (!config.tasks || typeof config.tasks !== 'object') config.tasks = {}
-+  const ret = mutate(config)
-+  await ctx.dataApi.updateConfigWithoutFeatures({
-+    config: JSON.parse(JSON.stringify(config))
-+  })
-+  return { config, ret }
++/**
++ * 读 config → 交给 mutate 改 → 落盘。返回落盘后的 config。
++ *
++ * 用队列串行化：read-modify-write 之间如果没有互斥，两个手机操作同时到
++ * （或手机操作与电脑端界面同时改）会互相覆盖，后写的把先写的抹掉。
++ * 电脑端 Tasks.vue 的 atomicSave 也是同样的排队思路。
++ */
++let configWriteQueue = Promise.resolve()
 +
++function mutateConfig(mutate) {
++  const run = async () => {
++    if (!ctx?.dataApi?.getConfig || !ctx?.dataApi?.updateConfigWithoutFeatures) {
++      throw new Error('config_api_unavailable')
++    }
++    const res = await ctx.dataApi.getConfig()
++    const config = res?.config && typeof res.config === 'object' ? res.config : {}
++    if (!config.tasks || typeof config.tasks !== 'object') config.tasks = {}
++    const ret = mutate(config)
++    await ctx.dataApi.updateConfigWithoutFeatures({
++      config: JSON.parse(JSON.stringify(config))
++    })
++    return { config, ret }
++  }
++  // 无论上一个成功还是失败都继续排队，否则一次异常会把队列永久卡死
++  const next = configWriteQueue.then(run, run)
++  configWriteQueue = next.catch(() => {})
++  return next
 +}
 +
 +/** 任务名不能含文件系统非法字符（电脑端同样限制） */
@@ -1165,11 +1178,25 @@ index 0000000..481e403
 +
 +    if (!action) return fail('action_required')
 +
-+    // 找到承载这个会话的窗口；没有就说明还没「在电脑端打开」
++    // 找到承载这个会话的窗口。
++    //
++    // 有两种窗口，key 不一样：
++    //   · 'phone'        —— 手机聊天窗口（手机直接聊天，窗口里自动建了一个会话）
++    //   · 'conv:<id>'    —— 手机点开某个已有电脑端会话的窗口
++    //
++    // 手机气泡带回来的 conversationId 是**窗口自己那个会话**的 id，
++    // 所以在 'phone' 模式下它跟 key 对不上 —— 以前只做严格相等，
++    // 结果「重新回答」「删除这条」永远找不到窗口（日志：no bound window）。
++    // 现在改成：phone 模式的窗口一律接受；conv:<id> 模式必须 id 对得上。
 +    let targetWin = null
 +    if (isWindowAlive(phoneWindowId)) {
-+      const wantKey = conversationId ? `conv:${conversationId}` : 'phone'
-+      if (phoneWindowKey === wantKey) targetWin = phoneWindowId
++      if (phoneWindowKey === 'phone') {
++        targetWin = phoneWindowId
++      } else if (conversationId && phoneWindowKey === `conv:${conversationId}`) {
++        targetWin = phoneWindowId
++      } else if (!conversationId) {
++        targetWin = phoneWindowId
++      }
 +    }
 +    if (!targetWin) {
 +      rlog('[relay] message-action but no bound window; conv =', conversationId, 'key =', phoneWindowKey)
@@ -1177,7 +1204,7 @@ index 0000000..481e403
 +    }
 +
 +    try {
-+      ctx.dispatchWindowEvent(
++      const dispatched = ctx.dispatchWindowEvent(
 +        {
 +          event: 'relay:command',
 +          payload: {
@@ -1191,6 +1218,13 @@ index 0000000..481e403
 +        },
 +        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
 +      )
++      // dispatchWindowEvent 返回 { ok, delivered, reason }。
++      // 之前没检查：窗口要是刚好在两步之间关掉了，这里会静默失败，
++      // 手机端一直等一个永远不来的回执（表现为"点了没反应"）。
++      if (dispatched && dispatched.ok === false) {
++        rwarn('[relay] message-action dispatch not delivered:', dispatched.reason)
++        return fail(dispatched.reason || 'dispatch_failed')
++      }
 +      rlog('[relay] dispatched message-action', action, 'to window', targetWin, 'reqId =', reqId)
 +    } catch (err) {
 +      rwarn('[relay] dispatch message-action failed:', err?.message || err)
@@ -1818,19 +1852,21 @@ index 0000000..1e9ef37
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..41e518c
+index 0000000..12cab0f
 --- /dev/null
 +++ b/main/relay/version.js
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +/**
 + * [anywhere-mobile] 手机互通版本号
 + * ------------------------------------------------------------
-+ * 这个文件由 CI 根据仓库根的 version.json 自动重写（见
++ * CI 会按仓库根的 version.json 重写这里的值（见
 + * .github/workflows/build-desktop-relay.yml 的 "注入版本号" 步骤）。
-+ * 本地构建时如果没重写，就用这里的值。
++ * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
++ * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.2.0';
-+export const RELAY_VERSION_CODE = 2;
++export const RELAY_VERSION = '1.6.1';
++export const RELAY_VERSION_CODE = 11;
+\ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
 --- a/main/windowManager.js
@@ -2229,10 +2265,10 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..57ff64b 100644
+index 6bb1113..1109ea6 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -741,9 +741,86 @@ const normalizeWindowEventPayload = (input) => {
+@@ -741,9 +741,133 @@ const normalizeWindowEventPayload = (input) => {
      return input.payload;
    }
  
@@ -2259,7 +2295,12 @@ index 6bb1113..57ff64b 100644
 +
 +  const reply = (ok, extra = {}) => {
 +    try {
++      // 注意 role 必须是 'message-action-result'！
++      // sendRelayChat 默认 role 是 'assistant' —— 用默认值的话，
++      // 这段 JSON 会被手机当成一条**新的 AI 回复**塞进聊天列表，
++      // 既看不到失败原因，还会多出一个乱码气泡。
 +      window.api?.sendRelayChat?.({
++        role: 'message-action-result',
 +        text: JSON.stringify({
 +          __relayMessageAction: { action, reqId, ok, ...extra }
 +        }),
@@ -2278,34 +2319,76 @@ index 6bb1113..57ff64b 100644
 +        reply(false, { reason: 'messageId_required' });
 +        return;
 +      }
++      // reaskAI 内部只会对「最后一条可见消息」生效（其它情况它只弹个
++      // 电脑端提示然后 return）—— 而它没有返回值，我们无法区分成功失败。
++      // 所以这里先自己判断，给手机一个明确的失败原因，而不是假装成功。
++      const lastVisibleIdx = chat_show.value.findLastIndex(
++        (m) => m?.role === 'user' || m?.role === 'assistant'
++      );
++      if (lastVisibleIdx < 0) {
++        reply(false, { reason: 'nothing_to_reask' });
++        return;
++      }
++      const lastVisible = chat_show.value[lastVisibleIdx];
++      if (lastVisible?.role !== 'assistant' || String(lastVisible?.id ?? '') !== String(targetId)) {
++        relayLog('[relay] reask rejected: target is not the last assistant message. target =', targetId, 'last =', lastVisible?.id, lastVisible?.role);
++        reply(false, { reason: 'not_last_message' });
++        return;
++      }
++      if (loading.value || isReasking) {
++        reply(false, { reason: 'busy' });
++        return;
++      }
 +      await reaskAI(targetId);
 +      reply(true);
 +      return;
 +    }
 +
 +    if (action === 'deleteMessage') {
-+      const idx = Number(cmd.index);
-+      if (!Number.isFinite(idx)) {
-+        reply(false, { reason: 'index_required' });
++      // 重要：**不能**直接用手机传来的 index。
++      // 手机那个 index 是从数据库读出来的（openConversation → loadUiMessages，
++      // 带分页 limit），而 deleteMessage(index) 用的是本窗口**内存里**的
++      // chat_show —— 两者长度/顺序可能不同，直接用会删错行。
++      // 所以优先用 messageId 在本窗口的 chat_show 里现查下标。
++      const wantId = cmd.messageId === undefined || cmd.messageId === null
++        ? ''
++        : String(cmd.messageId);
++      let idx = -1;
++      if (wantId) {
++        idx = chat_show.value.findIndex((m) => String(m?.id ?? '') === wantId);
++      }
++      if (idx < 0) {
++        // 回退：用手机给的下标，但要确认它落在本窗口范围内
++        const fallback = Number(cmd.index);
++        if (Number.isFinite(fallback) && fallback >= 0 && fallback < chat_show.value.length) {
++          idx = fallback;
++          relayWarn('[relay] deleteMessage: id not found, falling back to index', idx);
++        }
++      }
++      if (idx < 0) {
++        relayWarn('[relay] deleteMessage: message not found in this window. id =', wantId, 'index =', cmd.index);
++        reply(false, { reason: 'message_not_found' });
 +        return;
 +      }
 +      deleteMessage(idx);
-+      reply(true);
++      reply(true, { index: idx });
 +      return;
 +    }
 +
 +    if (action === 'runCompact') {
-+      // 手动压缩：等价于在电脑端压缩对话框点「压缩」
-+      if (loading.value || compacting?.value) {
-+        reply(false, { reason: 'busy' });
++      // 手动压缩一次。
++      //
++      // 注意：不能走 handleRunCompactWithConfig()，那个函数会先调
++      // handleSaveCompactConfig()，把 contextLength 标记成「手动设置」
++      // （contextLengthManual=true）—— 手机点一下就会改掉电脑端的配置，
++      // 属于意外副作用。所以这里直接调 runConversationCompact，
++      // 它自己会做所有前置判断并返回 true/false。
++      const ok = await runConversationCompact({ manual: true });
++      if (ok === false) {
++        reply(false, { reason: 'compact_unavailable' });
 +        return;
 +      }
 +      reply(true);
-+      try {
-+        await handleRunCompactWithConfig({});
-+      } catch (err) {
-+        relayWarn('[relay] runCompact failed:', err);
-+      }
 +      return;
 +    }
 +
@@ -2319,7 +2402,7 @@ index 6bb1113..57ff64b 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -769,6 +846,20 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -769,6 +893,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -2328,6 +2411,9 @@ index 6bb1113..57ff64b 100644
 +    if (data?.relayTo) {
 +      try {
 +        window.api?.sendRelayChat?.({
++          // role 必须是 'buffered'：默认值是 'assistant'，
++          // 那样这段 JSON 会被手机当成一条 AI 回复显示出来（乱码气泡）。
++          role: 'buffered',
 +          text: JSON.stringify({
 +            __relayBuffered: { text: getAppendPayloadPreview(data) || '', reason: 'generating' }
 +          }),
@@ -2340,7 +2426,7 @@ index 6bb1113..57ff64b 100644
      return;
    }
  
-@@ -5687,7 +5778,13 @@ onMounted(async () => {
+@@ -5687,7 +5828,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -2348,6 +2434,11 @@ index 6bb1113..57ff64b 100644
 +      if (!payload || typeof payload !== 'object') return;
 +      // 手机远程命令单独处理，不进 append / AI 流程
 +      if (payload.__relayCommand) {
++        // 窗口还没初始化完时 chat_show 是空的，直接执行会「找不到这条消息」。
++        // 等一小会儿再试，避免用户手速快时第一次点击失败。
++        if (!isWindowBootstrapped.value) {
++          await new Promise((r) => setTimeout(r, 600));
++        }
 +        await handleRelayCommand(payload.__relayCommand);
 +        return;
 +      }
@@ -2355,7 +2446,7 @@ index 6bb1113..57ff64b 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10453,137 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10508,137 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };

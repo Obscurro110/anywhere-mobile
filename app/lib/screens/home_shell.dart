@@ -13,8 +13,68 @@ import 'tasks_screen.dart';
 ///
 /// 设置、通知、定时任务都是**二级页面**（右侧图标/菜单进入），
 /// 不再用底部 Tab 把「对话」和「设置」并列 —— 那会让配置页显得和主功能同等地位。
-class HomeShell extends StatelessWidget {
+class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
+
+  @override
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> {
+  AppState? _state;
+  Map<String, dynamic>? _seenMessageAction;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final s = context.read<AppState>();
+    if (s != _state) {
+      _state?.removeListener(_onStateChanged);
+      _state = s;
+      s.addListener(_onStateChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    _state?.removeListener(_onStateChanged);
+    super.dispose();
+  }
+
+  /// 手机对某条消息的操作（重新回答 / 删除）如果失败，
+  /// 以前只是存进 AppState 没人显示 —— 表现就是「点了没反应」。
+  /// 这里统一弹出来，让失败原因可见。
+  void _onStateChanged() {
+    final s = _state;
+    if (s == null || !mounted) return;
+    final r = s.lastMessageAction;
+    if (r == null || identical(r, _seenMessageAction)) return;
+    _seenMessageAction = r;
+    if (r['ok'] == true) return;
+
+    final reason = r['reason']?.toString() ?? '';
+    const map = {
+      'conversation_not_open': '电脑端还没打开这个会话，请先在列表里点「在电脑端打开」',
+      'not_last_message': '只能重新回答最后一条消息',
+      'nothing_to_reask': '没有可以重新回答的消息',
+      'message_not_found': '电脑端找不到这条消息（可能已变动）',
+      'messageId_required': '缺少消息标识',
+      'index_required': '缺少消息位置',
+      'busy': '电脑端正忙，请稍后再试',
+      'target_not_found': '电脑端窗口已关闭',
+      'unknown_action': '电脑端不认识这个操作（可能版本较旧）',
+    };
+    final msg = map[reason] ?? (reason.isEmpty ? '操作失败' : '操作失败：$reason');
+    // notifyListeners 可能在 build/布局过程中被调用，
+    // 直接 showSnackBar 会报 "setState during build"，所以挪到下一帧。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        duration: const Duration(seconds: 4),
+      ));
+    });
+  }
 
   void _push(BuildContext context, Widget page) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));

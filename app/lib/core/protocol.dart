@@ -165,8 +165,6 @@ class ChatOptions {
   /// Enabled skill ids.
   final List<String>? skills;
 
-  /// Ask the desktop to compress the conversation before this turn.
-  final bool? compress;
 
   /// Which desktop 「快捷助手」(prompt config key) should host this conversation,
   /// e.g. `AI`. Changing it makes the desktop start a fresh conversation.
@@ -177,7 +175,6 @@ class ChatOptions {
     this.reasoningEffort,
     this.mcp,
     this.skills,
-    this.compress,
     this.promptKey,
   });
 
@@ -186,7 +183,6 @@ class ChatOptions {
       reasoningEffort == null &&
       (mcp == null || mcp!.isEmpty) &&
       (skills == null || skills!.isEmpty) &&
-      compress == null &&
       promptKey == null;
 
   Map<String, dynamic> toJson() => {
@@ -194,7 +190,6 @@ class ChatOptions {
         if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
         if (mcp != null) 'mcp': mcp,
         if (skills != null) 'skills': skills,
-        if (compress != null) 'compress': compress,
         if (promptKey != null) 'promptKey': promptKey,
       };
 
@@ -203,7 +198,6 @@ class ChatOptions {
         reasoningEffort: j['reasoningEffort'] as String?,
         mcp: (j['mcp'] as List?)?.map((e) => e.toString()).toList(),
         skills: (j['skills'] as List?)?.map((e) => e.toString()).toList(),
-        compress: j['compress'] as bool?,
         promptKey: j['promptKey'] as String?,
       );
 
@@ -212,7 +206,6 @@ class ChatOptions {
     String? reasoningEffort,
     List<String>? mcp,
     List<String>? skills,
-    bool? compress,
     String? promptKey,
     /// 置为 true 时把 promptKey 清空（`promptKey: null` 无法区分"不改"和"改成空"）
     bool clearPromptKey = false,
@@ -222,7 +215,6 @@ class ChatOptions {
         reasoningEffort: reasoningEffort ?? this.reasoningEffort,
         mcp: mcp ?? this.mcp,
         skills: skills ?? this.skills,
-        compress: compress ?? this.compress,
         promptKey: clearPromptKey ? null : (promptKey ?? this.promptKey),
       );
 }
