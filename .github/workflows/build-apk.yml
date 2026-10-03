@@ -101,12 +101,21 @@ jobs:
         run: |
           echo "--- key.properties ---"
           sed 's/=.*/=***/' android/key.properties
-          echo "--- signingConfig 指向 ---"
-          grep -n "signingConfig" android/app/build.gradle* || true
+          # 只看真正参与构建的文件（.template 是 Flutter 的模板，不参与）
+          GRADLE_FILE=""
+          for f in android/app/build.gradle.kts android/app/build.gradle; do
+            [ -f "$f" ] && GRADLE_FILE="$f" && break
+          done
+          echo "--- 构建文件: $GRADLE_FILE ---"
+          grep -n "signingConfig" "$GRADLE_FILE" || true
           if [ "${{ steps.signing.outputs.enabled }}" = "true" ]; then
-            if grep -q "signingConfigs.debug" android/app/build.gradle*; then
-              echo "::error::release 仍然指向 debug 签名，更新会失败"; exit 1
+            if grep -qE 'signingConfigs\.getByName\("debug"\)|signingConfigs\.debug|signingConfigs\["debug"\]' "$GRADLE_FILE"; then
+              echo "::error::$GRADLE_FILE 仍指向 debug 签名，更新会失败"; exit 1
             fi
+            if ! grep -q "signingConfigs" "$GRADLE_FILE"; then
+              echo "::error::$GRADLE_FILE 没有 signingConfigs 块"; exit 1
+            fi
+            echo "✅ release 签名配置正确"
           fi
 
       - name: Sync version into pubspec
