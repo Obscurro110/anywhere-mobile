@@ -143,48 +143,40 @@ MARKER = "// anywhere-mobile: force plugin compileSdk"
 
 GROOVY_SUBPROJECTS = """
 // anywhere-mobile: force plugin compileSdk
-subprojects {
-    afterEvaluate { project ->
-        if (project.hasProperty('android')) {
-            project.android {
-                compileSdkVersion {COMPILE_SDK}
-            }
-        }
+subprojects { sp ->
+    sp.plugins.withId('com.android.library') {
+        try { sp.android.compileSdkVersion {COMPILE_SDK} } catch (ignored) {}
+    }
+    sp.plugins.withId('com.android.application') {
+        try { sp.android.compileSdkVersion {COMPILE_SDK} } catch (ignored) {}
     }
 }
 """
 
-# Pure reflection -> no AGP classes needed on the kts script classpath.
+# Use plugins.withId (NOT afterEvaluate): Flutter's root build already calls
+# evaluationDependsOn, so afterEvaluate would throw "project already evaluated".
+# Reflection avoids needing AGP classes on the script classpath.
 KTS_SUBPROJECTS = """
 // anywhere-mobile: force plugin compileSdk
 subprojects {
-    afterEvaluate {
-        val androidExt = project.extensions.findByName("android")
+    val sp = this
+    val forceCompileSdk = {
+        val androidExt = sp.extensions.findByName("android")
         if (androidExt != null) {
-            try {
-                val m = androidExt.javaClass.methods.firstOrNull {
-                    it.name == "compileSdkVersion" && it.parameterTypes.size == 1
+            val method = androidExt.javaClass.methods.firstOrNull {
+                it.name == "compileSdkVersion" && it.parameterTypes.size == 1
+            }
+            if (method != null) {
+                if (method.parameterTypes[0] == Int::class.javaPrimitiveType) {
+                    method.invoke(androidExt, {COMPILE_SDK})
+                } else if (method.parameterTypes[0] == String::class.java) {
+                    method.invoke(androidExt, "android-{COMPILE_SDK}")
                 }
-                if (m != null) {
-                    when (m.parameterTypes[0]) {
-                        Int::class.javaPrimitiveType, java.lang.Integer::class.java ->
-                            m.invoke(androidExt, {COMPILE_SDK})
-                        String::class.java ->
-                            m.invoke(androidExt, "android-{COMPILE_SDK}")
-                        else -> {}
-                    }
-                } else {
-                    // newer AGP exposes a property setter
-                    val p = androidExt.javaClass.methods.firstOrNull {
-                        it.name == "setCompileSdk" && it.parameterTypes.size == 1
-                    }
-                    if (p != null) p.invoke(androidExt, {COMPILE_SDK})
-                }
-            } catch (e: Exception) {
-                // best-effort; ignore if the extension shape differs
             }
         }
     }
+    plugins.withId("com.android.library") { forceCompileSdk() }
+    plugins.withId("com.android.application") { forceCompileSdk() }
 }
 """
 
