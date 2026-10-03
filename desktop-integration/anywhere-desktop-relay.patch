@@ -75,10 +75,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..5bc5b03
+index 0000000..c05cf38
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,440 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -132,6 +132,7 @@ index 0000000..5bc5b03
 +import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 +import { join } from 'node:path'
 +import { RelayClient } from './relay-client.js'
++import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
 +
 +let relay = null
 +let ctx = null // { getWindowByRef, listWindows, dispatchWindowEvent, openWindow, dataApi }
@@ -190,7 +191,16 @@ index 0000000..5bc5b03
 +// 能力清单（模型 / MCP / Skill），供手机端渲染选择器
 +// ---------------------------------------------------------------------------
 +async function readCapabilities() {
-+  const result = { models: [], mcp: [], skills: [], promptKey: phonePromptKey, reasoningEffortOptions: [] }
++  const result = {
++    models: [],
++    mcp: [],
++    skills: [],
++    promptKey: phonePromptKey,
++    reasoningEffortOptions: [],
++    desktopVersion: RELAY_VERSION,
++    desktopVersionCode: RELAY_VERSION_CODE,
++    upstreamVersion: app.getVersion()
++  }
 +  try {
 +    if (!ctx?.dataApi?.getConfig) return result
 +    const res = await ctx.dataApi.getConfig()
@@ -365,7 +375,18 @@ index 0000000..5bc5b03
 +    ok: true,
 +    connected: !!relay?.connected,
 +    deviceId: relay?.deviceId || null,
-+    peers: relay?.peers || []
++    peers: relay?.peers || [],
++    version: RELAY_VERSION,
++    versionCode: RELAY_VERSION_CODE,
++    upstreamVersion: app.getVersion()
++  })))
++
++  ipcMain.handle('relay:version', guard(async () => ({
++    ok: true,
++    version: RELAY_VERSION,
++    versionCode: RELAY_VERSION_CODE,
++    upstreamVersion: app.getVersion(),
++    appVersion: app.getVersion()
 +  })))
 +
 +  ipcMain.handle('relay:getConfig', guard(async () => {
@@ -767,6 +788,21 @@ index 0000000..3593470
 +      .on('error', reject);
 +  });
 +}
+diff --git a/main/relay/version.js b/main/relay/version.js
+new file mode 100644
+index 0000000..41e518c
+--- /dev/null
++++ b/main/relay/version.js
+@@ -0,0 +1,9 @@
++/**
++ * [anywhere-mobile] 手机互通版本号
++ * ------------------------------------------------------------
++ * 这个文件由 CI 根据仓库根的 version.json 自动重写（见
++ * .github/workflows/build-desktop-relay.yml 的 "注入版本号" 步骤）。
++ * 本地构建时如果没重写，就用这里的值。
++ */
++export const RELAY_VERSION = '1.2.0';
++export const RELAY_VERSION_CODE = 2;
 diff --git a/package.json b/package.json
 index f3a088c..3378791 100644
 --- a/package.json
@@ -928,7 +964,7 @@ index 71669d3..b0084fd 100644
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
 diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
-index 2ad1391..c187f5f 100644
+index 2ad1391..79987d7 100644
 --- a/render/main/components/Setting.vue
 +++ b/render/main/components/Setting.vue
 @@ -94,7 +94,8 @@ const collapsedCards = ref({
@@ -941,7 +977,7 @@ index 2ad1391..c187f5f 100644
  });
  
  const cardDefinitions = {
-@@ -103,10 +104,70 @@ const cardDefinitions = {
+@@ -103,10 +104,73 @@ const cardDefinitions = {
    networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
    voice: { id: 'voice', titleKey: 'setting.voice.title' },
    data: { id: 'data', titleKey: 'setting.dataManagement.title' },
@@ -982,7 +1018,10 @@ index 2ad1391..c187f5f 100644
 +      relayStatus.value = {
 +        connected: !!res.connected,
 +        deviceId: res.deviceId || null,
-+        peers: res.peers || []
++        peers: res.peers || [],
++          version: res.version || '',
++          versionCode: res.versionCode || 0,
++          upstreamVersion: res.upstreamVersion || ''
 +      }
 +    }
 +  } catch (e) { /* ignore */ }
@@ -1013,7 +1052,7 @@ index 2ad1391..c187f5f 100644
  const shortcutRecorder = ref({
    target: '',
    index: -1,
-@@ -315,7 +376,8 @@ function initCardOrder() {
+@@ -315,7 +379,8 @@ function initCardOrder() {
        cardDefinitions.networkProxy,
        cardDefinitions.voice,
        cardDefinitions.data,
@@ -1023,7 +1062,7 @@ index 2ad1391..c187f5f 100644
      ];
    }
    
-@@ -335,7 +397,12 @@ const onOrderChange = async () => {
+@@ -335,7 +400,12 @@ const onOrderChange = async () => {
  
  function toggleCard(cardName) {
    collapsedCards.value[cardName] = !collapsedCards.value[cardName];
@@ -1037,7 +1076,7 @@ index 2ad1391..c187f5f 100644
    if (currentConfig.value) {
      const plainState = JSON.parse(JSON.stringify(collapsedCards.value));
      
-@@ -431,10 +498,15 @@ onMounted(() => {
+@@ -431,10 +501,15 @@ onMounted(() => {
      ensureNetworkProxyConfig();
      initCardOrder();
    }
@@ -1053,7 +1092,7 @@ index 2ad1391..c187f5f 100644
  })
  
  onDeactivated(() => {
-@@ -2310,6 +2382,76 @@ async function pullSelectedCloudSkillsToLocal() {
+@@ -2310,6 +2385,79 @@ async function pullSelectedCloudSkillsToLocal() {
                      </div>
                    </div>
  
@@ -1065,6 +1104,9 @@ index 2ad1391..c187f5f 100644
 +                        <span class="setting-option-description">
 +                          {{ relayStatus.connected ? '已连接中继' : '未连接' }}
 +                          <template v-if="relayStatus.deviceId">，本机 ID：{{ relayStatus.deviceId }}</template>
++                          <template v-if="relayStatus.version">
++                            ，互通版本 v{{ relayStatus.version }}<template v-if="relayStatus.upstreamVersion">（上游 {{ relayStatus.upstreamVersion }}）</template>
++                          </template>
 +                        </span>
 +                      </div>
 +                      <div style="display: flex; align-items: center; gap: 10px;">

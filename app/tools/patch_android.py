@@ -121,6 +121,33 @@ def patch_kts(path):
         log("no change needed (kts)")
 
 
+MANIFEST = os.path.join(APP_DIR, "src", "main", "AndroidManifest.xml")
+
+# App 内「检查更新 → 下载 → 安装」需要此权限才能在 Android 8+ 唤起安装器
+INSTALL_PERMISSION = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
+
+
+def patch_manifest():
+    """加 REQUEST_INSTALL_PACKAGES（自更新用）。幂等。"""
+    if not os.path.exists(MANIFEST):
+        log(f"WARN: manifest not found at {MANIFEST}; skip install permission")
+        return
+    with open(MANIFEST, "r", encoding="utf-8") as f:
+        src = f.read()
+    if "REQUEST_INSTALL_PACKAGES" in src:
+        log("manifest already has REQUEST_INSTALL_PACKAGES; skipping")
+        return
+    m = re.search(r"<manifest[^>]*>\s*", src)
+    if not m:
+        log("WARN: <manifest> tag not found; skip install permission")
+        return
+    insert_at = m.end()
+    src = src[:insert_at] + f"    {INSTALL_PERMISSION}\n" + src[insert_at:]
+    with open(MANIFEST, "w", encoding="utf-8") as f:
+        f.write(src)
+    log("added REQUEST_INSTALL_PACKAGES to AndroidManifest.xml")
+
+
 def main():
     if os.path.exists(KTS):
         log("found Kotlin DSL build.gradle.kts")
@@ -136,6 +163,9 @@ def main():
     # Otherwise plugins (e.g. file_picker) compile against the Flutter default
     # (android-34) and fail AAR metadata checks against newer deps.
     patch_root_build()
+
+    # App 内自更新：允许安装 APK
+    patch_manifest()
     log("done")
 
 

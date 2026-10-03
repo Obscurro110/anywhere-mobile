@@ -1,0 +1,216 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:open_filex/open_filex.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
+
+/// 当前安装的 App 版本。
+class AppVersion {
+  final String versionName;
+  final int versionCode;
+  const AppVersion({required this.versionName, required this.versionCode});
+
+  String get display => 'v$versionName ($versionCode)';
+
+  static const unknown = AppVersion(versionName: '?', versionCode: 0);
+
+  static Future<AppVersion> current() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      return AppVersion(
+        versionName: info.version.isEmpty ? '?' : info.version,
+        versionCode: int.tryParse(info.buildNumber) ?? 0,
+      );
+    } catch (e) {
+      debugPrint('[UpdateService] read version failed: $e');
+      return unknown;
+    }
+  }
+}
+
+/// 远端发布信息（由 CI 生成并挂在 Release apk-latest 上）。
+class ReleaseInfo {
+  final String versionName;
+  final int versionCode;
+  final String notes;
+  final String url;
+  final String sha256;
+  final int size;
+  final String builtAt;
+
+  ReleaseInfo({
+    required this.versionName,
+    required this.versionCode,
+    this.notes = '',
+    required this.url,
+    this.sha256 = '',
+    this.size = 0,
+    this.builtAt = '',
+  });
+
+  factory ReleaseInfo.fromJson(Map<String, dynamic> j) => ReleaseInfo(
+        versionName: j['versionName'] as String? ?? '',
+        versionCode: (j['versionCode'] as num?)?.toInt() ?? 0,
+        notes: j['notes'] as String? ?? '',
+        url: j['url'] as String? ?? '',
+        sha256: j['sha256'] as String? ?? '',
+        size: (j['size'] as num?)?.toInt() ?? 0,
+        builtAt: j['builtAt'] as String? ?? '',
+      );
+
+  String get humanSize {
+    if (size <= 0) return '';
+    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(0)} KB';
+    return '${(size / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+}
+
+/// 检查 / 下载 / 安装更新。
+///
+/// 版本号来源：仓库根 `version.json` -> CI 构建 ->
+/// 发布到 Release `apk-latest` 的 `version.json` 资产。
+class UpdateService {
+  UpdateService({
+    this.owner = 'Obscurro110',
+    this.repo = 'anywhere-mobile',
+    this.releaseTag = 'apk-latest',
+  });
+
+  final String owner;
+  final String repo;
+  final String releaseTag;
+
+  /// 直链（release 资产）
+  String get _versionJsonUrl =>
+      'https://github.com/$owner/$repo/releases/download/$releaseTag/version.json';
+
+  /// API 兜底
+  String get _apiUrl =>
+      'https://api.github.com/repos/$owner/$repo/releases/tags/$releaseTag';
+
+  static const _timeout = Duration(seconds: 20);
+
+  /// 拉取远端最新版本信息。失败抛异常。
+  Future<ReleaseInfo> fetchLatest() async {
+    // 1) 先试直链（最快）
+    try {
+      final resp = await http.get(Uri.parse(_versionJsonUrl)).timeout(_timeout);
+      if (resp.statusCode == 200) {
+        final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+        final info = ReleaseInfo.fromJson(j);
+        if (info.versionName.isNotEmpty) return info;
+      }
+    } catch (e) {
+      debugPrint('[UpdateService] direct version.json failed: $e');
+    }
+
+    // 2) 兜底：GitHub API 从 Release body/资产里找
+    final resp = await http
+        .get(Uri.parse(_apiUrl), headers: {'Accept': 'application/vnd.github+json'})
+        .timeout(_timeout);
+    if (resp.statusCode != 200) {
+      throw Exception('无法获取版本信息（HTTP ${resp.statusCode}）');
+    }
+    final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+    final tag = (j['tag_name'] as String?) ?? '';
+    final assets = (j['assets'] as List?) ?? [];
+    String url = '';
+    int size = 0;
+    for (final a in assets) {
+      final m = (a as Map).cast<String, dynamic>();
+      if ((m['name'] as String? ?? '').startsWith('anywhere-mobile') &&
+          (m['name'] as String? ?? '').endsWith('.apk')) {
+        url = m['browser_download_url'] as String? ?? '';
+        size = (m['size'] as num?)?.toInt() ?? 0;
+        break;
+      }
+    }
+    // 版本号从 tag 或 name 里粗解析
+    final name = (j['name'] as String?) ?? tag;
+    final match = RegExp(r'v?(\d+\.\d+\.\d+)').firstMatch(name);
+    return ReleaseInfo(
+      versionName: match?.group(1) ?? tag,
+      versionCode: 0, // 未知 -> 用版本名比较
+      url: url,
+      size: size,
+    );
+  }
+
+  /// 是否有新版本。
+  static bool isNewer(ReleaseInfo remote, AppVersion current) {
+    if (remote.versionCode > 0 && current.versionCode > 0) {
+      if (remote.versionCode != current.versionCode) {
+        return remote.versionCode > current.versionCode;
+      }
+    }
+    return compareSemver(remote.versionName, current.versionName) > 0;
+  }
+
+  /// 语义化版本比较：a > b 返回 1，相等 0，小于 -1。
+  static int compareSemver(String a, String b) {
+    List<int> parse(String s) {
+      final core = s.split('+').first;
+      final parts = core.split('.');
+      return List.generate(3, (i) {
+        if (i >= parts.length) return 0;
+        return int.tryParse(RegExp(r'\d+').stringMatch(parts[i]) ?? '') ?? 0;
+      });
+    }
+
+    final x = parse(a);
+    final y = parse(b);
+    for (var i = 0; i < 3; i++) {
+      if (x[i] != y[i]) return x[i] > y[i] ? 1 : -1;
+    }
+    return 0;
+  }
+
+  /// 下载 APK 到应用私有目录，返回文件路径。
+  Future<File> download(ReleaseInfo info, {void Function(double)? onProgress}) async {
+    if (info.url.isEmpty) throw Exception('下载地址为空');
+    final dir = await getApplicationSupportDirectory();
+    final apkDir = Directory('${dir.path}/updates');
+    if (!await apkDir.exists()) await apkDir.create(recursive: true);
+    final path = '${apkDir.path}/anywhere-mobile-${info.versionName}.apk';
+    final file = File(path);
+
+    final req = http.Request('GET', Uri.parse(info.url));
+    req.headers['Accept'] = 'application/octet-stream';
+    final streamed = await req.send().timeout(_timeout);
+    if (streamed.statusCode != 200) {
+      throw Exception('下载失败（HTTP ${streamed.statusCode}）');
+    }
+    final total = streamed.contentLength ?? info.size;
+    var received = 0;
+    final sink = file.openWrite();
+    try {
+      await for (final chunk in streamed.stream) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0 && onProgress != null) {
+          onProgress(received / total);
+        }
+      }
+    } finally {
+      await sink.close();
+    }
+    return file;
+  }
+
+  /// 唤起系统安装器。
+  Future<void> install(File apk) async {
+    final res = await OpenFilex.open(
+      apk.path,
+      type: 'application/vnd.android.package-archive',
+    );
+    if (res.type != ResultType.done) {
+      throw Exception(
+        '无法唤起安装器（${res.message}）。请到「系统设置 → 允许本应用安装未知应用」后重试，'
+        '或手动打开：${apk.path}',
+      );
+    }
+  }
+}

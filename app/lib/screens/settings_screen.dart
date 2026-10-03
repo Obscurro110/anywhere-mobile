@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 
 import '../core/app_config.dart';
 import '../services/app_state.dart';
+import '../services/update_service.dart';
+import '../widgets/update_card.dart';
 import 'devices_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -113,6 +115,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           icon: const Icon(Icons.save),
           label: const Text('保存并重连'),
         ),
+        const Divider(height: 40),
+
+        // ---------- 关于 / 更新 ----------
+        const Text('关于', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+        const SizedBox(height: 8),
+        const UpdateCard(),
         const Divider(height: 40),
 
         // ---------- 数据 ----------

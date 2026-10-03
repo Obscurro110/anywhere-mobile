@@ -1,12 +1,17 @@
 # ------------------------------------------------------------------
 # 构建 Android APK，并自动发布到 GitHub Releases
 #
-# 触发：推送到 main 且改动 app/、打 tag（v*）、或手动运行
+# 触发：推送到 main 且改动 app/** 或 version.json、打 tag（v*）、或手动运行
+#
+# 版本号来源：仓库根 version.json  (versionName / versionCode)
 #
 # 产物：
 #   - Actions Artifact：anywhere-mobile-apk
 #   - GitHub Releases：
-#       * main 分支  -> 滚动更新 Release（tag: apk-latest），始终是最新 APK
+#       * main 分支  -> 滚动更新 Release（tag: apk-latest）
+#           - anywhere-mobile.apk          (固定名，始终最新)
+#           - anywhere-mobile-<ver>.apk    (带版本号，可固定引用)
+#           - version.json                 (App 内"检查更新"读取它)
 #       * v* 标签    -> 正式 Release（tag 用标签名）
 # ------------------------------------------------------------------
 name: Build Android APK
@@ -17,6 +22,7 @@ on:
     tags: ["v*"]
     paths:
       - "app/**"
+      - "version.json"
       - ".github/workflows/build-apk.yml"
   workflow_dispatch:
 
@@ -29,6 +35,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          VN=$(node -p "require('./version.json').versionName")
+          VC=$(node -p "require('./version.json').versionCode")
+          NOTES=$(node -p "require('./version.json').notes || ''")
+          echo "name=$VN"   >> "$GITHUB_OUTPUT"
+          echo "code=$VC"   >> "$GITHUB_OUTPUT"
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES"     >> "$GITHUB_OUTPUT"
+          echo "EOF"        >> "$GITHUB_OUTPUT"
+          echo "版本: $VN ($VC)"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -52,6 +71,21 @@ jobs:
         working-directory: app
         run: python3 tools/patch_android.py
 
+      - name: Sync version into pubspec
+        working-directory: app
+        run: |
+          # 让 pubspec 与 version.json 保持一致（App 内通过 package_info 读取）
+          python3 - "${{ steps.ver.outputs.name }}" "${{ steps.ver.outputs.code }}" <<'PY'
+          import re, sys, pathlib
+          name, code = sys.argv[1], sys.argv[2]
+          p = pathlib.Path('pubspec.yaml')
+          s = p.read_text(encoding='utf-8')
+          s = re.sub(r'^version:.*$', f'version: {name}+{code}', s, flags=re.M)
+          p.write_text(s, encoding='utf-8')
+          print('pubspec version ->', name + '+' + code)
+          PY
+          grep '^version:' pubspec.yaml
+
       - name: Install dependencies
         working-directory: app
         run: flutter pub get
@@ -62,20 +96,51 @@ jobs:
 
       - name: Build release APK
         working-directory: app
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release \
+            --build-name="${{ steps.ver.outputs.name }}" \
+            --build-number="${{ steps.ver.outputs.code }}"
 
-      - name: Rename APK
+      - name: Rename APK + write version.json
         working-directory: app
+        env:
+          VN: ${{ steps.ver.outputs.name }}
+          VC: ${{ steps.ver.outputs.code }}
+          NOTES: ${{ steps.ver.outputs.notes }}
         run: |
           mkdir -p out
           cp build/app/outputs/flutter-apk/app-release.apk out/anywhere-mobile.apk
+          cp build/app/outputs/flutter-apk/app-release.apk "out/anywhere-mobile-${VN}.apk"
+
+          SHA=$(sha256sum out/anywhere-mobile.apk | cut -d' ' -f1)
+          SIZE=$(stat -c%s out/anywhere-mobile.apk)
+          REPO="${{ github.repository }}"
+          URL="https://github.com/${REPO}/releases/download/apk-latest/anywhere-mobile.apk"
+
+          VN="$VN" VC="$VC" NOTES="$NOTES" SHA="$SHA" SIZE="$SIZE" URL="$URL" \
+          node -e '
+            const fs = require("fs");
+            const out = {
+              platform: "android",
+              versionName: process.env.VN,
+              versionCode: Number(process.env.VC),
+              notes: process.env.NOTES || "",
+              url: process.env.URL,
+              sha256: process.env.SHA,
+              size: Number(process.env.SIZE),
+              builtAt: new Date().toISOString(),
+              commit: process.env.GITHUB_SHA || ""
+            };
+            fs.writeFileSync("out/version.json", JSON.stringify(out, null, 2));
+            console.log(JSON.stringify(out, null, 2));
+          '
           ls -lh out/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: anywhere-mobile-apk
-          path: app/out/anywhere-mobile.apk
+          path: app/out/anywhere-mobile*.apk
           if-no-files-found: error
 
       # ---- 发布到 Releases：main 分支 -> 滚动更新（apk-latest）----
@@ -84,16 +149,21 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-latest
-          name: "Anywhere Mobile — latest APK"
+          name: "Anywhere Mobile v${{ steps.ver.outputs.name }} (latest APK)"
           body: |
-            🤖 由 GitHub Actions 自动构建
+            ## Anywhere Mobile v${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})
 
-            提交: ${{ github.sha }}
-            分支: ${{ github.ref_name }}
+            ${{ steps.ver.outputs.notes }}
+
+            ---
+            下载 `anywhere-mobile.apk` 安装即可（App 内「设置 → 检查更新」也会提示）。
+
+            提交: `${{ github.sha }}`
             时间: ${{ github.event.head_commit.timestamp }}
-
-            下载 `anywhere-mobile.apk` 安装即可。
-          files: app/out/anywhere-mobile.apk
+          files: |
+            app/out/anywhere-mobile.apk
+            app/out/anywhere-mobile-${{ steps.ver.outputs.name }}.apk
+            app/out/version.json
           make_latest: true
           draft: false
           prerelease: false
@@ -105,6 +175,11 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          files: app/out/anywhere-mobile.apk
+          body: |
+            ${{ steps.ver.outputs.notes }}
+          files: |
+            app/out/anywhere-mobile.apk
+            app/out/anywhere-mobile-${{ steps.ver.outputs.name }}.apk
+            app/out/version.json
           draft: false
           prerelease: false

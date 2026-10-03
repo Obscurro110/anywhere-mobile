@@ -12,6 +12,7 @@ on:
   push:
     paths:
       - 'desktop-integration/**'
+      - 'version.json'
       - '.github/workflows/build-desktop-relay.yml'
 
 permissions:
@@ -23,10 +24,19 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: 检出本仓库（拿补丁与文档）
+      - name: 检出本仓库（拿补丁、版本与文档）
         uses: actions/checkout@v4
         with:
           path: ours
+
+      - name: 读取版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $j = Get-Content "ours/version.json" -Raw | ConvertFrom-Json
+          "name=$($j.versionName)" >> $env:GITHUB_OUTPUT
+          "code=$($j.versionCode)" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $($j.versionName) ($($j.versionCode))"
 
       - name: 关闭 CRLF 自动转换
         shell: pwsh
@@ -67,6 +77,21 @@ jobs:
             }
           }
           Write-Host "==> 补丁应用完成"
+
+      - name: 注入版本号到 main/relay/version.js
+        shell: pwsh
+        run: |
+          $dest = "upstream/main/relay/version.js"
+          if (-not (Test-Path $dest)) { throw "找不到 $dest（补丁可能未包含 version.js）" }
+          @(
+            "/**",
+            " * [anywhere-mobile] 手机互通版本号（由 CI 自动注入，勿手改）",
+            " */",
+            "export const RELAY_VERSION = '${{ steps.ver.outputs.name }}';",
+            "export const RELAY_VERSION_CODE = ${{ steps.ver.outputs.code }};",
+            ""
+          ) | Set-Content $dest -Encoding UTF8
+          Get-Content $dest
 
       - name: 校验关键文件存在
         shell: pwsh
@@ -124,7 +149,8 @@ jobs:
           }
           @(
             "Anywhere Desktop (Relay) 绿色版",
-            "======================",
+            "================================",
+            "版本号: ${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})",
             "上游提交: $env:UPSTREAM_SHA",
             "构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC",
             "",
@@ -132,6 +158,18 @@ jobs:
             "首次运行请在 [设置 -> 手机互通] 里填写中继服务器地址 / Token / 用户ID。",
             "注意：Token 两端（手机与电脑）必须一致。"
           ) | Set-Content "$dest/版本信息.txt" -Encoding UTF8
+
+          $sha = (Get-FileHash "upstream/dist-out/win-unpacked/anywhere-desktop-relay.exe" -Algorithm SHA256).Hash
+          @{
+            platform    = "windows"
+            versionName = "${{ steps.ver.outputs.name }}"
+            versionCode = [int]"${{ steps.ver.outputs.code }}"
+            upstreamSha = $env:UPSTREAM_SHA
+            sha256      = $sha.ToLower()
+            builtAt     = (Get-Date -Format 'o')
+            commit      = "${{ github.sha }}"
+          } | ConvertTo-Json -Depth 4 | Set-Content "$dest/version.json" -Encoding UTF8
+          Write-Host "已写入 version.json: ${{ steps.ver.outputs.name }}"
 
       - name: 压缩为 zip
         shell: pwsh
@@ -145,9 +183,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: desktop-latest
-          name: 'Desktop (Relay) · latest'
+          name: 'Desktop (Relay) v${{ steps.ver.outputs.name }} · latest'
           body: |
-            ## Anywhere Desktop (Relay) 绿色版
+            ## Anywhere Desktop (Relay) 绿色版 v${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})
 
             - 上游提交：`${{ env.UPSTREAM_SHA }}`
             - 产物：`anywhere-desktop-relay-win-x64.zip`（Windows x64，免安装）
@@ -157,7 +195,8 @@ jobs:
             2. 双击 `anywhere-desktop-relay.exe`
             3. 「设置 → 手机互通」填写：中继服务器地址 / Token / 用户 ID（需与手机端一致）
 
-            > 详见包内 `使用说明.md`
+            > 包内 `版本信息.txt` 含版本号；`使用说明.md` 为完整文档。
+            > 手机端「设置 → 关于」可看到电脑端版本号。
           prerelease: true
           files: anywhere-desktop-relay-win-x64.zip
           fail_on_unmatched_files: true

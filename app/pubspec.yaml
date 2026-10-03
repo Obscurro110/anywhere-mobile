@@ -33,6 +33,9 @@ dependencies:
   path_provider: ^2.1.4
   open_filex: ^4.5.0
 
+  # app version + in-app update
+  package_info_plus: ^8.1.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

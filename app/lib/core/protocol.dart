@@ -281,6 +281,11 @@ class Capabilities {
   final ChatOptions current;
   final int fetchedAt;
 
+  /// 电脑端「手机互通」版本号
+  final String desktopVersion;
+  final int desktopVersionCode;
+  final String upstreamVersion;
+
   Capabilities({
     this.models = const [],
     this.mcp = const [],
@@ -295,6 +300,9 @@ class Capabilities {
       'max',
     ],
     this.current = const ChatOptions(),
+    this.desktopVersion = '',
+    this.desktopVersionCode = 0,
+    this.upstreamVersion = '',
     int? fetchedAt,
   }) : fetchedAt = fetchedAt ?? DateTime.now().millisecondsSinceEpoch;
 
@@ -320,5 +328,8 @@ class Capabilities {
         current: j['current'] is Map
             ? ChatOptions.fromJson((j['current'] as Map).cast<String, dynamic>())
             : const ChatOptions(),
+        desktopVersion: j['desktopVersion'] as String? ?? '',
+        desktopVersionCode: (j['desktopVersionCode'] as num?)?.toInt() ?? 0,
+        upstreamVersion: j['upstreamVersion'] as String? ?? '',
       );
 }
