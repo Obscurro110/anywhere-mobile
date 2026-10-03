@@ -1,0 +1,6 @@
+node_modules
+data
+.env
+.env.*
+*.log
+test-e2e.mjs

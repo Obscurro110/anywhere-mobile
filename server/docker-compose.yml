@@ -1,0 +1,37 @@
+# ------------------------------------------------------------------
+# Anywhere Relay Server — Docker Compose
+# 适用于 1Panel / 群晖 / 任意 Docker 环境
+#
+# 用法（在 server 目录下）：
+#   docker compose up -d --build
+#
+# 修改配置：复制 env.example 为 .env 并编辑，compose 会自动读取。
+# ------------------------------------------------------------------
+services:
+  anywhere-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anywhere-relay:1.0.0
+    container_name: anywhere-relay
+    restart: unless-stopped
+    ports:
+      # 左边是宿主机端口，可在 1Panel 里改；右边固定 8787
+      - "${PORT:-8787}:8787"
+    environment:
+      - PORT=8787
+      - HOST=0.0.0.0
+      - FILE_DIR=/app/data/files
+      # === 必改：鉴权令牌（格式 userId:token，可逗号分隔多组）===
+      - AUTH_TOKENS=${AUTH_TOKENS:-default-user:CHANGE_ME_TOKEN}
+      - FILE_TTL_HOURS=${FILE_TTL_HOURS:-72}
+      - MAX_FILE_MB=${MAX_FILE_MB:-512}
+    volumes:
+      # 中转文件持久化，避免容器重建丢失
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

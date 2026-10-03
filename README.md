@@ -47,6 +47,19 @@ anywhere-mobile/
 
 ### 1. 启动中继服务器
 
+#### 方式 A：Docker / 1Panel（推荐用于服务器部署）
+
+```bash
+cd server
+cp env.docker.example .env   # 修改 AUTH_TOKENS
+docker compose up -d --build
+# 验证: http://<服务器IP>:8787/health
+```
+
+> **1Panel 用户**：见详细图文步骤 [`docs/DEPLOY_DOCKER_1PANEL.md`](docs/DEPLOY_DOCKER_1PANEL.md)（含反向代理启用 `wss://` 的配置）。
+
+#### 方式 B：直接 Node 运行（本地调试）
+
 ```bash
 cd server
 cp env.example .env          # 修改 AUTH_TOKENS 等
