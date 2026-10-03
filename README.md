@@ -141,6 +141,10 @@ relay.sendNotification('任务完成', '今日日报已生成');
 
 完整接入示例见 [`relay-bridge/integration-example.js`](relay-bridge/integration-example.js)。
 
+> 📘 **针对 Anywhere Desktop 的真实项目接入**（含 `main/index.js` 精确改动、渲染进程接入、定时任务推送）：
+> 见 **[`desktop-integration/README.md`](desktop-integration/README.md)**。
+> 它直接使用了桌面项目已有的 `dispatchWindowEvent`、`window.api.onWindowEvent` 与 IPC 约定。
+
 ## 测试
 
 ```bash
