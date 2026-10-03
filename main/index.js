@@ -734,7 +734,8 @@ app.whenReady().then(async () => {
   await openWindow('main')
 
   // [anywhere-mobile] 启动与手机 App 的中继连接
-  startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })
+  // openWindow + dataApi 让「手机消息 → 聊天窗口 → AI」这条链路可用
+  startRelay({ getWindowByRef, listWindows, dispatchWindowEvent, openWindow, dataApi })
 
   setTimeout(() => {
     preheatScreenshotWindow()

@@ -1,13 +1,12 @@
-node_modules
-dist
-out
-.DS_Store
-.eslintcache
-*.log*
-result.txt
+﻿# 构建产物
+dist/
+dist-out/
+dist-out2/
+out/
+node_modules/
 
-进度.md
-.claude/*
-.agents/*
-CLAUDE.md
-AGENTS.md
+# 本机私有文件（可能含 token / 域名）
+手机互通接入说明.md
+relay.json
+.env
+*.local

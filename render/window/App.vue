@@ -10356,6 +10356,96 @@ const scrollToMessageByIndex = async (index) => {
   }
   return didResolveTarget;
 };
+
+// ============================================================================
+// [anywhere-mobile] 手机互通桥
+// 手机 → 中继 → 主进程 → 本窗口(追加消息 + 自动跑 AI) → 回复回传手机
+// ============================================================================
+const relayReplyTarget = ref(null);
+let relayLastSentAssistantId = null;
+
+/** 从消息对象里抽取纯文本 */
+const relayMessageText = (m) => {
+  if (!m) return '';
+  if (typeof m.content === 'string') return m.content;
+  if (Array.isArray(m.content)) {
+    return m.content
+      .filter((p) => p && p.type === 'text')
+      .map((p) => p.text || '')
+      .join('');
+  }
+  return '';
+};
+
+/** 收到手机消息时，记下"本轮回复要回传给谁" */
+const armRelayReply = (relayTo) => {
+  if (!relayTo) return;
+  relayReplyTarget.value = String(relayTo);
+  relayLastSentAssistantId = null;
+};
+
+// 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
+window.api?.onWindowInit?.((data) => {
+  armRelayReply(data?.relayTo);
+});
+
+// 窗口事件里带 relayTo（窗口已存在、后续消息）
+window.api?.onWindowEvent?.((env) => {
+  const p = env?.payload;
+  if (p && typeof p === 'object') {
+    armRelayReply(p.relayTo || p.__relayTo);
+  }
+  // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
+  const opts = p?.__relayOptions;
+  if (opts && typeof opts === 'object') {
+    try {
+      if (typeof opts.model === 'string' && opts.model && opts.model !== model.value) {
+        handleChangeModel(opts.model);
+      }
+      if (typeof opts.reasoningEffort === 'string' && opts.reasoningEffort) {
+        tempReasoningEffort.value = opts.reasoningEffort;
+      }
+      if (Array.isArray(opts.mcp)) {
+        sessionMcpServerIds.value = [...opts.mcp];
+        tempSessionMcpServerIds.value = [...opts.mcp];
+      }
+      if (Array.isArray(opts.skills)) {
+        applyNormalizedSkillSelection(opts.skills);
+      }
+    } catch (err) {
+      console.warn('[relay] apply options failed:', err);
+    }
+  }
+});
+
+// 助手回复完成 → 回传手机
+watch(
+  () =>
+    chat_show.value
+      .map((m) =>
+        m?.role === 'assistant'
+          ? `${m.id}:${m.isPreparing ? 1 : 0}:${m.status || ''}:${relayMessageText(m).length}`
+          : ''
+      )
+      .join('|'),
+  async () => {
+    const to = relayReplyTarget.value;
+    if (!to) return;
+    const last = chat_show.value[chat_show.value.length - 1];
+    if (!last || last.role !== 'assistant') return;
+    if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') return;
+    if (last.id === relayLastSentAssistantId) return;
+    const text = relayMessageText(last).trim();
+    if (!text) return;
+    relayLastSentAssistantId = last.id;
+    try {
+      await window.api.sendRelayChat({ text, to });
+      relayReplyTarget.value = null;
+    } catch (err) {
+      console.warn('[relay] reply send failed:', err);
+    }
+  }
+);
 </script>
 
 <template>

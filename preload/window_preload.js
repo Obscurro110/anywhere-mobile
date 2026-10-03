@@ -234,6 +234,13 @@ const api = {
   hideMainWindow: () => electronAPI.ipcRenderer.invoke('window:hideMain'),
   listWindows: (type = '') => electronAPI.ipcRenderer.invoke('window:list', type),
   emitWindowEvent: (input) => electronAPI.ipcRenderer.invoke('window:event:emit', input),
+
+  // ===== [anywhere-mobile] 手机互通中继 =====
+  sendRelayChat: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendChat', payload),
+  sendRelayNotification: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendNotification', payload),
+  getRelayStatus: () => electronAPI.ipcRenderer.invoke('relay:status'),
+  getRelayCapabilities: () => electronAPI.ipcRenderer.invoke('relay:capabilities'),
+
   onWindowEvent: (callback) => {
     if (typeof callback !== 'function') return
     electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
