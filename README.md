@@ -144,6 +144,9 @@ relay.sendNotification('任务完成', '今日日报已生成');
 > 📘 **针对 Anywhere Desktop 的真实项目接入**（含 `main/index.js` 精确改动、渲染进程接入、定时任务推送）：
 > 见 **[`desktop-integration/README.md`](desktop-integration/README.md)**。
 > 它直接使用了桌面项目已有的 `dispatchWindowEvent`、`window.api.onWindowEvent` 与 IPC 约定。
+>
+> 🏗️ **从源码构建带互通的自建版**（推荐，不受官方更新覆盖）：见
+> **[`desktop-integration/BUILD_CUSTOM.md`](desktop-integration/BUILD_CUSTOM.md)**。
 
 ## 测试
 

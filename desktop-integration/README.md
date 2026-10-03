@@ -2,6 +2,10 @@
 
 把 **Anywhere Desktop** 接入中继服务器，实现与手机的双向互通（对话 / 文件 / 通知）。
 
+> 🏗️ **官方安装版更新会覆盖代码**（`resources/app.asar`）。推荐**从源码构建自己的版本**：
+> 见 **[`BUILD_CUSTOM.md`](BUILD_CUSTOM.md)**（含 `pnpm build` + `electron-builder` 打包、以及 `electronDist` 免下载技巧）。
+> 本文档（README）讲的是**改动本身**，两种方式都适用。
+
 ```
 手机 App ──┐                        ┌── main/relay/  (本次接入的桥)
            ├── 公网中继 (wss://) ───┤
@@ -76,8 +80,8 @@ app.whenReady().then(async () => {
 
 ```json
 {
-  "serverUrl": "wss://anywhereapi.example.com/ws",
-  "token": "***REDACTED-TOKEN***",
+  "serverUrl": "wss://relay.example.com/ws",
+  "token": "你的中继令牌",
   "userId": "default-user",
   "deviceName": "My PC"
 }
@@ -88,7 +92,7 @@ Windows 的 userData 路径一般是：
 
 ### 方式 B：环境变量（开发调试方便）
 ```powershell
-$env:ANYWHERE_RELAY_URL="wss://anywhereapi.example.com/ws"
+$env:ANYWHERE_RELAY_URL="wss://relay.example.com/ws"
 $env:ANYWHERE_RELAY_TOKEN="你的令牌"
 $env:ANYWHERE_RELAY_USER_ID="default-user"
 $env:ANYWHERE_RELAY_DEVICE_NAME="My PC"
@@ -100,7 +104,7 @@ pnpm dev
 
 ```js
 await window.electron.ipcRenderer.invoke('relay:setConfig', {
-  serverUrl: 'wss://anywhereapi.example.com/ws',
+  serverUrl: 'wss://relay.example.com/ws',
   token: '你的令牌',
   userId: 'default-user',
   deviceName: 'My PC'
@@ -190,7 +194,7 @@ await window.electron.ipcRenderer.invoke('relay:sendNotification', {
 手机 App
   │  chat / file_share / notification
   ▼
-公网中继 (wss://anywhereapi.example.com/ws)
+公网中继 (wss://relay.example.com/ws)
   │
   ▼
 main/relay (RelayClient)

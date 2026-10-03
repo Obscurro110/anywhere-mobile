@@ -116,25 +116,25 @@ function registerIpc() {
     // reconnect with new config
     startRelay(ctx, cfg, { force: true })
     return { ok: true, config: { ...cfg, token: '***' } }
-  })))
+  }))
 
   ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
     if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
     const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
     return { ok: true, delivered }
-  })))
+  }))
 
   ipcMain.handle('relay:sendNotification', guard(async (_e, { title, body, to } = {}) => {
     if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
     const delivered = relay.sendNotification(title, body, { to: to || '*' })
     return { ok: true, delivered }
-  })))
+  }))
 
   ipcMain.handle('relay:sendFile', guard(async (_e, { path: filePath, to } = {}) => {
     if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
     const file = await relay.sendFile(filePath, { to: to || '*' })
     return { ok: true, file }
-  })))
+  }))
 }
 
 /**
