@@ -20,15 +20,45 @@ KTS = os.path.join(APP_DIR, "build.gradle.kts")
 DESUGAR_DEP_GROOVY = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
 DESUGAR_DEP_KTS = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
 
+# Plugins (flutter_plugin_android_lifecycle via file_picker, etc.) require
+# compiling against a recent Android API level.
+TARGET_COMPILE_SDK = os.environ.get("ANDROID_COMPILE_SDK", "36")
+
 
 def log(msg):
     print(f"[patch_android] {msg}")
+
+
+def set_compile_sdk(src, kts):
+    """Force compileSdk to TARGET_COMPILE_SDK (handles several template styles)."""
+    if kts:
+        # compileSdk = flutter.compileSdkVersion  ->  compileSdk = 36
+        src, n1 = re.subn(r"compileSdk\s*=\s*flutter\.compileSdkVersion",
+                          f"compileSdk = {TARGET_COMPILE_SDK}", src)
+        # compileSdk = 34  ->  compileSdk = 36
+        src, n2 = re.subn(r"compileSdk\s*=\s*\d+",
+                          f"compileSdk = {TARGET_COMPILE_SDK}", src)
+    else:
+        # compileSdkVersion flutter.compileSdkVersion  ->  compileSdkVersion 36
+        src, n1 = re.subn(r"compileSdkVersion\s+flutter\.compileSdkVersion",
+                          f"compileSdkVersion {TARGET_COMPILE_SDK}", src)
+        src, n2 = re.subn(r"compileSdkVersion\s+\d+",
+                          f"compileSdkVersion {TARGET_COMPILE_SDK}", src)
+        # compileSdk flutter.compileSdkVersion (newer groovy style)
+        src, n1b = re.subn(r"compileSdk\s+flutter\.compileSdkVersion",
+                           f"compileSdk {TARGET_COMPILE_SDK}", src)
+        src, n2b = re.subn(r"compileSdk\s+\d+",
+                           f"compileSdk {TARGET_COMPILE_SDK}", src)
+    return src
 
 
 def patch_groovy(path):
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
     original = src
+
+    # 0) force compileSdk
+    src = set_compile_sdk(src, kts=False)
 
     # 1) enable core library desugaring inside compileOptions { ... }
     if "coreLibraryDesugaringEnabled" not in src:
@@ -59,6 +89,9 @@ def patch_kts(path):
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
     original = src
+
+    # 0) force compileSdk
+    src = set_compile_sdk(src, kts=True)
 
     # 1) enable desugaring
     if "isCoreLibraryDesugaringEnabled" not in src:
