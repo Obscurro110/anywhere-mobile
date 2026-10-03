@@ -1317,13 +1317,17 @@ function registerIpc() {
     ...(await readCapabilities())
   })))
 
-  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
+  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to, role, extra } = {}) => {
     rlog('[relay] <- relay:sendChat  to =', to, ' len =', String(text || '').length)
     if (!relay?.connected) {
       rwarn('[relay] relay:sendChat rejected: not connected')
       return { ok: false, error: { message: 'relay_not_connected' } }
     }
-    const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
+    const delivered = relay.sendChat(text, {
+      role: role || 'assistant',
+      to: to || '*',
+      extra
+    })
     rlog('[relay] -> sendChat delivered =', delivered)
     return { ok: true, delivered }
   }))

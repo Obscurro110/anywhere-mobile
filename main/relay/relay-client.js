@@ -157,13 +157,22 @@ export class RelayClient extends EventEmitter {
   }
 
   /** Chat from desktop -> phone. to='*' broadcasts to all other devices. */
-  sendChat(text, { role = 'assistant', to = '*', conversationId } = {}) {
+  sendChat(text, { role = 'assistant', to = '*', conversationId, extra } = {}) {
+    const payload = { role, text, conversationId };
+    // extra: 透传附加字段。手机端要靠它拿到电脑端那条消息的 id / 下标，
+    // 这样气泡上的「重新回答 / 删除这条」才能定位到正确的消息。
+    if (extra && typeof extra === 'object') {
+      for (const [k, v] of Object.entries(extra)) {
+        if (v === undefined || k === 'role' || k === 'text') continue;
+        payload[k] = v;
+      }
+    }
     return this._send({
       v: 1,
       type: 'chat',
       id: randomUUID(),
       to,
-      payload: { role, text, conversationId },
+      payload,
     });
   }
 

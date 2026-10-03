@@ -10563,7 +10563,20 @@ watch(
     relayLastSentAssistantId = last.id;
     relayLog('[relay] replying to phone. to =', to, 'len =', text.length);
     try {
-      await window.api.sendRelayChat({ text, to });
+      // 带上这条 assistant 消息在 chat_show 里的 id / 下标 / 会话，
+      // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
+      const assistantIndex = chat_show.value.length - 1;
+      await window.api.sendRelayChat({
+        text,
+        to,
+        extra: {
+          __relayAssistantMeta: {
+            messageId: String(last.id ?? ''),
+            index: assistantIndex,
+            conversationId: currentConversationStorage.value?.conversationId || ''
+          }
+        }
+      });
       relayLog('[relay] reply sent ok');
       relayReplyTarget.value = null;
     } catch (err) {
