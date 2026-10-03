@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:provider/provider.dart';
 
+import '../core/protocol.dart';
 import '../models/models.dart';
 import '../services/app_state.dart';
 

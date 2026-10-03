@@ -1,5 +1,10 @@
 import '../core/protocol.dart';
 
+// Re-export protocol types so importers of models.dart (e.g. screens) can use
+// FileMeta / ChatPayload / Envelope without a separate import.
+export '../core/protocol.dart'
+    show FileMeta, ChatPayload, Envelope, MsgType, kProtocolVersion;
+
 /// A chat message shown in the conversation list.
 class ChatMessage {
   final String id;
