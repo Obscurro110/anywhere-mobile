@@ -14,8 +14,11 @@ import re
 import sys
 
 APP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "android", "app")
+ANDROID_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "android")
 GROOVY = os.path.join(APP_DIR, "build.gradle")
 KTS = os.path.join(APP_DIR, "build.gradle.kts")
+ROOT_GROOVY = os.path.join(ANDROID_DIR, "build.gradle")
+ROOT_KTS = os.path.join(ANDROID_DIR, "build.gradle.kts")
 
 DESUGAR_DEP_GROOVY = "coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'"
 DESUGAR_DEP_KTS = 'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")'
@@ -127,9 +130,82 @@ def main():
         patch_groovy(GROOVY)
     else:
         log(f"ERROR: neither build.gradle nor build.gradle.kts found under {APP_DIR}")
-        log("Contents: " + str(os.listdir(os.path.join(APP_DIR, "..")) if os.path.exists(os.path.join(APP_DIR, "..")) else "N/A"))
         sys.exit(1)
+
+    # Force every plugin subproject to compile against TARGET_COMPILE_SDK.
+    # Otherwise plugins (e.g. file_picker) compile against the Flutter default
+    # (android-34) and fail AAR metadata checks against newer deps.
+    patch_root_build()
     log("done")
+
+
+MARKER = "// anywhere-mobile: force plugin compileSdk"
+
+GROOVY_SUBPROJECTS = """
+// anywhere-mobile: force plugin compileSdk
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                compileSdkVersion {COMPILE_SDK}
+            }
+        }
+    }
+}
+"""
+
+# Pure reflection -> no AGP classes needed on the kts script classpath.
+KTS_SUBPROJECTS = """
+// anywhere-mobile: force plugin compileSdk
+subprojects {
+    afterEvaluate {
+        val androidExt = project.extensions.findByName("android")
+        if (androidExt != null) {
+            try {
+                val m = androidExt.javaClass.methods.firstOrNull {
+                    it.name == "compileSdkVersion" && it.parameterTypes.size == 1
+                }
+                if (m != null) {
+                    when (m.parameterTypes[0]) {
+                        Int::class.javaPrimitiveType, java.lang.Integer::class.java ->
+                            m.invoke(androidExt, {COMPILE_SDK})
+                        String::class.java ->
+                            m.invoke(androidExt, "android-{COMPILE_SDK}")
+                        else -> {}
+                    }
+                } else {
+                    // newer AGP exposes a property setter
+                    val p = androidExt.javaClass.methods.firstOrNull {
+                        it.name == "setCompileSdk" && it.parameterTypes.size == 1
+                    }
+                    if (p != null) p.invoke(androidExt, {COMPILE_SDK})
+                }
+            } catch (e: Exception) {
+                // best-effort; ignore if the extension shape differs
+            }
+        }
+    }
+}
+"""
+
+
+def patch_root_build():
+    if os.path.exists(ROOT_KTS):
+        path, snippet = ROOT_KTS, KTS_SUBPROJECTS
+    elif os.path.exists(ROOT_GROOVY):
+        path, snippet = ROOT_GROOVY, GROOVY_SUBPROJECTS
+    else:
+        log("WARN: no root android/build.gradle(.kts) found; skipping plugin compileSdk override")
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    if MARKER in src:
+        log("root build already patched; skipping")
+        return
+    snippet = snippet.replace("{COMPILE_SDK}", TARGET_COMPILE_SDK)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n" + snippet + "\n")
+    log(f"appended subprojects override to {os.path.basename(path)} (compileSdk={TARGET_COMPILE_SDK})")
 
 
 if __name__ == "__main__":
