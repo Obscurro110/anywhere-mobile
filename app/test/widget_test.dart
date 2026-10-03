@@ -215,4 +215,148 @@ void main() {
       expect(p.skills, ['review']);
     });
   });
+
+  group('MCP / Skill 详情', () {
+    test('MCP 带描述时优先用描述', () {
+      final m = McpOption.fromJson({
+        'id': 'fs',
+        'label': '文件系统',
+        'description': '读写本机文件',
+        'type': 'stdio',
+      });
+      expect(m.summary, '读写本机文件');
+      expect(m.type, 'stdio');
+    });
+
+    test('MCP 没描述时按类型兜底', () {
+      final builtin = McpOption.fromJson({'id': 'a', 'builtin': true});
+      expect(builtin.summary, '内置工具');
+
+      final remote = McpOption.fromJson({'id': 'b', 'type': 'sse'});
+      expect(remote.summary, contains('远程服务'));
+
+      final stdio = McpOption.fromJson({'id': 'c', 'command': 'npx x'});
+      expect(stdio.summary, contains('npx x'));
+
+      final none = McpOption.fromJson({'id': 'd'});
+      expect(none.summary, '未填写说明');
+    });
+
+    test('Skill 解析 description 与 allowedTools', () {
+      final s = SkillOption.fromJson({
+        'id': 'review',
+        'label': '代码审查',
+        'description': '审查 PR 的改动',
+        'allowedTools': ['read', 'grep', ''],
+      });
+      expect(s.summary, '审查 PR 的改动');
+      expect(s.allowedTools, ['read', 'grep']);
+    });
+
+    test('Skill 没描述时给出兜底文案', () {
+      final s = SkillOption.fromJson({'id': 'x'});
+      expect(s.summary, isNotEmpty);
+    });
+  });
+
+  group('CompactConfig', () {
+    test('解析压缩配置并格式化上下文长度', () {
+      final c = CompactConfig.fromJson({
+        'model': '0|gpt-4o',
+        'autoCompactEnabled': true,
+        'contextLength': 128000,
+      });
+      expect(c.autoCompactEnabled, isTrue);
+      expect(c.contextLabel, '128K');
+    });
+
+    test('未设置上下文长度时给出人话', () {
+      final c = CompactConfig.fromJson({});
+      expect(c.contextLabel, '未设置');
+      expect(c.autoCompactEnabled, isTrue); // 默认开
+    });
+
+    test('Capabilities 能解析出 compact', () {
+      final caps = Capabilities.fromJson({
+        'compact': {'model': '1|claude', 'autoCompactEnabled': false},
+      });
+      expect(caps.compact, isNotNull);
+      expect(caps.compact!.autoCompactEnabled, isFalse);
+    });
+
+    test('电脑端没上报 compact 时为 null（老版本兼容）', () {
+      final caps = Capabilities.fromJson({});
+      expect(caps.compact, isNull);
+    });
+  });
+
+  group('TaskOption 完整配置', () {
+    test('解析调度字段（手机端编辑要回填）', () {
+      final t = TaskOption.fromJson({
+        'id': 'task_1',
+        'label': '早报',
+        'triggerType': 'daily',
+        'intervalMinutes': 30,
+        'dailyTime': '08:30',
+        'weeklyDays': [1, 3, 5],
+        'historyCount': 4,
+      });
+      expect(t.triggerType, 'daily');
+      expect(t.intervalMinutes, 30);
+      expect(t.dailyTime, '08:30');
+      expect(t.weeklyDays, [1, 3, 5]);
+      expect(t.historyCount, 4);
+    });
+
+    test('缺字段时给安全默认值', () {
+      final t = TaskOption.fromJson({'id': 'x', 'label': 'y'});
+      expect(t.triggerType, 'interval');
+      expect(t.intervalMinutes, 60);
+      expect(t.historyCount, 0);
+    });
+
+    test('weeklyDays 里的脏数据被过滤', () {
+      final t = TaskOption.fromJson({
+        'id': 'x',
+        'weeklyDays': [0, 2, null, 'bad'],
+      });
+      expect(t.weeklyDays, [2]);
+    });
+
+    test('删除单个任务的消息后仍能解析', () {
+      final t = TaskOption.fromJson({'id': 'x'});
+      expect(t.id, 'x');
+    });
+  });
+
+  group('ConvMessage 消息操作能力', () {
+    test('assistant 消息可重新回答', () {
+      final m = ConvMessage.fromJson({
+        'id': '12',
+        'index': 3,
+        'role': 'assistant',
+        'text': 'hi',
+      });
+      expect(m.canReask, isTrue);
+      expect(m.canDelete, isTrue);
+      expect(m.index, 3);
+    });
+
+    test('user 消息不能重新回答但能删除', () {
+      final m = ConvMessage.fromJson({'id': '9', 'index': 2, 'role': 'user'});
+      expect(m.canReask, isFalse);
+      expect(m.canDelete, isTrue);
+    });
+
+    test('系统提示词不能删除', () {
+      final m = ConvMessage.fromJson({'id': '1', 'index': 0, 'role': 'system'});
+      expect(m.canDelete, isFalse);
+    });
+
+    test('没有 index 时不能删除（避免删错行）', () {
+      final m = ConvMessage.fromJson({'id': '1', 'role': 'user'});
+      expect(m.index, -1);
+      expect(m.canDelete, isFalse);
+    });
+  });
 }

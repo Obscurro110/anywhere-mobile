@@ -65,6 +65,21 @@ class AppState extends ChangeNotifier {
   /// 最近一次会话管理操作（删除/重命名/删消息）的结果
   Map<String, dynamic>? lastConversationAction;
 
+  /// 最近一次「消息操作」（重新回答 / 删除这条）的结果
+  Map<String, dynamic>? lastMessageAction;
+
+  /// 最近一次「自动压缩」开关的结果
+  Map<String, dynamic>? lastAutoCompactAction;
+
+  /// 最近一次定时任务管理操作的结果
+  Map<String, dynamic>? lastTaskAction;
+
+  /// 电脑端提示「消息已排队」的提示信息（null = 没在排队）
+  Map<String, dynamic>? bufferNotice;
+
+  /// 手动压缩是否已发起（电脑端跑完会刷新能力清单）
+  bool compactRunning = false;
+
   /// 最近一次删消息的条数（给 UI 提示用）
   int _lastDeletedCount = 0;
   int get lastDeletedCount => _lastDeletedCount;
@@ -312,6 +327,170 @@ class AppState extends ChangeNotifier {
     ));
   }
 
+  /// 让电脑端「重新回答」某条 assistant 消息（会真的再跑一次 AI）。
+  ///
+  /// 要求该会话**已经在电脑端打开**（列表里点过「在电脑端打开」），
+  /// 否则电脑端没有承载窗口可执行，会回 conversation_not_open。
+  bool reaskMessageOnDesktop(String conversationId, String messageId) {
+    if (!_client.isConnected) return false;
+    if (messageId.isEmpty) return false;
+    lastMessageAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.messageAction,
+        'text': '',
+        'action': 'reask',
+        'conversationId': conversationId,
+        'messageId': messageId,
+      },
+    ));
+  }
+
+  /// 让电脑端删除会话里的某一条消息（按 chat_show 下标）。
+  bool deleteMessageOnDesktop(String conversationId, int index) {
+    if (!_client.isConnected) return false;
+    if (index < 0) return false;
+    lastMessageAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.messageAction,
+        'text': '',
+        'action': 'deleteMessage',
+        'conversationId': conversationId,
+        'index': index,
+      },
+    ));
+  }
+
+  // ---- 会话压缩（真实功能，不再是摆设）----
+
+  /// 让电脑端**手动压缩一次**当前会话。
+  ///
+  /// 要求该会话已经在电脑端打开（压缩是窗口内的动作，要重写 chat_show）。
+  bool runCompactOnDesktop(String? conversationId) {
+    if (!_client.isConnected) return false;
+    compactRunning = true;
+    lastMessageAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.messageAction,
+        'text': '',
+        'action': 'runCompact',
+        'conversationId': conversationId ?? activeConversationId ?? '',
+      },
+    ));
+  }
+
+  /// 开关「自动压缩」（按模型的配置，写到电脑端）。
+  bool setAutoCompact(bool enabled, {String? model}) {
+    if (!_client.isConnected) return false;
+    lastAutoCompactAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.setAutoCompact,
+        'text': '',
+        'enabled': enabled,
+        if (model != null && model.isNotEmpty) 'model': model,
+      },
+    ));
+  }
+
+  /// 清掉「已排队」提示（用户看到后调）
+  void clearBufferNotice() {
+    if (bufferNotice == null) return;
+    bufferNotice = null;
+    notifyListeners();
+  }
+
+  /// 清掉上一次任务管理操作的结果提示
+  void clearTaskAction() {
+    if (lastTaskAction == null) return;
+    lastTaskAction = null;
+    notifyListeners();
+  }
+
+  // ---- 定时任务管理 ----
+
+  /// 新建任务。名称不能含 \ / : * ? " < > |
+  bool createTask(String name) {
+    if (!_client.isConnected) return false;
+    final n = name.trim();
+    if (n.isEmpty || RegExp(r'[\\/:*?"<>|]').hasMatch(n)) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({'op': 'create', 'name': n});
+  }
+
+  /// 删除任务
+  bool deleteTask(String taskId) {
+    if (!_client.isConnected) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({'op': 'delete', 'taskId': taskId});
+  }
+
+  /// 重命名任务
+  bool renameTask(String taskId, String name) {
+    if (!_client.isConnected) return false;
+    final n = name.trim();
+    if (n.isEmpty || RegExp(r'[\\/:*?"<>|]').hasMatch(n)) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({
+      'op': 'update',
+      'taskId': taskId,
+      'patch': {'name': n},
+    });
+  }
+
+  /// 改任务的调度配置（触发方式 / 时间等）
+  bool updateTaskSchedule(String taskId, Map<String, dynamic> patch) {
+    if (!_client.isConnected) return false;
+    if (patch.isEmpty) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({'op': 'update', 'taskId': taskId, 'patch': patch});
+  }
+
+  /// 启用 / 停用任务
+  bool setTaskEnabled(String taskId, bool enabled) {
+    if (!_client.isConnected) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({
+      'op': 'setEnabled',
+      'taskId': taskId,
+      'enabled': enabled,
+    });
+  }
+
+  /// 清空任务的历史记录
+  bool clearTaskHistory(String taskId) {
+    if (!_client.isConnected) return false;
+    lastTaskAction = null;
+    return _sendTaskManage({'op': 'clearHistory', 'taskId': taskId});
+  }
+
+  bool _sendTaskManage(Map<String, dynamic> body) {
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {'role': ChatRole.taskManage, 'text': '', ...body},
+    ));
+  }
+
   /// 删除会话里的若干条消息。
   bool deleteConversationMessages(String conversationId, List<String> storageIds) {
     if (!_client.isConnected) return false;
@@ -468,6 +647,8 @@ class AppState extends ChangeNotifier {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final raw = decoded['__relayCapabilities'] ?? decoded;
         capabilities = Capabilities.fromJson((raw as Map).cast<String, dynamic>());
+        // 压缩跑完后电脑端会重新上报，这时候把"压缩中"标记清掉
+        compactRunning = false;
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] capabilities decode failed: $e');
@@ -631,6 +812,113 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] conversation-action-result decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端提示「你的消息已排队」（它正在生成上一轮）
+    if (p.role == ChatRole.buffered) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final b = (decoded['__relayBuffered'] as Map?)?.cast<String, dynamic>() ?? {};
+        bufferNotice = {
+          'text': b['text']?.toString() ?? '',
+          'reason': b['reason']?.toString() ?? '',
+          'at': DateTime.now().millisecondsSinceEpoch,
+        };
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] buffered decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端回传「自动压缩」开关结果
+    if (p.role == ChatRole.setAutoCompactResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayAutoCompact'] as Map?)?.cast<String, dynamic>() ?? {};
+        lastAutoCompactAction = {
+          'ok': r['ok'] == true,
+          'enabled': r['enabled'] == true,
+          'model': r['model']?.toString() ?? '',
+          'reason': r['reason']?.toString() ?? '',
+        };
+        // 立刻把本地展示同步成新状态，不用等下一次拉能力
+        final c = capabilities.compact;
+        if (c != null && r['ok'] == true) {
+          capabilities = Capabilities(
+            models: capabilities.models,
+            mcp: capabilities.mcp,
+            skills: capabilities.skills,
+            prompts: capabilities.prompts,
+            tasks: capabilities.tasks,
+            compact: CompactConfig(
+              model: c.model,
+              autoCompactEnabled: r['enabled'] == true,
+              hideCompactedMessages: c.hideCompactedMessages,
+              contextLength: c.contextLength,
+              contextLengthSource: c.contextLengthSource,
+              compactPrompt: c.compactPrompt,
+            ),
+            reasoningEffortOptions: capabilities.reasoningEffortOptions,
+            current: capabilities.current,
+            desktopVersion: capabilities.desktopVersion,
+            desktopVersionCode: capabilities.desktopVersionCode,
+            upstreamVersion: capabilities.upstreamVersion,
+            fetchedAt: capabilities.fetchedAt,
+          );
+        }
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] set-auto-compact-result decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端回传定时任务管理结果（同时带上最新任务列表）
+    if (p.role == ChatRole.taskManageResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayTaskManageResult'] as Map?)?.cast<String, dynamic>() ?? {};
+        lastTaskAction = {
+          'op': r['op']?.toString() ?? '',
+          'ok': r['ok'] == true,
+          'taskId': r['taskId']?.toString() ?? '',
+          'removed': r['removed'] == true,
+          'cleared': (r['cleared'] as num?)?.toInt() ?? 0,
+          'reason': r['reason']?.toString() ?? '',
+        };
+        final raw = (decoded['__relayTasks'] as List?) ?? const [];
+        final next = raw
+            .map((e) => TaskOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((t) => t.id.isNotEmpty)
+            .toList();
+        tasks = next;
+        capabilities = capabilities.withTasks(next);
+        loadingTasks = false;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] task-manage-result decode failed: $e');
+        loadingTasks = false;
+        notifyListeners();
+      }
+      return;
+    }
+
+    // 电脑端回传消息操作（重新回答 / 删除这条）结果
+    if (p.role == ChatRole.messageActionResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayMessageAction'] as Map?)?.cast<String, dynamic>() ?? {};
+        lastMessageAction = {
+          'action': r['action']?.toString() ?? '',
+          'ok': r['ok'] == true,
+          'reason': r['reason']?.toString() ?? '',
+        };
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] message-action-result decode failed: $e');
       }
       return;
     }

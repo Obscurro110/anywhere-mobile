@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/models.dart';
@@ -138,9 +139,10 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
           }
         });
       },
+      onLongPress: () => _messageMenu(m),
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
         decoration: BoxDecoration(
           color: isSys
               ? const Color(0xFF191C24)
@@ -195,8 +197,158 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
                 ],
               ),
             ),
+            // 单条操作入口（选择模式下隐藏，避免误触）
+            if (!_selecting)
+              IconButton(
+                tooltip: '操作',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.more_vert, size: 18, color: Colors.white38),
+                onPressed: () => _messageMenu(m),
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 单条消息的操作菜单：重新回答 / 删除这条 / 复制
+  Future<void> _messageMenu(ConvMessage m) async {
+    final items = <PopupMenuEntry<String>>[
+      const PopupMenuItem(
+        value: 'copy',
+        child: ListTile(
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(Icons.copy, size: 18),
+          title: Text('复制'),
+        ),
+      ),
+      if (m.canReask)
+        const PopupMenuItem(
+          value: 'reask',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.refresh, size: 18),
+            title: Text('重新回答'),
+          ),
+        ),
+      if (m.canDelete)
+        const PopupMenuItem(
+          value: 'delete',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+            title: Text('删除这条', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ),
+    ];
+
+    final box = context.findRenderObject() as RenderBox?;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (box == null || overlay == null) return;
+
+    final choice = await showMenu<String>(
+      context: context,
+      color: const Color(0xFF232733),
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(
+          box.localToGlobal(Offset.zero, ancestor: overlay),
+          box.localToGlobal(box.size.bottomRight(Offset.zero), ancestor: overlay),
+        ),
+        Offset.zero & overlay.size,
+      ),
+      items: items,
+    );
+    if (choice == null || !mounted) return;
+
+    final state = context.read<AppState>();
+    switch (choice) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: m.text));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已复制'), duration: Duration(seconds: 1)),
+        );
+      case 'reask':
+        _doReask(state, m);
+      case 'delete':
+        _doDeleteOne(state, m);
+    }
+  }
+
+  Future<void> _doReask(AppState state, ConvMessage m) async {
+    // 「重新回答」必须在电脑端那个会话窗口里跑
+    if (state.activeConversationId != widget.conversation.id) {
+      _warnNotOpen();
+      return;
+    }
+    final sent = state.reaskMessageOnDesktop(widget.conversation.id, m.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(sent ? '已让电脑端重新回答…' : '发送失败'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+    if (!sent) return;
+    // 等电脑端跑完再刷新
+    await Future.delayed(const Duration(seconds: 3));
+    if (mounted) {
+      state.requestConversationMessages(widget.conversation.id);
+    }
+  }
+
+  Future<void> _doDeleteOne(AppState state, ConvMessage m) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这条消息'),
+        content: const Text('将从电脑端这个会话里永久删除这条消息。此操作不可撤销。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    // 优先走「让电脑端窗口删」——和你在电脑上点删除是同一个逻辑，
+    // 不会因为索引/压缩导致删错行。没开窗口才退回直接改数据。
+    if (state.activeConversationId == widget.conversation.id) {
+      final sent = state.deleteMessageOnDesktop(widget.conversation.id, m.index);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(sent ? '已让电脑端删除…' : '发送失败'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      if (sent) {
+        await Future.delayed(const Duration(milliseconds: 1500));
+        if (mounted) {
+          state.requestConversationMessages(widget.conversation.id);
+        }
+      }
+      return;
+    }
+
+    _warnNotOpen();
+  }
+
+  void _warnNotOpen() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('请先在列表里点「在电脑端打开」，再操作这条消息'),
+        duration: Duration(seconds: 3),
       ),
     );
   }

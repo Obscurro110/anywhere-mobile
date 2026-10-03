@@ -111,7 +111,13 @@ class HomeShell extends StatelessWidget {
           const SizedBox(width: 4),
         ],
       ),
-      body: const ChatScreen(),
+      body: Column(
+        children: [
+          // 电脑端正在生成时发的消息会进「缓冲区」，这里明确告诉用户没丢
+          const _BufferBanner(),
+          const Expanded(child: ChatScreen()),
+        ],
+      ),
     );
   }
 
@@ -251,6 +257,60 @@ class _ConvPill extends StatelessWidget {
                 ),
               ),
               const Icon(Icons.expand_more, size: 14, color: Colors.white38),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 顶部横幅：电脑端正在生成时，你发的消息会进它的「缓冲区」排队。
+/// 以前手机端完全不知道这件事，气泡一直转圈，用户以为卡死了。
+class _BufferBanner extends StatelessWidget {
+  const _BufferBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final notice = state.bufferNotice;
+    if (notice == null) return const SizedBox.shrink();
+
+    final text = (notice['text'] as String?) ?? '';
+    return Material(
+      color: const Color(0xFF2A2418),
+      child: InkWell(
+        onTap: () => state.clearBufferNotice(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.hourglass_bottom,
+                  size: 16, color: Colors.orangeAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '已排队：电脑端正在生成，本轮结束后会自动发送',
+                      style: TextStyle(fontSize: 12, color: Colors.orangeAccent),
+                    ),
+                    if (text.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          text,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.white54),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.close, size: 16, color: Colors.white38),
             ],
           ),
         ),

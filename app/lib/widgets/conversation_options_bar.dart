@@ -91,7 +91,11 @@ class ConversationOptionsBar extends StatelessWidget {
                     .map((m) => _MultiItem(
                         id: m.id,
                         label: m.label,
-                        note: m.enabled ? null : '（电脑端已停用）'))
+                        // 优先显示电脑端配的说明；停用的也标出来
+                        note: [
+                          if (!m.enabled) '（电脑端已停用）',
+                          m.summary,
+                        ].join(' · ')))
                     .toList(),
                 selected: {...?opts.mcp},
                 apply: (sel) => state.setOptions(opts.copyWith(mcp: sel)),
@@ -110,20 +114,23 @@ class ConversationOptionsBar extends StatelessWidget {
                 state,
                 title: 'Skill',
                 items: caps.skills
-                    .map((s) => _MultiItem(id: s.id, label: s.label))
+                    .map((s) => _MultiItem(
+                        id: s.id,
+                        label: s.label,
+                        // SKILL.md 里的 description，让用户知道这技能是干嘛的
+                        note: s.summary))
                     .toList(),
                 selected: {...?opts.skills},
                 apply: (sel) => state.setOptions(opts.copyWith(skills: sel)),
               ),
             ),
-            // ---- 会话压缩 ----
+            // ---- 会话压缩（真实配置：自动开关 + 手动压一次）----
             _chip(
               context,
               icon: Icons.compress,
-              label: opts.compress == true ? '压缩 开' : '压缩',
-              active: opts.compress == true,
-              onTap: () =>
-                  state.setOptions(opts.copyWith(compress: !(opts.compress ?? false))),
+              label: _compactLabel(caps),
+              active: caps.compact != null,
+              onTap: () => _pickCompact(context, state),
             ),
             IconButton(
               tooltip: '刷新电脑端能力',
@@ -237,29 +244,30 @@ class ConversationOptionsBar extends StatelessWidget {
       items: [
         const _SheetItem<String?>(
           value: null,
-          label: '默认（使用电脑端当前配置）',
+          label: '默认（跟随电脑端）',
           subtitle: '不套用任何助手预设',
         ),
         ...caps.prompts.map((p) => _SheetItem<String?>(
               value: p.key,
               label: p.label,
-              // 让用户一眼看到这个助手会带来哪些设置
-              subtitle: p.hasPreset
-                  ? '预设：${p.presetSummary}\n$p.key'
-                  : '无预设 · $p.key',
+              // 单行摘要，别用 \n（两行会把面板撑得很长）
+              subtitle: p.hasPreset ? '预设：${p.presetSummary}' : '无预设',
             )),
       ],
       current: state.options.promptKey,
       onPicked: (v) {
+        final applied = state.activePrompt;
         state.applyPrompt(v);
         if (!context.mounted) return;
-        final applied = state.activePrompt;
         final msg = v == null
-            ? '已切回电脑端默认助手（下一条消息起新生效）'
+            ? '已切回电脑端默认助手（下一条消息起生效）'
             : applied != null && applied.hasPreset
                 ? '已切换到「${applied.label}」，并套用其预设：${applied.presetSummary}'
                 : '已切换到「$v」（下一条消息会开新会话）';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(msg),
+          duration: const Duration(seconds: 2),
+        ));
       },
     );
   }
@@ -285,6 +293,135 @@ class ConversationOptionsBar extends StatelessWidget {
       onPicked: (v) => state.setOptions(state.options.copyWith(model: v)),
     );
   }
+
+  // ---- 会话压缩 ----
+
+  static String _compactLabel(Capabilities caps) {
+    final c = caps.compact;
+    if (c == null) return '压缩';
+    return c.autoCompactEnabled ? '压缩 自动' : '压缩 关';
+  }
+
+  /// 压缩面板：显示真实配置 + 手动压一次。
+  ///
+  /// 以前这个 chip 只是切一个本地布尔值，电脑端压根不读 —— 纯摆设。
+  /// 现在改成：开关「自动压缩」（真实写到电脑端 per-model 配置）+ 「立即压缩」。
+  static void _pickCompact(BuildContext context, AppState state) {
+    final caps = state.capabilities;
+    final c = caps.compact;
+    if (c == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('电脑端还没上报压缩配置。请确认桌面端已更新到 v1.5.0+ 并点刷新。'),
+        duration: Duration(seconds: 4),
+      ));
+      state.requestCapabilities();
+      return;
+    }
+
+    final inDesktopConv = state.activeConversationId != null;
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1F2B),
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('会话压缩',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.auto_mode, color: Colors.lightBlueAccent),
+              title: const Text('自动压缩'),
+              subtitle: const Text(
+                '对话变长时，电脑端自动把前面的内容摘要掉，避免超出上下文',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              trailing: Switch(
+                value: c.autoCompactEnabled,
+                onChanged: (v) {
+                  Navigator.of(ctx).pop();
+                  state.setAutoCompact(v, model: c.model);
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(v ? '已开启自动压缩' : '已关闭自动压缩'),
+                    duration: const Duration(seconds: 2),
+                  ));
+                },
+              ),
+            ),
+            _kvTile('当前模型', c.model.isEmpty ? '未知' : c.model.split('|').last),
+            _kvTile('上下文窗口', c.contextLabel),
+            _kvTile(
+              '来源',
+              c.contextLengthSource == 'manual'
+                  ? '手动设置'
+                  : (c.contextLengthSource.isEmpty ? '默认' : c.contextLengthSource),
+            ),
+            if (c.compactPrompt.isNotEmpty)
+              _kvTile('自定义摘要提示词', '已设置（${c.compactPrompt.length} 字）'),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.compress),
+                  label: const Text('立即压缩一次'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    if (!inDesktopConv) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('请先到「电脑端对话」点开一个会话，再压缩'),
+                        duration: Duration(seconds: 3),
+                      ));
+                      return;
+                    }
+                    final sent = state.runCompactOnDesktop(state.activeConversationId);
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(sent ? '已让电脑端压缩，跑完会自动刷新' : '发送失败'),
+                      duration: const Duration(seconds: 3),
+                    ));
+                  },
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+              child: Text(
+                inDesktopConv
+                    ? '压缩会把较早的对话替换成一段摘要，电脑端窗口里能还原。'
+                    : '提示：压缩必须在电脑端打开的会话里执行。',
+                style: const TextStyle(fontSize: 11.5, color: Colors.white38, height: 1.5),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Widget _kvTile(String k, String v) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+        child: Row(
+          children: [
+            Text(k, style: const TextStyle(fontSize: 12.5, color: Colors.white54)),
+            const Spacer(),
+            Flexible(
+              child: Text(
+                v,
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12.5, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
 
   static void _pickEffort(BuildContext context, AppState state) {
     final list = state.capabilities.reasoningEffortOptions.isEmpty
@@ -321,47 +458,63 @@ class ConversationOptionsBar extends StatelessWidget {
       isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(14),
-                child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: items
-                      .map((it) => CheckboxListTile(
-                            dense: true,
-                            value: picked.contains(it.id),
-                            title: Text(it.label),
-                            subtitle: it.note == null ? null : Text(it.note!),
-                            onChanged: (v) => setLocal(() {
-                              if (v == true) {
-                                picked.add(it.id);
-                              } else {
-                                picked.remove(it.id);
-                              }
-                            }),
-                          ))
-                      .toList(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.6,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: () {
-                      apply(picked.toList());
-                      Navigator.pop(ctx);
-                    },
-                    child: const Text('确定'),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: items
+                        .map((it) => CheckboxListTile(
+                              dense: true,
+                              value: picked.contains(it.id),
+                              title: Text(it.label),
+                              subtitle: it.note == null
+                                  ? null
+                                  : Text(
+                                      it.note!,
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 11.5),
+                                    ),
+                              onChanged: (v) => setLocal(() {
+                                if (v == true) {
+                                  picked.add(it.id);
+                                } else {
+                                  picked.remove(it.id);
+                                }
+                              }),
+                            ))
+                        .toList(),
                   ),
                 ),
-              ),
-            ],
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () {
+                        // 先关面板再应用（原因同 _singleSheet）：
+                        // apply() 里的 notifyListeners() 会让 ctx 失效，导致面板关不掉
+                        final nav = Navigator.of(ctx);
+                        final result = picked.toList();
+                        if (nav.canPop()) nav.pop();
+                        apply(result);
+                      },
+                      child: const Text('确定'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -380,33 +533,45 @@ class ConversationOptionsBar extends StatelessWidget {
       backgroundColor: const Color(0xFF1B1F2B),
       isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(14),
-              child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-            ),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: items
-                    .map((it) => ListTile(
-                          dense: true,
-                          title: Text(it.label),
-                          subtitle: it.subtitle == null ? null : Text(it.subtitle!),
-                          trailing: it.value == current
-                              ? const Icon(Icons.check, color: Colors.lightBlueAccent)
-                              : null,
-                          onTap: () {
-                            onPicked(it.value);
-                            Navigator.pop(ctx);
-                          },
-                        ))
-                    .toList(),
+        child: ConstrainedBox(
+          // 限制最大高度，助手/模型很多时也不会铺满整屏
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.6,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(14),
+                child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
               ),
-            ),
-          ],
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: items
+                      .map((it) => ListTile(
+                            dense: true,
+                            title: Text(it.label),
+                            subtitle: it.subtitle == null ? null : Text(it.subtitle!),
+                            trailing: it.value == current
+                                ? const Icon(Icons.check, color: Colors.lightBlueAccent)
+                                : null,
+                            onTap: () {
+                              // 先关面板再执行回调。
+                              // 反过来的话，回调里的 notifyListeners() 会先触发重建，
+                              // 面板的 ctx 随之失效，Navigator.pop 就关不掉了
+                              // （现象：选了助手后面板卡住、点外面也不消失）。
+                              final nav = Navigator.of(ctx);
+                              final value = it.value;
+                              if (nav.canPop()) nav.pop();
+                              onPicked(value);
+                            },
+                          ))
+                      .toList(),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

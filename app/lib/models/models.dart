@@ -16,6 +16,7 @@ export '../core/protocol.dart'
         TaskOption,
         ConversationOption,
         ConvMessage,
+        CompactConfig,
         Envelope,
         MsgType,
         kProtocolVersion;
