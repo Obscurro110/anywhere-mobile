@@ -153,10 +153,11 @@ subprojects { sp ->
 }
 """
 
-# Use plugins.withId (NOT afterEvaluate): Flutter's root build already calls
-# evaluationDependsOn, so afterEvaluate would throw "project already evaluated".
-# Set compileSdk via several strategies, each guarded, to be robust across AGP
-# versions. withGroovyBuilder avoids needing AGP classes on the script classpath.
+# Set compileSdk AFTER each subproject is fully evaluated (afterEvaluate), so it
+# overrides the value the plugin's own build.gradle sets (e.g. android-34).
+# Flutter's root build calls evaluationDependsOn(':app'), which can make some
+# projects already-evaluated -> guard with try/catch and fall back to immediate.
+# withGroovyBuilder avoids needing AGP classes on the script classpath.
 KTS_SUBPROJECTS = """
 // anywhere-mobile: force plugin compileSdk
 subprojects {
@@ -165,12 +166,10 @@ subprojects {
         val a = sp.extensions.findByName("android")
         if (a != null) {
             var ok = false
-            // strategy 1: Groovy-style dynamic call
             try {
                 a.withGroovyBuilder { "compileSdkVersion"({COMPILE_SDK}) }
                 ok = true
             } catch (e: Exception) { }
-            // strategy 2: reflection compileSdkVersion(int)
             if (!ok) {
                 try {
                     val m = a.javaClass.methods.firstOrNull {
@@ -181,20 +180,14 @@ subprojects {
                     if (m != null) { m.invoke(a, {COMPILE_SDK}); ok = true }
                 } catch (e: Exception) { }
             }
-            // strategy 3: reflection setCompileSdk(Integer)
-            if (!ok) {
-                try {
-                    val m = a.javaClass.methods.firstOrNull {
-                        it.name == "setCompileSdk" && it.parameterTypes.size == 1
-                    }
-                    if (m != null) { m.invoke(a, {COMPILE_SDK}); ok = true }
-                } catch (e: Exception) { }
-            }
             println("anywhere-mobile patch: " + sp.name + " compileSdk set = " + ok)
         }
     }
-    plugins.withId("com.android.library") { cfg() }
-    plugins.withId("com.android.application") { cfg() }
+    try {
+        sp.afterEvaluate { cfg() }
+    } catch (e: Exception) {
+        cfg()
+    }
 }
 """
 
