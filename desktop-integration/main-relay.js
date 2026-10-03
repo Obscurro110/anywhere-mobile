@@ -50,7 +50,10 @@ function readConfig() {
   try {
     const p = CONFIG_PATH()
     if (existsSync(p)) {
-      const cfg = JSON.parse(readFileSync(p, 'utf8'))
+      // strip UTF-8 BOM (PowerShell's Set-Content -Encoding UTF8 writes one,
+      // and JSON.parse chokes on it)
+      const raw = readFileSync(p, 'utf8').replace(/^\uFEFF/, '')
+      const cfg = JSON.parse(raw)
       if (cfg?.serverUrl && cfg?.token) return cfg
     }
   } catch (err) {
@@ -144,6 +147,11 @@ function registerIpc() {
  */
 export function startRelay(context, overrideConfig = null, { force = false } = {}) {
   ctx = context || ctx
+
+  // ALWAYS register IPC handlers first, even when there is no config yet.
+  // Otherwise the settings UI can never save a config (chicken-and-egg).
+  registerIpc()
+
   const cfg = overrideConfig || readConfig()
 
   if (!cfg?.serverUrl || !cfg?.token) {

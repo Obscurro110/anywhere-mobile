@@ -45,10 +45,10 @@ index f63f831..c004fc7 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..e717de5
+index 0000000..155555f
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,215 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -101,7 +101,10 @@ index 0000000..e717de5
 +  try {
 +    const p = CONFIG_PATH()
 +    if (existsSync(p)) {
-+      const cfg = JSON.parse(readFileSync(p, 'utf8'))
++      // strip UTF-8 BOM (PowerShell's Set-Content -Encoding UTF8 writes one,
++      // and JSON.parse chokes on it)
++      const raw = readFileSync(p, 'utf8').replace(/^\uFEFF/, '')
++      const cfg = JSON.parse(raw)
 +      if (cfg?.serverUrl && cfg?.token) return cfg
 +    }
 +  } catch (err) {
@@ -195,6 +198,11 @@ index 0000000..e717de5
 + */
 +export function startRelay(context, overrideConfig = null, { force = false } = {}) {
 +  ctx = context || ctx
++
++  // ALWAYS register IPC handlers first, even when there is no config yet.
++  // Otherwise the settings UI can never save a config (chicken-and-egg).
++  registerIpc()
++
 +  const cfg = overrideConfig || readConfig()
 +
 +  if (!cfg?.serverUrl || !cfg?.token) {

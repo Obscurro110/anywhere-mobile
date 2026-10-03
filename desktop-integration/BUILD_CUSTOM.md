@@ -196,6 +196,8 @@ npx electron-builder --dir --publish never "-c.electronDist=node_modules/electro
 | 现象 | 处理 |
 | --- | --- |
 | electron-builder 下载 Electron 失败（`access forbidden`） | 加 `-c.electronDist=node_modules/electron/dist` |
+| 打包报 `EBUSY: resource busy or locked` | 应用正在从该目录运行 → 先关闭它，或换输出目录 `-c.directories.output=dist-out` |
+| 界面点「保存」报 `No handler registered for 'relay:setConfig'` | ①早期版本 bug：读不到配置时 `registerIpc()` 被跳过（已修复为无条件注册）；②`relay.json` 带 UTF-8 BOM 会导致 `JSON.parse` 失败（已加 BOM 剥离）。用记事本另存为「UTF-8 无 BOM」，或直接用设置界面保存 |
 | `pnpm install` 卡在 electron postinstall | 等它下载/解压；或预先配好 Electron 缓存 |
 | 构建报 `Expected ";" but found ")"` | 检查 `main/relay/index.js` 的 IPC handler 括号是否成对 |
 | 启动后无 `[relay] connected` | 检查 relay.json / 设置里的地址与 token |
