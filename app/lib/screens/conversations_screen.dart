@@ -219,7 +219,8 @@ class _ConversationsPageState extends State<ConversationsPage> {
       final res = state.lastConversationOpen;
       if (res != null && res['ok'] != true) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          final messenger = ScaffoldMessenger.of(context);
+          messenger.showSnackBar(
             SnackBar(content: Text('打开失败：${res['reason']}')),
           );
         }

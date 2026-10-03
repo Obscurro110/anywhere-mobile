@@ -8,7 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/app_config.dart';
-import '../core/protocol.dart';
 import '../models/models.dart';
 import 'notification_service.dart';
 import 'relay_client.dart';
@@ -55,24 +54,36 @@ class AppState extends ChangeNotifier {
   /// 最近一次「打开电脑端会话」的结果
   Map<String, dynamic>? lastConversationOpen;
 
-  /// 当前手机正在对话的电脑端会话（null = 手机自建的临时会话）
-  String? activeConversationId;
-  String activeConversationTitle = '';
-
   /// Currently selected run options (sent with every message).
   ChatOptions options = const ChatOptions();
 
   /// Which desktop to talk to. null = broadcast.
   String? targetDeviceId;
 
+  /// 当前手机正在对话的电脑端会话（null = 手机自建的临时会话）。
+  /// 读取用 public getter `activeConversationId`（见下），写入用
+  /// `leaveDesktopConversation()` / `_setActiveConversation()`。
   String? _activeConversationId;
+  String _activeConversationTitle = '';
 
   /// True while we're waiting for the desktop's reply (drives the UI spinner).
   bool get awaitingReply => messages.isNotEmpty && messages.last.pending;
 
   RelayClient get client => _client;
   String get deviceId => config.deviceId;
+
+  /// 当前对接着的电脑端会话 id（null = 手机自建会话）
   String? get activeConversationId => _activeConversationId;
+
+  /// 当前对接着的电脑端会话标题
+  String get activeConversationTitle => _activeConversationTitle;
+
+  void _setActiveConversation(String? id, String title) {
+    _activeConversationId = id;
+    _activeConversationTitle = title;
+    unawaited(_persistActiveConversation());
+    notifyListeners();
+  }
 
   void _bind() {
     _client.statusStream.listen((s) {
@@ -224,10 +235,8 @@ class AppState extends ChangeNotifier {
 
   /// 回到「手机自建会话」（不再对接着电脑端的某个会话）。
   void leaveDesktopConversation() {
-    activeConversationId = null;
-    activeConversationTitle = '';
     lastConversationOpen = null;
-    notifyListeners();
+    _setActiveConversation(null, '');
   }
 
   static String _conversationOpenReason(String reason) {
@@ -444,8 +453,9 @@ class AppState extends ChangeNotifier {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final r = (decoded['__relayConversationOpen'] as Map?)?.cast<String, dynamic>() ?? {};
         final ok = r['ok'] == true;
-        activeConversationId = ok ? (r['conversationId']?.toString() ?? null) : null;
-        activeConversationTitle = ok ? (r['title']?.toString() ?? '') : '';
+        _activeConversationId = ok ? r['conversationId']?.toString() : null;
+        _activeConversationTitle = ok ? (r['title']?.toString() ?? '') : '';
+        unawaited(_persistActiveConversation());
         lastConversationOpen = {
           'ok': ok,
           'conversationId': r['conversationId']?.toString() ?? '',
@@ -652,6 +662,12 @@ class AppState extends ChangeNotifier {
           ..addAll(list.cast<Map<String, dynamic>>());
       } catch (_) {}
     }
+    // 记住上次接的是电脑端哪个会话，重启后仍能对得上
+    final convId = p.getString('active_conversation_id');
+    if (convId != null && convId.isNotEmpty) {
+      _activeConversationId = convId;
+      _activeConversationTitle = p.getString('active_conversation_title') ?? '';
+    }
   }
 
   Future<void> _persistHistory() async {
@@ -659,6 +675,18 @@ class AppState extends ChangeNotifier {
     final keep = messages.where((m) => !m.pending).toList();
     final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
     await p.setString('chat_history', jsonEncode(trimmed.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> _persistActiveConversation() async {
+    final p = await SharedPreferences.getInstance();
+    final id = _activeConversationId;
+    if (id == null || id.isEmpty) {
+      await p.remove('active_conversation_id');
+      await p.remove('active_conversation_title');
+    } else {
+      await p.setString('active_conversation_id', id);
+      await p.setString('active_conversation_title', _activeConversationTitle);
+    }
   }
 
   Future<void> _persistInbox() async {

@@ -198,7 +198,7 @@ class _StatusCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF00000040),
+                  color: const Color(0x40000000),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Text('v$version',
@@ -243,8 +243,8 @@ class _Footer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: const [
+    return const Column(
+      children: [
         Text(
           'Anywhere Mobile',
           style: TextStyle(color: Colors.white38, fontSize: 12),

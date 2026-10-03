@@ -134,10 +134,10 @@ class _EmptyChat extends StatelessWidget {
   const _EmptyChat();
   @override
   Widget build(BuildContext context) {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        children: const [
+        children: [
           Icon(Icons.forum_outlined, size: 56, color: Colors.white24),
           SizedBox(height: 12),
           Text('还没有消息', style: TextStyle(color: Colors.white54)),
