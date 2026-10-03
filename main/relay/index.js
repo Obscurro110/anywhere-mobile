@@ -48,10 +48,43 @@
  *          / ANYWHERE_RELAY_DEVICE_NAME
  */
 import { app, ipcMain } from 'electron'
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { RelayClient } from './relay-client.js'
 import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
+
+// ---------------------------------------------------------------------------
+// 日志落盘
+// ---------------------------------------------------------------------------
+// 打包成 exe 后双击运行没有控制台，排障时看不到 console 输出。
+// 这里把手机互通相关的日志同时写进 userData/relay.log，随时可以看。
+let logFilePath = null
+
+function relayFileLog(tag, ...args) {
+  try {
+    if (!logFilePath) logFilePath = join(app.getPath('userData'), 'relay.log')
+    const line = `${new Date().toISOString()} [${tag}] ${args
+      .map((a) => {
+        if (a instanceof Error) return `${a.message}\n${a.stack || ''}`
+        if (typeof a === 'string') return a
+        try { return JSON.stringify(a) } catch { return String(a) }
+      })
+      .join(' ')}\n`
+    appendFileSync(logFilePath, line, 'utf8')
+  } catch {
+    // 写日志失败不能影响主流程
+  }
+}
+
+/** 主进程自己的日志 */
+const rlog = (...args) => {
+  console.log(...args)
+  relayFileLog('main', ...args)
+}
+const rwarn = (...args) => {
+  console.warn(...args)
+  relayFileLog('main:WARN', ...args)
+}
 
 let relay = null
 let ctx = null // { getWindowByRef, listWindows, dispatchWindowEvent, openWindow, dataApi }
@@ -80,7 +113,7 @@ function readConfig() {
       }
     }
   } catch (err) {
-    console.warn('[relay] failed to read relay.json:', err?.message || err)
+    rwarn('[relay] failed to read relay.json:', err?.message || err)
   }
   // 2) env
   if (process.env.ANYWHERE_RELAY_URL && process.env.ANYWHERE_RELAY_TOKEN) {
@@ -102,7 +135,7 @@ function emitToWindows(event, payload) {
       { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
     )
   } catch (err) {
-    console.warn('[relay] dispatchWindowEvent failed:', err?.message || err)
+    rwarn('[relay] dispatchWindowEvent failed:', err?.message || err)
   }
 }
 
@@ -200,20 +233,28 @@ async function readCapabilities() {
           }
         }
       } catch (err) {
-        console.warn('[relay] list skills failed:', err?.message || err)
+        rwarn('[relay] list skills failed:', err?.message || err)
       }
     }
 
     // ---- 助手：config.prompts ----
+    // 每个助手自带一套预设（模型 / 思考预算 / MCP / Skill），
+    // 手机端选中助手时要一并同步过去，否则只是换了 promptKey，
+    // 助手配好的 MCP、Skill 不会生效。
     const prompts = config.prompts && typeof config.prompts === 'object' ? config.prompts : {}
     for (const [key, p] of Object.entries(prompts)) {
       if (key === '__DEFAULT__') continue
+      if (!p || typeof p !== 'object') continue
       result.prompts.push({
         key,
-        label: (p && (p.name || p.title)) || key,
-        icon: (p && p.icon) || '',
-        model: (p && p.model) || '',
-        type: (p && p.type) || 'over'
+        label: (p.name || p.title) || key,
+        icon: p.icon || '',
+        model: p.model || '',
+        type: p.type || 'over',
+        // ---- 助手预设（会话建立时电脑端本来就会应用这些）----
+        reasoningEffort: p.reasoning_effort || p.reasoningEffort || '',
+        mcp: Array.isArray(p.defaultMcpServers) ? [...p.defaultMcpServers] : [],
+        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : []
       })
     }
 
@@ -246,7 +287,7 @@ async function readCapabilities() {
     }
     result.reasoningEffortOptions = ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']
   } catch (err) {
-    console.warn('[relay] readCapabilities failed:', err?.message || err)
+    rwarn('[relay] readCapabilities failed:', err?.message || err)
   }
   return result
 }
@@ -330,7 +371,7 @@ async function routePhoneChat(msg) {
         to
       })
     } catch (err) {
-      console.warn('[relay] capabilities reply failed:', err?.message || err)
+      rwarn('[relay] capabilities reply failed:', err?.message || err)
     }
     return
   }
@@ -344,7 +385,7 @@ async function routePhoneChat(msg) {
         to
       })
     } catch (err) {
-      console.warn('[relay] tasks reply failed:', err?.message || err)
+      rwarn('[relay] tasks reply failed:', err?.message || err)
     }
     return
   }
@@ -385,7 +426,7 @@ async function routePhoneChat(msg) {
         const w = ctx.getWindowByRef(phoneWindowId)
         w?.destroy?.()
       } catch (err) {
-        console.warn('[relay] destroy old phone window failed:', err?.message || err)
+        rwarn('[relay] destroy old phone window failed:', err?.message || err)
       }
     }
     phoneWindowId = null
@@ -410,14 +451,14 @@ async function routePhoneChat(msg) {
       )
       return
     } catch (err) {
-      console.warn('[relay] dispatch to phone window failed:', err?.message || err)
+      rwarn('[relay] dispatch to phone window failed:', err?.message || err)
     }
   }
 
   // 2) 否则开一个专用的「手机」会话窗口
   //    isDirectSend_normal 默认为 true → multiline-text 会直接追加并跑 AI
   if (typeof ctx?.openWindow !== 'function') {
-    console.warn('[relay] openWindow unavailable; cannot route phone chat to AI')
+    rwarn('[relay] openWindow unavailable; cannot route phone chat to AI')
     return
   }
   try {
@@ -430,12 +471,12 @@ async function routePhoneChat(msg) {
     })
     if (res?.ok && res.id) {
       phoneWindowId = res.id
-      console.log('[relay] opened phone chat window:', phoneWindowId)
+      rlog('[relay] opened phone chat window:', phoneWindowId)
     } else {
-      console.warn('[relay] openWindow returned:', res)
+      rwarn('[relay] openWindow returned:', res)
     }
   } catch (err) {
-    console.warn('[relay] open phone window failed:', err?.message || err)
+    rwarn('[relay] open phone window failed:', err?.message || err)
   }
 }
 
@@ -500,10 +541,27 @@ function registerIpc() {
   })))
 
   ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
-    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
+    rlog('[relay] <- relay:sendChat  to =', to, ' len =', String(text || '').length)
+    if (!relay?.connected) {
+      rwarn('[relay] relay:sendChat rejected: not connected')
+      return { ok: false, error: { message: 'relay_not_connected' } }
+    }
     const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
+    rlog('[relay] -> sendChat delivered =', delivered)
     return { ok: true, delivered }
   }))
+
+  // 渲染进程（窗口）的日志转发到主进程终端 + relay.log，方便排查手机互通问题
+  ipcMain.on('relay:log', (_e, { level = 'log', args = [] } = {}) => {
+    const list = Array.isArray(args) ? args : [args]
+    if (level === 'warn' || level === 'error') {
+      console.warn('[relay:window]', ...list)
+      relayFileLog('window:WARN', ...list)
+    } else {
+      console.log('[relay:window]', ...list)
+      relayFileLog('window', ...list)
+    }
+  })
 
   ipcMain.handle('relay:sendNotification', guard(async (_e, { title, body, to } = {}) => {
     if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
@@ -532,6 +590,9 @@ function registerIpc() {
 export function startRelay(context, overrideConfig = null, { force = false } = {}) {
   ctx = context || ctx
 
+  // 每次启动打一条分隔，方便在 relay.log 里区分会话
+  relayFileLog('main', `==================== relay start v${RELAY_VERSION} (build ${RELAY_VERSION_CODE}) ====================`)
+
   // ALWAYS register IPC handlers first, even when there is no config yet.
   // Otherwise the settings UI can never save a config (chicken-and-egg).
   registerIpc()
@@ -539,7 +600,7 @@ export function startRelay(context, overrideConfig = null, { force = false } = {
   const cfg = overrideConfig || readConfig()
 
   if (!cfg?.serverUrl || !cfg?.token) {
-    console.log('[relay] no config found; relay disabled. Set userData/relay.json or env vars.')
+    rlog('[relay] no config found; relay disabled. Set userData/relay.json or env vars.')
     return null
   }
 
@@ -558,11 +619,11 @@ export function startRelay(context, overrideConfig = null, { force = false } = {
   })
 
   relay.on('connected', () => {
-    console.log('[relay] connected as', relay.deviceId)
+    rlog('[relay] connected as', relay.deviceId)
     emitToWindows('relay:status', { connected: true, deviceId: relay.deviceId })
   })
   relay.on('disconnected', () => {
-    console.log('[relay] disconnected')
+    rlog('[relay] disconnected')
     emitToWindows('relay:status', { connected: false })
   })
   relay.on('presence', (peers) => {
@@ -573,7 +634,7 @@ export function startRelay(context, overrideConfig = null, { force = false } = {
   // 聊天：路由进 AI 管线（开窗口 / 定向派发）
   relay.on('chat', (msg) => {
     routePhoneChat(msg).catch((err) => {
-      console.warn('[relay] routePhoneChat failed:', err?.message || err)
+      rwarn('[relay] routePhoneChat failed:', err?.message || err)
     })
   })
   // 通知 / 文件：只广播给界面展示

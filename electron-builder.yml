@@ -9,6 +9,10 @@ files:
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!dist/**'
+  # [anywhere-mobile] 打包输出目录必须排除，否则再次打包时会把上一次的
+  # win-unpacked（含 600MB app.asar）当源码收进来，asar 撑爆 4.2GB 上限。
+  - '!dist-out/**'
+  - '!dist-out*/**'
   - '!release/**'
   - '!build/icon.iconset/**'
   - '!build/.iconset-tmp/**'

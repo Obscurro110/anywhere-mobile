@@ -10364,6 +10364,17 @@ const scrollToMessageByIndex = async (index) => {
 const relayReplyTarget = ref(null);
 let relayLastSentAssistantId = null;
 
+/**
+ * 窗口内的日志同时打一份到主进程终端。
+ * 打包成 exe 后窗口 DevTools 不方便开，这样双击运行时就能看到 [relay:window] 日志。
+ */
+const relayLog = (...args) => {
+  try { window.api?.relayLog?.('log', ...args); } catch (_) {}
+};
+const relayWarn = (...args) => {
+  try { window.api?.relayLog?.('warn', ...args); } catch (_) {}
+};
+
 /** 从消息对象里抽取纯文本 */
 const relayMessageText = (m) => {
   if (!m) return '';
@@ -10382,22 +10393,26 @@ const armRelayReply = (relayTo) => {
   if (!relayTo) return;
   relayReplyTarget.value = String(relayTo);
   relayLastSentAssistantId = null;
+  relayLog('[relay] armed reply target =', relayReplyTarget.value);
 };
 
 // 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
 window.api?.onWindowInit?.((data) => {
+  relayLog('[relay] window init, relayTo =', data?.relayTo);
   armRelayReply(data?.relayTo);
 });
 
 // 窗口事件里带 relayTo（窗口已存在、后续消息）
 window.api?.onWindowEvent?.((env) => {
   const p = env?.payload;
+  relayLog('[relay] window event:', env?.event, 'relayTo =', p?.relayTo || p?.__relayTo);
   if (p && typeof p === 'object') {
     armRelayReply(p.relayTo || p.__relayTo);
   }
   // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
   const opts = p?.__relayOptions;
   if (opts && typeof opts === 'object') {
+    relayLog('[relay] applying options:', JSON.stringify(opts));
     try {
       if (typeof opts.model === 'string' && opts.model && opts.model !== model.value) {
         handleChangeModel(opts.model);
@@ -10413,12 +10428,14 @@ window.api?.onWindowEvent?.((env) => {
         applyNormalizedSkillSelection(opts.skills);
       }
     } catch (err) {
-      console.warn('[relay] apply options failed:', err);
+      relayWarn('[relay] apply options failed:', err);
     }
   }
 });
 
 // 助手回复完成 → 回传手机
+// 注意：assistant 气泡先以 isPreparing:true 入列，流式填充 content，
+// 完成后由 finalize* 删除 isPreparing 字段（不是设成 false）。
 watch(
   () =>
     chat_show.value
@@ -10432,17 +10449,28 @@ watch(
     const to = relayReplyTarget.value;
     if (!to) return;
     const last = chat_show.value[chat_show.value.length - 1];
-    if (!last || last.role !== 'assistant') return;
-    if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') return;
+    if (!last || last.role !== 'assistant') {
+      relayLog('[relay] tail is not assistant:', last?.role);
+      return;
+    }
+    if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') {
+      relayLog('[relay] assistant still preparing, status =', last.status, 'isPreparing =', last.isPreparing);
+      return;
+    }
     if (last.id === relayLastSentAssistantId) return;
     const text = relayMessageText(last).trim();
-    if (!text) return;
+    if (!text) {
+      relayWarn('[relay] assistant text empty; content =', JSON.stringify(last.content)?.slice(0, 300));
+      return;
+    }
     relayLastSentAssistantId = last.id;
+    relayLog('[relay] replying to phone. to =', to, 'len =', text.length);
     try {
       await window.api.sendRelayChat({ text, to });
+      relayLog('[relay] reply sent ok');
       relayReplyTarget.value = null;
     } catch (err) {
-      console.warn('[relay] reply send failed:', err);
+      relayWarn('[relay] reply send failed:', err);
     }
   }
 );

@@ -240,6 +240,8 @@ const api = {
   sendRelayNotification: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendNotification', payload),
   getRelayStatus: () => electronAPI.ipcRenderer.invoke('relay:status'),
   getRelayCapabilities: () => electronAPI.ipcRenderer.invoke('relay:capabilities'),
+  // 把窗口内的 [relay] 日志转发到主进程终端（打包后 DevTools 不方便看）
+  relayLog: (level, ...args) => electronAPI.ipcRenderer.send('relay:log', { level, args }),
 
   onWindowEvent: (callback) => {
     if (typeof callback !== 'function') return

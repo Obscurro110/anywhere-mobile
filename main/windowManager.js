@@ -790,7 +790,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig = 
         ? payload.tempPromptConfig
         : null,
     senderId,
-    isAlwaysOnTop: payload?.isAlwaysOnTop ?? promptConfig?.isAlwaysOnTop ?? true
+    isAlwaysOnTop: payload?.isAlwaysOnTop ?? promptConfig?.isAlwaysOnTop ?? true,
+    // [anywhere-mobile] 手机互通用：这个函数是白名单复制，不在列表里的字段
+    // 不会传给窗口。手机发来的 relayTo / __relayOptions 属于自定义载荷，
+    // 必须显式透传，否则窗口不知道回复要回传给谁（症状：电脑端跑了 AI 但
+    // 回复发不回手机）。
+    ...(typeof payload?.relayTo === 'string' && payload.relayTo ? { relayTo: payload.relayTo } : {}),
+    ...(payload?.__relayOptions && typeof payload.__relayOptions === 'object'
+      ? { __relayOptions: payload.__relayOptions }
+      : {}),
+    // 透传任意以 __relay 开头的自定义字段，方便以后扩展而不用再改这里
+    ...Object.fromEntries(
+      Object.entries(payload && typeof payload === 'object' ? payload : {})
+        .filter(([k]) => k.startsWith('__relay'))
+    )
   }
 }
 
