@@ -2,6 +2,37 @@
 
 本项目的中继服务器（`server/`）已经容器化，**推荐在 1Panel 上用 Docker Compose 一键部署**。
 
+> 📦 **已内置 CI**：每次推送代码，GitHub Actions 会自动构建镜像并推送到
+> `ghcr.io/obscurro110/anywhere-relay`。你可以选择**直接拉镜像**（方式 C），
+> 服务器无需构建，升级只需 `pull`。
+
+---
+
+## 方式 C：直接拉取 GHCR 镜像（最省资源，推荐）
+
+镜像由 GitHub Actions 自动构建，支持 `linux/amd64` 与 `linux/arm64`。
+
+```bash
+cd /opt/anywhere-mobile/server
+cp env.docker.example .env      # 填 AUTH_TOKENS
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+升级到最新镜像：
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+> 若镜像/包为 **Private**：先登录一次
+> ```bash
+> echo <你的PAT> | docker login ghcr.io -u Obscurro110 --password-stdin
+> ```
+> （PAT 需勾选 `read:packages`）。Public 则免登录。
+>
+> 也可在 `.env` 里覆盖：`GHCR_OWNER=你的用户名`、`IMAGE_TAG=latest`（或 `v1.0.0`、`sha-xxxx`）。
+
 ---
 
 ## 方案一：1Panel 图形界面（推荐，最省事）

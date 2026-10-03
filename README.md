@@ -58,6 +58,18 @@ docker compose up -d --build
 
 > **1Panel 用户**：见详细图文步骤 [`docs/DEPLOY_DOCKER_1PANEL.md`](docs/DEPLOY_DOCKER_1PANEL.md)（含反向代理启用 `wss://` 的配置）。
 
+#### 方式 A2：直接拉取已构建镜像（免服务器构建）
+
+CI 已自动把镜像推到 GHCR，服务器直接拉取即可：
+
+```bash
+cd server
+cp env.docker.example .env       # 修改 AUTH_TOKENS
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+镜像：`ghcr.io/obscurro110/anywhere-relay:latest`（支持 amd64 / arm64）
+
 #### 方式 B：直接 Node 运行（本地调试）
 
 ```bash
@@ -143,6 +155,21 @@ node test-e2e.mjs
 ## 协议
 
 三端通信契约详见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)。
+
+## CI / CD（GitHub Actions）
+
+仓库内置两个工作流，推送即自动运行：
+
+| 工作流 | 触发 | 作用 |
+| --- | --- | --- |
+| **Build & Push Relay Image** | 改动 `server/**` 或手动 | 构建镜像并推送到 `ghcr.io/obscurro110/anywhere-relay`（amd64+arm64，含 `latest`/`sha-*`/tag）|
+| **Build Android APK** | 改动 `app/**` 或手动 | 用 Flutter 构建 `app-release.apk`，作为 Artifact 上传；打 `v*` tag 时附带发 Release |
+
+- 查看运行结果：仓库 **Actions** 标签页
+- 手动触发：Actions → 选对应工作流 → **Run workflow**
+- 发布带 APK 的版本：`git tag v1.0.0 && git push origin v1.0.0`
+
+> APK 构建产物在对应运行页面的 **Artifacts** 区下载（`anywhere-mobile-apk`）。
 
 ## 说明
 

@@ -1,0 +1,36 @@
+# ------------------------------------------------------------------
+# Anywhere Relay Server — 直接拉取 GHCR 镜像版 Compose
+#
+# 适用于 1Panel：无需在服务器上构建，直接拉取 CI 构建好的镜像。
+#
+# 用法（在 server 目录，或任意目录）：
+#   1) 复制 env.docker.example 为 .env 并填好 AUTH_TOKENS
+#   2) docker compose -f docker-compose.ghcr.yml up -d
+#   3) 更新：docker compose -f docker-compose.ghcr.yml pull && ... up -d
+#
+# 镜像地址：ghcr.io/<你的GitHub用户名>/anywhere-relay:latest
+# 若仓库/包为私有：先 `docker login ghcr.io -u <用户名>`（密码填 PAT）
+# ------------------------------------------------------------------
+services:
+  anywhere-relay:
+    image: ghcr.io/${GHCR_OWNER:-obscurro110}/anywhere-relay:${IMAGE_TAG:-latest}
+    container_name: anywhere-relay
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      - PORT=8787
+      - HOST=0.0.0.0
+      - FILE_DIR=/app/data/files
+      - AUTH_TOKENS=${AUTH_TOKENS:-default-user:CHANGE_ME_TOKEN}
+      - FILE_TTL_HOURS=${FILE_TTL_HOURS:-72}
+      - MAX_FILE_MB=${MAX_FILE_MB:-512}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
