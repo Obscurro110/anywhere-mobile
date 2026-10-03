@@ -17,6 +17,7 @@ export '../core/protocol.dart'
         ConversationOption,
         ConvMessage,
         CompactConfig,
+        AssistantMeta,
         Envelope,
         MsgType,
         kProtocolVersion;
@@ -34,6 +35,10 @@ class ChatMessage {
   /// True while we're waiting for the desktop to produce this assistant reply.
   final bool pending;
 
+  /// 电脑端那条消息的定位信息（气泡操作栏用）。
+  /// 只有「电脑端回传的 assistant 回复」才有，本地消息为 null。
+  final AssistantMeta? desktopMeta;
+
   ChatMessage({
     required this.id,
     required this.role,
@@ -43,7 +48,12 @@ class ChatMessage {
     this.conversationId,
     this.attachments,
     this.pending = false,
+    this.desktopMeta,
   });
+
+  /// 是电脑端 AI 的回复（能重新回答 / 删除）
+  bool get isDesktopAssistant =>
+      !outgoing && role == 'assistant' && (desktopMeta?.isValid ?? false);
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -53,6 +63,7 @@ class ChatMessage {
         'outgoing': outgoing,
         'conversationId': conversationId,
         'attachments': attachments?.map((e) => e.toJson()).toList(),
+        if (desktopMeta != null) 'desktopMeta': desktopMeta!.toJson(),
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -65,6 +76,10 @@ class ChatMessage {
         attachments: (j['attachments'] as List?)
             ?.map((e) => FileMeta.fromJson(e as Map<String, dynamic>))
             .toList(),
+        desktopMeta: j['desktopMeta'] is Map
+            ? AssistantMeta.fromJson(
+                (j['desktopMeta'] as Map).cast<String, dynamic>())
+            : null,
       );
 
   ChatMessage copyWith({String? text, bool? pending}) => ChatMessage(
@@ -76,6 +91,7 @@ class ChatMessage {
         conversationId: conversationId,
         attachments: attachments,
         pending: pending ?? this.pending,
+        desktopMeta: desktopMeta,
       );
 }
 

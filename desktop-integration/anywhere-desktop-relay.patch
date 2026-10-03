@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..f7159ca
+index 0000000..481e403
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,1444 @@
+@@ -0,0 +1,1448 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1409,13 +1409,17 @@ index 0000000..f7159ca
 +    ...(await readCapabilities())
 +  })))
 +
-+  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
++  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to, role, extra } = {}) => {
 +    rlog('[relay] <- relay:sendChat  to =', to, ' len =', String(text || '').length)
 +    if (!relay?.connected) {
 +      rwarn('[relay] relay:sendChat rejected: not connected')
 +      return { ok: false, error: { message: 'relay_not_connected' } }
 +    }
-+    const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
++    const delivered = relay.sendChat(text, {
++      role: role || 'assistant',
++      to: to || '*',
++      extra
++    })
 +    rlog('[relay] -> sendChat delivered =', delivered)
 +    return { ok: true, delivered }
 +  }))
@@ -1536,10 +1540,10 @@ index 0000000..f7159ca
 +}
 diff --git a/main/relay/relay-client.js b/main/relay/relay-client.js
 new file mode 100644
-index 0000000..3593470
+index 0000000..1e9ef37
 --- /dev/null
 +++ b/main/relay/relay-client.js
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,272 @@
 +import { EventEmitter } from 'node:events';
 +import WebSocket from 'ws';
 +import http from 'node:http';
@@ -1699,13 +1703,22 @@ index 0000000..3593470
 +  }
 +
 +  /** Chat from desktop -> phone. to='*' broadcasts to all other devices. */
-+  sendChat(text, { role = 'assistant', to = '*', conversationId } = {}) {
++  sendChat(text, { role = 'assistant', to = '*', conversationId, extra } = {}) {
++    const payload = { role, text, conversationId };
++    // extra: 透传附加字段。手机端要靠它拿到电脑端那条消息的 id / 下标，
++    // 这样气泡上的「重新回答 / 删除这条」才能定位到正确的消息。
++    if (extra && typeof extra === 'object') {
++      for (const [k, v] of Object.entries(extra)) {
++        if (v === undefined || k === 'role' || k === 'text') continue;
++        payload[k] = v;
++      }
++    }
 +    return this._send({
 +      v: 1,
 +      type: 'chat',
 +      id: randomUUID(),
 +      to,
-+      payload: { role, text, conversationId },
++      payload,
 +    });
 +  }
 +
@@ -2216,7 +2229,7 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..6d21ada 100644
+index 6bb1113..57ff64b 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,86 @@ const normalizeWindowEventPayload = (input) => {
@@ -2342,7 +2355,7 @@ index 6bb1113..6d21ada 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10453,124 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10453,137 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -2456,7 +2469,20 @@ index 6bb1113..6d21ada 100644
 +    relayLastSentAssistantId = last.id;
 +    relayLog('[relay] replying to phone. to =', to, 'len =', text.length);
 +    try {
-+      await window.api.sendRelayChat({ text, to });
++      // 带上这条 assistant 消息在 chat_show 里的 id / 下标 / 会话，
++      // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
++      const assistantIndex = chat_show.value.length - 1;
++      await window.api.sendRelayChat({
++        text,
++        to,
++        extra: {
++          __relayAssistantMeta: {
++            messageId: String(last.id ?? ''),
++            index: assistantIndex,
++            conversationId: currentConversationStorage.value?.conversationId || ''
++          }
++        }
++      });
 +      relayLog('[relay] reply sent ok');
 +      relayReplyTarget.value = null;
 +    } catch (err) {

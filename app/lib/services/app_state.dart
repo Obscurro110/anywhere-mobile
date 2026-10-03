@@ -425,6 +425,37 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- 主聊天界面：气泡操作（对应电脑端气泡下方那排按钮）----
+
+  /// 复制不需要电脑端，UI 直接做。
+
+  /// 让电脑端重新回答这一条（气泡上的 ↻）。
+  bool reaskChatMessage(ChatMessage m) {
+    final meta = m.desktopMeta;
+    if (meta == null || !meta.isValid) return false;
+    final convId = meta.conversationId.isNotEmpty
+        ? meta.conversationId
+        : (m.conversationId ?? _activeConversationId ?? '');
+    return reaskMessageOnDesktop(convId, meta.messageId);
+  }
+
+  /// 让电脑端删掉这一条（气泡上的 🗑）。
+  /// 顺带把本地这条从列表里去掉，避免刷新前后不一致。
+  bool deleteChatMessage(ChatMessage m) {
+    final meta = m.desktopMeta;
+    if (meta == null || meta.index < 0) return false;
+    final convId = meta.conversationId.isNotEmpty
+        ? meta.conversationId
+        : (m.conversationId ?? _activeConversationId ?? '');
+    final ok = deleteMessageOnDesktop(convId, meta.index);
+    if (ok) {
+      messages.removeWhere((x) => x.id == m.id);
+      _persistHistory();
+      notifyListeners();
+    }
+    return ok;
+  }
+
   // ---- 定时任务管理 ----
 
   /// 新建任务。名称不能含 \ / : * ? " < > |
@@ -966,6 +997,7 @@ class AppState extends ChangeNotifier {
         outgoing: false,
         conversationId: p.conversationId,
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+        desktopMeta: p.assistantMeta,
       );
     } else {
       messages.add(ChatMessage(
@@ -976,6 +1008,7 @@ class AppState extends ChangeNotifier {
         outgoing: false,
         conversationId: p.conversationId,
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+        desktopMeta: p.assistantMeta,
       ));
     }
     _persistHistory();

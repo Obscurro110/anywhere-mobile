@@ -235,12 +235,17 @@ class ChatPayload {
   final List<Map<String, dynamic>>? attachments;
   final ChatOptions? options;
 
+  /// 电脑端那条 assistant 消息的元信息（气泡上的「重新回答 / 删除这条」
+  /// 要靠它定位到电脑端 chat_show 里的正确位置）。
+  final AssistantMeta? assistantMeta;
+
   ChatPayload({
     required this.role,
     required this.text,
     this.conversationId,
     this.attachments,
     this.options,
+    this.assistantMeta,
   });
 
   Map<String, dynamic> toJson() => {
@@ -249,6 +254,7 @@ class ChatPayload {
         if (conversationId != null) 'conversationId': conversationId,
         if (attachments != null) 'attachments': attachments,
         if (options != null && !options!.isEmpty) 'options': options!.toJson(),
+        if (assistantMeta != null) '__relayAssistantMeta': assistantMeta!.toJson(),
       };
 
   factory ChatPayload.fromJson(Map<String, dynamic> j) => ChatPayload(
@@ -259,6 +265,39 @@ class ChatPayload {
         options: j['options'] is Map
             ? ChatOptions.fromJson((j['options'] as Map).cast<String, dynamic>())
             : null,
+        assistantMeta: j['__relayAssistantMeta'] is Map
+            ? AssistantMeta.fromJson(
+                (j['__relayAssistantMeta'] as Map).cast<String, dynamic>())
+            : null,
+      );
+}
+
+/// 电脑端某条 assistant 消息的定位信息。
+class AssistantMeta {
+  /// 电脑端 chat_show 里这条气泡的 id（「重新回答」要回传它）
+  final String messageId;
+  /// 在 chat_show 里的下标（「删除这条」要回传它）
+  final int index;
+  final String conversationId;
+
+  AssistantMeta({
+    this.messageId = '',
+    this.index = -1,
+    this.conversationId = '',
+  });
+
+  bool get isValid => messageId.isNotEmpty && index >= 0;
+
+  Map<String, dynamic> toJson() => {
+        'messageId': messageId,
+        'index': index,
+        'conversationId': conversationId,
+      };
+
+  factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
+        messageId: j['messageId'] as String? ?? '',
+        index: (j['index'] as num?)?.toInt() ?? -1,
+        conversationId: j['conversationId'] as String? ?? '',
       );
 }
 

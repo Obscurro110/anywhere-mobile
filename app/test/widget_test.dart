@@ -359,4 +359,93 @@ void main() {
       expect(m.canDelete, isFalse);
     });
   });
+
+  group('AssistantMeta / 气泡操作', () {
+    test('解析电脑端回传的消息定位信息', () {
+      final m = AssistantMeta.fromJson({
+        'messageId': '42',
+        'index': 7,
+        'conversationId': 'conv-a',
+      });
+      expect(m.messageId, '42');
+      expect(m.index, 7);
+      expect(m.conversationId, 'conv-a');
+      expect(m.isValid, isTrue);
+    });
+
+    test('缺字段时为无效（不显示操作按钮）', () {
+      final m = AssistantMeta.fromJson({});
+      expect(m.messageId, '');
+      expect(m.index, -1);
+      expect(m.isValid, isFalse);
+    });
+
+    test('ChatPayload 往返保留 assistantMeta', () {
+      final p = ChatPayload(
+        role: ChatRole.assistant,
+        text: 'hello',
+        assistantMeta: AssistantMeta(
+          messageId: '5',
+          index: 2,
+          conversationId: 'c1',
+        ),
+      );
+      final j = p.toJson();
+      expect(j['__relayAssistantMeta'], isNotNull);
+      final back = ChatPayload.fromJson(j);
+      expect(back.assistantMeta?.messageId, '5');
+      expect(back.assistantMeta?.index, 2);
+      expect(back.assistantMeta?.conversationId, 'c1');
+    });
+
+    test('没有 meta 时 ChatPayload 不带该字段', () {
+      final p = ChatPayload(role: ChatRole.assistant, text: 'x');
+      expect(p.toJson().containsKey('__relayAssistantMeta'), isFalse);
+    });
+
+    test('ChatMessage 带上 meta 才算可操作', () {
+      final withMeta = ChatMessage(
+        id: 'a',
+        role: 'assistant',
+        text: 'hi',
+        time: DateTime.fromMillisecondsSinceEpoch(1),
+        outgoing: false,
+        desktopMeta: AssistantMeta(messageId: '3', index: 1),
+      );
+      expect(withMeta.isDesktopAssistant, isTrue);
+
+      final noMeta = ChatMessage(
+        id: 'b',
+        role: 'assistant',
+        text: 'hi',
+        time: DateTime.fromMillisecondsSinceEpoch(1),
+        outgoing: false,
+      );
+      expect(noMeta.isDesktopAssistant, isFalse);
+
+      final own = ChatMessage(
+        id: 'c',
+        role: 'assistant',
+        text: 'hi',
+        time: DateTime.fromMillisecondsSinceEpoch(1),
+        outgoing: true,
+        desktopMeta: AssistantMeta(messageId: '3', index: 1),
+      );
+      expect(own.isDesktopAssistant, isFalse);
+    });
+
+    test('ChatMessage 往返保留 desktopMeta', () {
+      final m = ChatMessage(
+        id: 'x',
+        role: 'assistant',
+        text: 't',
+        time: DateTime.fromMillisecondsSinceEpoch(1000),
+        outgoing: false,
+        desktopMeta: AssistantMeta(messageId: '9', index: 4, conversationId: 'c'),
+      );
+      final back = ChatMessage.fromJson(m.toJson());
+      expect(back.desktopMeta?.messageId, '9');
+      expect(back.desktopMeta?.index, 4);
+    });
+  });
 }

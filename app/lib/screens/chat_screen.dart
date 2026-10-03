@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:provider/provider.dart';
@@ -240,7 +241,109 @@ class _Bubble extends StatelessWidget {
                   ),
                 ),
               ),
+            // 气泡下方的操作栏（对齐电脑端气泡底部的按钮）
+            if (!msg.pending) _ActionBar(msg: msg, outgoing: outgoing),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 气泡底部的操作按钮：复制 / 重新回答 / 删除这条。
+///
+/// 对应电脑端 ChatMessage.vue 的 footer-actions。
+/// 「重新回答」「删除这条」需要电脑端那条消息的定位信息（desktopMeta），
+/// 只有电脑端回传的 AI 回复才有；普通消息至少能「复制」。
+class _ActionBar extends StatelessWidget {
+  final ChatMessage msg;
+  final bool outgoing;
+  const _ActionBar({required this.msg, required this.outgoing});
+
+  @override
+  Widget build(BuildContext context) {
+    // 「重新回答」「删除这条」要能定位到电脑端那条消息
+    final canReask = !outgoing && msg.isDesktopAssistant;
+    final canDelete = msg.isDesktopAssistant;
+    final isAssistant = msg.role == ChatRole.assistant;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _act(context, Icons.copy_rounded, '复制', () async {
+            await Clipboard.setData(ClipboardData(text: msg.text));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('已复制'),
+                duration: Duration(seconds: 1),
+              ));
+            }
+          }),
+          if (isAssistant && canReask)
+            _act(context, Icons.refresh_rounded, '重新回答', () async {
+              final state = context.read<AppState>();
+              final ok = state.reaskChatMessage(msg);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(ok ? '已让电脑端重新回答…' : '发送失败'),
+                  duration: const Duration(seconds: 2),
+                ));
+              }
+            }),
+          if (canDelete)
+            _act(context, Icons.delete_outline_rounded, '删除这条', () async {
+              final state = context.read<AppState>();
+              final yes = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('删除这条消息'),
+                  content: const Text('将从电脑端这个会话里删除这条消息，不可撤销。'),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('取消')),
+                    FilledButton(
+                      style:
+                          FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('删除'),
+                    ),
+                  ],
+                ),
+              );
+              if (yes != true) return;
+              final ok = state.deleteChatMessage(msg);
+              if (context.mounted && !ok) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('删除失败（电脑端未连接该会话）'),
+                ));
+              }
+            }, danger: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _act(BuildContext context, IconData icon, String label,
+      VoidCallback onTap, {bool danger = false}) {
+    final color = danger ? Colors.redAccent : Colors.white54;
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 15, color: color),
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(fontSize: 11.5, color: color)),
+            ],
+          ),
         ),
       ),
     );
