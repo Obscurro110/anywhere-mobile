@@ -18,3 +18,7 @@ key.properties
 *.local
 *.log
 node_modules/
+
+# 中继服务器运行时数据
+server/data/
+
