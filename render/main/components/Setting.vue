@@ -140,7 +140,10 @@ async function refreshRelayStatus() {
       relayStatus.value = {
         connected: !!res.connected,
         deviceId: res.deviceId || null,
-        peers: res.peers || []
+        peers: res.peers || [],
+          version: res.version || '',
+          versionCode: res.versionCode || 0,
+          upstreamVersion: res.upstreamVersion || ''
       }
     }
   } catch (e) { /* ignore */ }
@@ -2390,6 +2393,9 @@ async function pullSelectedCloudSkillsToLocal() {
                         <span class="setting-option-description">
                           {{ relayStatus.connected ? '已连接中继' : '未连接' }}
                           <template v-if="relayStatus.deviceId">，本机 ID：{{ relayStatus.deviceId }}</template>
+                          <template v-if="relayStatus.version">
+                            ，互通版本 v{{ relayStatus.version }}<template v-if="relayStatus.upstreamVersion">（上游 {{ relayStatus.upstreamVersion }}）</template>
+                          </template>
                         </span>
                       </div>
                       <div style="display: flex; align-items: center; gap: 10px;">

@@ -51,6 +51,7 @@ import { app, ipcMain } from 'electron'
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { RelayClient } from './relay-client.js'
+import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
 
 let relay = null
 let ctx = null // { getWindowByRef, listWindows, dispatchWindowEvent, openWindow, dataApi }
@@ -109,7 +110,16 @@ function emitToWindows(event, payload) {
 // 能力清单（模型 / MCP / Skill），供手机端渲染选择器
 // ---------------------------------------------------------------------------
 async function readCapabilities() {
-  const result = { models: [], mcp: [], skills: [], promptKey: phonePromptKey, reasoningEffortOptions: [] }
+  const result = {
+    models: [],
+    mcp: [],
+    skills: [],
+    promptKey: phonePromptKey,
+    reasoningEffortOptions: [],
+    desktopVersion: RELAY_VERSION,
+    desktopVersionCode: RELAY_VERSION_CODE,
+    upstreamVersion: app.getVersion()
+  }
   try {
     if (!ctx?.dataApi?.getConfig) return result
     const res = await ctx.dataApi.getConfig()
@@ -284,7 +294,18 @@ function registerIpc() {
     ok: true,
     connected: !!relay?.connected,
     deviceId: relay?.deviceId || null,
-    peers: relay?.peers || []
+    peers: relay?.peers || [],
+    version: RELAY_VERSION,
+    versionCode: RELAY_VERSION_CODE,
+    upstreamVersion: app.getVersion()
+  })))
+
+  ipcMain.handle('relay:version', guard(async () => ({
+    ok: true,
+    version: RELAY_VERSION,
+    versionCode: RELAY_VERSION_CODE,
+    upstreamVersion: app.getVersion(),
+    appVersion: app.getVersion()
   })))
 
   ipcMain.handle('relay:getConfig', guard(async () => {
