@@ -44,6 +44,18 @@ class ChatRole {
 
   /// Desktop -> phone: result of a task-run request.
   static const taskRunResult = 'task-run-result';
+
+  /// Desktop -> phone: list of existing desktop conversations.
+  static const conversations = 'conversations';
+
+  /// Phone -> desktop: please send me your conversation list.
+  static const conversationsRequest = 'conversations-request';
+
+  /// Phone -> desktop: open this conversation on the desktop and let me chat in it.
+  static const conversationOpen = 'conversation-open';
+
+  /// Desktop -> phone: result of a conversation-open request.
+  static const conversationOpenResult = 'conversation-open-result';
 }
 
 /// A single unit of data flowing over the relay.
@@ -352,13 +364,57 @@ class PromptOption {
         type: j['type'] as String? ?? 'over',
         reasoningEffort: j['reasoningEffort'] as String? ?? '',
         mcp: ((j['mcp'] as List?) ?? const [])
-            .map((e) => e.toString())
+            .map((e) => e.toString().trim())
             .where((e) => e.isNotEmpty)
             .toList(),
         skills: ((j['skills'] as List?) ?? const [])
-            .map((e) => e.toString())
+            .map((e) => e.toString().trim())
             .where((e) => e.isNotEmpty)
             .toList(),
+      );
+}
+
+/// 电脑端已有会话（手机「电脑端对话」列表用）。
+class ConversationOption {
+  final String id;
+  final String title;
+  final String updatedAt;
+  final String createdAt;
+  final int size;
+  final String format;
+
+  ConversationOption({
+    required this.id,
+    required this.title,
+    this.updatedAt = '',
+    this.createdAt = '',
+    this.size = 0,
+    this.format = 'sqlite',
+  });
+
+  /// 相对时间，例如「3 分钟前」「昨天」
+  String get updatedLabel {
+    final dt = DateTime.tryParse(updatedAt);
+    if (dt == null) return '';
+    final local = dt.toLocal();
+    final diff = DateTime.now().difference(local);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
+    if (diff.inHours < 24) return '${diff.inHours} 小时前';
+    if (diff.inDays == 1) return '昨天';
+    if (diff.inDays < 30) return '${diff.inDays} 天前';
+    return '${local.year}-${_two(local.month)}-${_two(local.day)}';
+  }
+
+  static String _two(int n) => n < 10 ? '0$n' : '$n';
+
+  factory ConversationOption.fromJson(Map<String, dynamic> j) => ConversationOption(
+        id: j['id'] as String? ?? '',
+        title: j['title'] as String? ?? '未命名会话',
+        updatedAt: j['updatedAt'] as String? ?? '',
+        createdAt: j['createdAt'] as String? ?? '',
+        size: (j['size'] as num?)?.toInt() ?? 0,
+        format: j['format'] as String? ?? 'sqlite',
       );
 }
 

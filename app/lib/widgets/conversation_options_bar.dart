@@ -26,6 +26,20 @@ class ConversationOptionsBar extends StatelessWidget {
     final state = context.watch<AppState>();
     final caps = state.capabilities;
     final opts = state.options;
+    // 当前助手带来的预设，用来在 chip 上标一个「预设」来源
+    final preset = state.activePrompt;
+
+    /// 某一项是否正好等于助手预设（是的话说明"这一项来自助手"）
+    bool fromPresetModel() =>
+        preset != null && preset.model.isNotEmpty && preset.model == opts.model;
+    bool fromPresetEffort() =>
+        preset != null &&
+        preset.reasoningEffort.isNotEmpty &&
+        preset.reasoningEffort == opts.reasoningEffort;
+    bool fromPresetMcp() =>
+        preset != null && preset.mcp.isNotEmpty && _listEq(preset.mcp, opts.mcp);
+    bool fromPresetSkills() =>
+        preset != null && preset.skills.isNotEmpty && _listEq(preset.skills, opts.skills);
 
     return Container(
       color: const Color(0xFF141821),
@@ -48,6 +62,7 @@ class ConversationOptionsBar extends StatelessWidget {
               icon: Icons.memory,
               label: _modelLabel(caps, opts.model),
               active: (opts.model ?? '').isNotEmpty,
+              preset: fromPresetModel(),
               onTap: () => _pickModel(context, state),
             ),
             // ---- 思考预算 ----
@@ -58,6 +73,7 @@ class ConversationOptionsBar extends StatelessWidget {
                   '思考 ${_effortLabels[opts.reasoningEffort ?? 'default'] ?? opts.reasoningEffort}',
               active:
                   opts.reasoningEffort != null && opts.reasoningEffort != 'default',
+              preset: fromPresetEffort(),
               onTap: () => _pickEffort(context, state),
             ),
             // ---- MCP ----
@@ -66,12 +82,16 @@ class ConversationOptionsBar extends StatelessWidget {
               icon: Icons.build_outlined,
               label: 'MCP${(opts.mcp?.isNotEmpty ?? false) ? ' ${opts.mcp!.length}' : ''}',
               active: opts.mcp?.isNotEmpty ?? false,
+              preset: fromPresetMcp(),
               onTap: () => _pickMulti(
                 context,
                 state,
                 title: 'MCP 工具',
                 items: caps.mcp
-                    .map((m) => _MultiItem(id: m.id, label: m.label, note: m.enabled ? null : '（电脑端已停用）'))
+                    .map((m) => _MultiItem(
+                        id: m.id,
+                        label: m.label,
+                        note: m.enabled ? null : '（电脑端已停用）'))
                     .toList(),
                 selected: {...?opts.mcp},
                 apply: (sel) => state.setOptions(opts.copyWith(mcp: sel)),
@@ -81,8 +101,10 @@ class ConversationOptionsBar extends StatelessWidget {
             _chip(
               context,
               icon: Icons.extension_outlined,
-              label: 'Skill${(opts.skills?.isNotEmpty ?? false) ? ' ${opts.skills!.length}' : ''}',
+              label:
+                  'Skill${(opts.skills?.isNotEmpty ?? false) ? ' ${opts.skills!.length}' : ''}',
               active: opts.skills?.isNotEmpty ?? false,
+              preset: fromPresetSkills(),
               onTap: () => _pickMulti(
                 context,
                 state,
@@ -115,6 +137,16 @@ class ConversationOptionsBar extends StatelessWidget {
     );
   }
 
+  static bool _listEq(List<String> a, List<String>? b) {
+    if (b == null || a.length != b.length) return false;
+    final sa = [...a]..sort();
+    final sb = [...b]..sort();
+    for (var i = 0; i < sa.length; i++) {
+      if (sa[i] != sb[i]) return false;
+    }
+    return true;
+  }
+
   // ---- labels ----
   static String _promptLabel(Capabilities caps, String? key) {
     if (key == null || key.isEmpty) return '助手：默认';
@@ -137,6 +169,8 @@ class ConversationOptionsBar extends StatelessWidget {
     required String label,
     required bool active,
     required VoidCallback onTap,
+    /// 这一项的值来自「助手预设」，在左侧加一个小圆点提示
+    bool preset = false,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -147,10 +181,20 @@ class ConversationOptionsBar extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: EdgeInsets.fromLTRB(preset ? 7 : 10, 6, 10, 6),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (preset)
+                  Container(
+                    width: 5,
+                    height: 5,
+                    margin: const EdgeInsets.only(right: 5),
+                    decoration: const BoxDecoration(
+                      color: Colors.lightBlueAccent,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
                 Icon(icon, size: 14, color: active ? Colors.lightBlueAccent : Colors.white54),
                 const SizedBox(width: 5),
                 ConstrainedBox(

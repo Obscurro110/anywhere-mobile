@@ -14,6 +14,7 @@ export '../core/protocol.dart'
         SkillOption,
         PromptOption,
         TaskOption,
+        ConversationOption,
         Envelope,
         MsgType,
         kProtocolVersion;

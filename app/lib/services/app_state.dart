@@ -46,6 +46,19 @@ class AppState extends ChangeNotifier {
   /// 是否正在拉取任务列表
   bool loadingTasks = false;
 
+  /// 电脑端已有会话（「电脑端对话」列表）
+  List<ConversationOption> conversations = const [];
+  bool loadingConversations = false;
+  bool conversationsOk = true;
+  String? conversationsError;
+
+  /// 最近一次「打开电脑端会话」的结果
+  Map<String, dynamic>? lastConversationOpen;
+
+  /// 当前手机正在对话的电脑端会话（null = 手机自建的临时会话）
+  String? activeConversationId;
+  String activeConversationTitle = '';
+
   /// Currently selected run options (sent with every message).
   ChatOptions options = const ChatOptions();
 
@@ -165,6 +178,70 @@ class AppState extends ChangeNotifier {
     if (loadingTasks) {
       loadingTasks = false;
       notifyListeners();
+    }
+  }
+
+  /// 拉取电脑端已有会话列表。
+  Future<void> requestConversations() async {
+    if (!_client.isConnected) {
+      conversationsError = '未连接到中继服务器';
+      notifyListeners();
+      return;
+    }
+    loadingConversations = true;
+    conversationsError = null;
+    notifyListeners();
+    _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: ChatPayload(role: ChatRole.conversationsRequest, text: '').toJson(),
+    ));
+    await Future.delayed(const Duration(seconds: 8));
+    if (loadingConversations) {
+      loadingConversations = false;
+      conversationsError ??= '电脑端没有响应（确认电脑端在线，且已设置本地会话目录）';
+      notifyListeners();
+    }
+  }
+
+  /// 在电脑端打开某个已有会话，并把回复回传到这里。
+  bool openConversationOnDesktop(String conversationId) {
+    if (!_client.isConnected) return false;
+    lastConversationOpen = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationOpen,
+        'text': '',
+        'conversationId': conversationId,
+      },
+    ));
+  }
+
+  /// 回到「手机自建会话」（不再对接着电脑端的某个会话）。
+  void leaveDesktopConversation() {
+    activeConversationId = null;
+    activeConversationTitle = '';
+    lastConversationOpen = null;
+    notifyListeners();
+  }
+
+  static String _conversationOpenReason(String reason) {
+    switch (reason) {
+      case 'chat_dir_not_configured':
+        return '电脑端还没设置「本地会话目录」';
+      case 'conversation_not_found':
+        return '电脑端找不到这个会话（可能已被删除或移动）';
+      case 'open_window_failed':
+        return '电脑端打开窗口失败';
+      case 'openWindow_unavailable':
+        return '电脑端版本过旧，请更新桌面端';
+      default:
+        return reason.isEmpty ? '未知原因' : reason;
     }
   }
 
@@ -328,6 +405,65 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] task-run-result decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端回传「已有会话」列表
+    if (p.role == ChatRole.conversations) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final raw = (decoded['__relayConversations'] as List?) ?? const [];
+        conversations = raw
+            .map((e) => ConversationOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((c) => c.id.isNotEmpty)
+            .toList();
+        conversationsOk = decoded['ok'] != false;
+        final reason = decoded['reason']?.toString() ?? '';
+        if (!conversationsOk) {
+          conversationsError = reason == 'chat_dir_not_configured'
+              ? '电脑端还没设置「本地会话目录」，请到电脑端 设置 → 对话存储 里选一个目录'
+              : (reason.isEmpty ? '读取失败' : reason);
+        } else {
+          conversationsError = null;
+        }
+        loadingConversations = false;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] conversations decode failed: $e');
+        loadingConversations = false;
+        conversationsError = '解析会话列表失败';
+        notifyListeners();
+      }
+      return;
+    }
+
+    // 电脑端回传「打开会话」结果
+    if (p.role == ChatRole.conversationOpenResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayConversationOpen'] as Map?)?.cast<String, dynamic>() ?? {};
+        final ok = r['ok'] == true;
+        activeConversationId = ok ? (r['conversationId']?.toString() ?? null) : null;
+        activeConversationTitle = ok ? (r['title']?.toString() ?? '') : '';
+        lastConversationOpen = {
+          'ok': ok,
+          'conversationId': r['conversationId']?.toString() ?? '',
+          'title': r['title']?.toString() ?? '',
+          'reason': r['reason']?.toString() ?? '',
+        };
+        notifications.show(
+          ok ? '已打开电脑端会话' : '打开会话失败',
+          ok
+              ? ((r['title']?.toString() ?? '').isEmpty
+                  ? '电脑端已切换到该会话，可直接对话'
+                  : '「${r['title']}」，可直接对话')
+              : _conversationOpenReason(r['reason']?.toString() ?? ''),
+          id: DateTime.now().millisecondsSinceEpoch.remainder(100000),
+        );
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] conversation-open-result decode failed: $e');
       }
       return;
     }

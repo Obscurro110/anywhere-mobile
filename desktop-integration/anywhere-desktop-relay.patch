@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..c077508
+index 0000000..1242929
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,667 @@
+@@ -0,0 +1,837 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -144,6 +144,7 @@ index 0000000..c077508
 +import { join } from 'node:path'
 +import { RelayClient } from './relay-client.js'
 +import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
++import { listLocalConversations, openConversation } from '../core/conversationStore.js'
 +
 +// ---------------------------------------------------------------------------
 +// 日志落盘
@@ -185,6 +186,13 @@ index 0000000..c077508
 +let phoneWindowId = null
 +/** 用于承载手机对话的 prompt 配置键（默认 'AI'） */
 +let phonePromptKey = 'AI'
++/**
++ * 当前手机窗口承载的「内容标识」。
++ *   'phone'           → 手机自己发起的临时会话
++ *   'conv:<id>'       → 打开的某个电脑端已有会话
++ * 用于判断复用窗口还是重开。
++ */
++let phoneWindowKey = 'phone'
 +
 +const CONFIG_PATH = () => join(app.getPath('userData'), 'relay.json')
 +
@@ -450,6 +458,110 @@ index 0000000..c077508
 +  return { ok: Boolean(openResult?.ok), windowId: openResult?.id || null, promptKey }
 +}
 +
++/**
++ * 读取电脑端的「本地会话目录」。
++ * 电脑端把它存在 config.webdav.localChatPath（主界面「对话」页用的同一路径）。
++ */
++async function readChatDirPath() {
++  const res = await ctx?.dataApi?.getConfig?.()
++  const cfg = res?.config && typeof res.config === 'object' ? res.config : {}
++  const fromConfig = cfg?.webdav?.localChatPath
++  if (typeof fromConfig === 'string' && fromConfig.trim()) return fromConfig.trim()
++  // 允许用 relay.json 覆盖（路径不标准时手填）
++  const fromRelay = readConfig()?.chatDir
++  return typeof fromRelay === 'string' ? fromRelay.trim() : ''
++}
++
++/** 把内部会话对象整理成手机端好显示的字段 */
++function toPhoneConversation(item) {
++  const id = String(item?.conversationId || item?.filename || item?.basename || '').trim()
++  const title = String(item?.title || '').trim()
++  return {
++    id,
++    title: title || (id ? id.replace(/\.json$/i, '') : '未命名会话'),
++    updatedAt: item?.updatedAt || item?.lastmod || '',
++    createdAt: item?.createdAt || '',
++    size: Number(item?.size) || 0,
++    format: item?.format || 'sqlite',
++    basename: item?.basename || item?.filename || ''
++  }
++}
++
++/**
++ * 列出电脑端的本地会话（手机「电脑端对话」列表）。
++ */
++async function listPhoneConversations() {
++  const dirPath = await readChatDirPath()
++  if (!dirPath) {
++    return { ok: false, reason: 'chat_dir_not_configured', conversations: [] }
++  }
++  const all = await listLocalConversations(dirPath)
++  const list = (Array.isArray(all) ? all : [])
++    .map(toPhoneConversation)
++    .filter((c) => c.id)
++    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
++  return { ok: true, dirPath, conversations: list }
++}
++
++/**
++ * 手机点开某个电脑端会话：
++ * 把该会话在本机窗口里打开，并把回复回传目标绑到那个窗口。
++ */
++async function openPhoneConversation(conversationId, relayTo) {
++  const dirPath = await readChatDirPath()
++  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
++  if (typeof ctx?.openWindow !== 'function') return { ok: false, reason: 'openWindow_unavailable' }
++
++  // 读会话内容（descriptor + sessionData），窗口靠它恢复历史
++  const opened = await openConversation({ dirPath, reference: conversationId })
++  if (!opened?.ok || !opened.descriptor || !opened.sessionData) {
++    return { ok: false, reason: 'conversation_not_found' }
++  }
++
++  // 已经为这个会话开过窗口就复用
++  const reuseKey = `conv:${opened.descriptor.conversationId}`
++  if (phoneWindowId && phoneWindowKey === reuseKey && isWindowAlive(phoneWindowId)) {
++    try {
++      ctx.dispatchWindowEvent(
++        {
++          event: 'relay:incoming',
++          payload: { type: 'empty', payload: '', relayTo, __relayArmOnly: true },
++          target: phoneWindowId
++        },
++        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
++      )
++      return { ok: true, windowId: phoneWindowId, reused: true, title: opened.descriptor.title }
++    } catch (err) {
++      rwarn('[relay] reuse conversation window failed:', err?.message || err)
++    }
++  }
++
++  const promptKey =
++    opened.sessionData?.promptKey ||
++    opened.sessionData?.sessionMetadata?.promptKey ||
++    phonePromptKey
++
++  const res = await ctx.openWindow('window', {
++    code: promptKey,
++    type: 'over',
++    payload: '',
++    conversation: {
++      descriptor: opened.descriptor,
++      sessionData: opened.sessionData
++    },
++    relayTo
++  })
++
++  if (res?.ok && res.id) {
++    phoneWindowId = res.id
++    phoneWindowKey = reuseKey
++    rlog('[relay] opened conversation window:', res.id, 'conv =', opened.descriptor.conversationId)
++    return { ok: true, windowId: res.id, title: opened.descriptor.title }
++  }
++  rwarn('[relay] openWindow for conversation returned:', res)
++  return { ok: false, reason: 'open_window_failed' }
++}
++
 +async function routePhoneChat(msg) {
 +  const role = String(msg?.role ?? 'user').toLowerCase()
 +  const to = msg?.from || '*'
@@ -497,6 +609,64 @@ index 0000000..c077508
 +        role: 'task-run-result',
 +        to
 +      })
++    }
++    return
++  }
++
++  // 手机请求「电脑端已有会话」列表
++  if (role === 'conversations-request') {
++    try {
++      const res = await listPhoneConversations()
++      relay?.sendChat(
++        JSON.stringify({
++          __relayConversations: res.conversations || [],
++          ok: res.ok,
++          reason: res.reason || '',
++          dirPath: res.dirPath || ''
++        }),
++        { role: 'conversations', to }
++      )
++    } catch (err) {
++      rwarn('[relay] conversations reply failed:', err?.message || err)
++      relay?.sendChat(
++        JSON.stringify({ __relayConversations: [], ok: false, reason: String(err?.message || err) }),
++        { role: 'conversations', to }
++      )
++    }
++    return
++  }
++
++  // 手机点开某个电脑端会话 → 在电脑端打开它并把回复回传手机
++  if (role === 'conversation-open') {
++    const conversationId = String(msg?.conversationId ?? '').trim()
++    try {
++      if (!conversationId) throw new Error('conversationId required')
++      const res = await openPhoneConversation(conversationId, to)
++      relay?.sendChat(
++        JSON.stringify({
++          __relayConversationOpen: {
++            conversationId,
++            ok: !!res.ok,
++            reason: res.reason || '',
++            windowId: res.windowId || null,
++            title: res.title || '',
++            reused: !!res.reused
++          }
++        }),
++        { role: 'conversation-open-result', to }
++      )
++    } catch (err) {
++      rwarn('[relay] conversation open failed:', err?.message || err)
++      relay?.sendChat(
++        JSON.stringify({
++          __relayConversationOpen: {
++            conversationId,
++            ok: false,
++            reason: String(err?.message || err)
++          }
++        }),
++        { role: 'conversation-open-result', to }
++      )
 +    }
 +    return
 +  }

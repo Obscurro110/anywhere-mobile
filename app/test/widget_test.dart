@@ -148,4 +148,71 @@ void main() {
       expect((j['options'] as Map)['model'], '0|gpt-4o');
     });
   });
+
+  group('ConversationOption', () {
+    test('解析电脑端会话', () {
+      final c = ConversationOption.fromJson({
+        'id': 'conv-123',
+        'title': '重构 relay 桥接',
+        'updatedAt': '2026-10-03T10:00:00.000Z',
+        'size': 20480,
+        'format': 'sqlite',
+      });
+      expect(c.id, 'conv-123');
+      expect(c.title, '重构 relay 桥接');
+      expect(c.size, 20480);
+    });
+
+    test('缺字段时不炸，标题兜底', () {
+      final c = ConversationOption.fromJson({'id': 'x'});
+      expect(c.id, 'x');
+      expect(c.title, '未命名会话');
+      expect(c.updatedLabel, '');
+    });
+
+    test('相对时间按新旧给出人话', () {
+      String iso(Duration ago) =>
+          DateTime.now().toUtc().subtract(ago).toIso8601String();
+      expect(ConversationOption.fromJson({'id': 'a', 'updatedAt': iso(const Duration(seconds: 20))}).updatedLabel, '刚刚');
+      expect(ConversationOption.fromJson({'id': 'b', 'updatedAt': iso(const Duration(minutes: 5))}).updatedLabel, '5 分钟前');
+      expect(ConversationOption.fromJson({'id': 'c', 'updatedAt': iso(const Duration(hours: 3))}).updatedLabel, '3 小时前');
+      expect(ConversationOption.fromJson({'id': 'd', 'updatedAt': iso(const Duration(days: 1, hours: 1))}).updatedLabel, '昨天');
+    });
+  });
+
+  group('PromptOption 预设', () {
+    test('解析助手的 MCP / Skill 预设', () {
+      final p = PromptOption.fromJson({
+        'key': 'AI',
+        'label': '通用助手',
+        'model': '0|gpt-4o',
+        'reasoningEffort': 'high',
+        'mcp': ['fs', 'shell'],
+        'skills': ['review'],
+      });
+      expect(p.hasPreset, isTrue);
+      expect(p.mcp, ['fs', 'shell']);
+      expect(p.skills, ['review']);
+      expect(p.reasoningEffort, 'high');
+      expect(p.presetSummary, contains('2 个 MCP'));
+      expect(p.presetSummary, contains('1 个 Skill'));
+    });
+
+    test('没配预设时 hasPreset 为 false', () {
+      final p = PromptOption.fromJson({'key': 'Bare', 'label': '裸助手'});
+      expect(p.hasPreset, isFalse);
+      expect(p.mcp, isEmpty);
+      expect(p.skills, isEmpty);
+    });
+
+    test('过滤掉空的预设项', () {
+      final p = PromptOption.fromJson({
+        'key': 'AI',
+        'mcp': ['fs', '', '  '],
+        'skills': ['', 'review'],
+      });
+      expect(p.mcp, ['fs']);
+      expect(p.skills, ['review']);
+    });
+  });
 }

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../widgets/setting_tiles.dart';
 import '../widgets/update_card.dart';
+import 'conversations_screen.dart';
 import 'devices_screen.dart';
 import 'relay_settings_screen.dart';
 import 'tasks_screen.dart';
@@ -34,6 +35,22 @@ class SettingsPage extends StatelessWidget {
           // ---------- 与电脑端 ----------
           const SettingGroupTitle('与电脑端'),
           SettingCard(children: [
+            SettingTile(
+              icon: Icons.forum_outlined,
+              iconColor: Colors.lightBlueAccent,
+              title: '电脑端对话',
+              value: state.activeConversationId != null
+                  ? '对话中'
+                  : (state.conversations.isEmpty
+                      ? '未同步'
+                      : '${state.conversations.length} 个'),
+              subtitle: state.activeConversationId != null
+                  ? (state.activeConversationTitle.isEmpty
+                      ? '点此切换或退出'
+                      : state.activeConversationTitle)
+                  : '列出电脑端已有会话，点开即可接着聊',
+              onTap: () => _push(context, const ConversationsPage()),
+            ),
             SettingTile(
               icon: Icons.devices,
               iconColor: Colors.lightBlueAccent,

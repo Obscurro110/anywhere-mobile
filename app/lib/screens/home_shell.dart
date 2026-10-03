@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../widgets/connection_badge.dart';
 import 'chat_screen.dart';
+import 'conversations_screen.dart';
 import 'notifications_screen.dart';
 import 'settings_screen.dart';
 import 'tasks_screen.dart';
@@ -33,11 +34,20 @@ class HomeShell extends StatelessWidget {
           children: [
             // 与电脑端对话
             const Text('对话', style: TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(width: 10),
-            _TargetPill(
-              label: state.targetLabel,
-              onTap: () => _pickTarget(context, state),
-            ),
+            const SizedBox(width: 8),
+            // 当前接的是哪个电脑端会话（点击可切换/退出）
+            if (state.activeConversationId != null)
+              _ConvPill(
+                title: state.activeConversationTitle.isEmpty
+                    ? '电脑端会话'
+                    : state.activeConversationTitle,
+                onTap: () => _push(context, const ConversationsPage()),
+              )
+            else
+              _TargetPill(
+                label: state.targetLabel,
+                onTap: () => _pickTarget(context, state),
+              ),
           ],
         ),
         actions: [
@@ -57,14 +67,28 @@ class HomeShell extends StatelessWidget {
             color: const Color(0xFF1F2330),
             onSelected: (v) {
               switch (v) {
+                case 'conv':
+                  _push(context, const ConversationsPage());
                 case 'tasks':
                   _push(context, const TasksPage());
                 case 'settings':
                   _push(context, const SettingsPage());
               }
             },
-            itemBuilder: (ctx) => const [
+            itemBuilder: (ctx) => [
               PopupMenuItem(
+                value: 'conv',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.forum_outlined, size: 20),
+                  title: const Text('电脑端对话'),
+                  subtitle: state.activeConversationId != null
+                      ? const Text('对话中', style: TextStyle(fontSize: 11))
+                      : null,
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'tasks',
                 child: ListTile(
                   dense: true,
@@ -73,7 +97,7 @@ class HomeShell extends StatelessWidget {
                   title: Text('定时任务'),
                 ),
               ),
-              PopupMenuItem(
+              const PopupMenuItem(
                 value: 'settings',
                 child: ListTile(
                   dense: true,
@@ -192,4 +216,45 @@ class _TargetOpt {
   final String label;
   final IconData icon;
   const _TargetOpt(this.id, this.label, this.icon);
+}
+
+/// 标题栏里显示「当前接的是电脑端哪个会话」。
+/// 与 _TargetPill 区分开：这个用的是链接图标 + 蓝色，一眼能看出"正在电脑端会话里"。
+class _ConvPill extends StatelessWidget {
+  final String title;
+  final VoidCallback onTap;
+
+  const _ConvPill({required this.title, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFF1D2A3A),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.link, size: 12, color: Colors.lightBlueAccent),
+              const SizedBox(width: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.white),
+                ),
+              ),
+              const Icon(Icons.expand_more, size: 14, color: Colors.white38),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
