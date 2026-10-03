@@ -3,7 +3,18 @@ import '../core/protocol.dart';
 // Re-export protocol types so importers of models.dart (e.g. screens) can use
 // FileMeta / ChatPayload / Envelope without a separate import.
 export '../core/protocol.dart'
-    show FileMeta, ChatPayload, Envelope, MsgType, kProtocolVersion;
+    show
+        FileMeta,
+        ChatPayload,
+        ChatOptions,
+        ChatRole,
+        Capabilities,
+        ModelOption,
+        McpOption,
+        SkillOption,
+        Envelope,
+        MsgType,
+        kProtocolVersion;
 
 /// A chat message shown in the conversation list.
 class ChatMessage {
@@ -15,6 +26,9 @@ class ChatMessage {
   final String? conversationId;
   final List<FileMeta>? attachments;
 
+  /// True while we're waiting for the desktop to produce this assistant reply.
+  final bool pending;
+
   ChatMessage({
     required this.id,
     required this.role,
@@ -23,6 +37,7 @@ class ChatMessage {
     required this.outgoing,
     this.conversationId,
     this.attachments,
+    this.pending = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -45,6 +60,17 @@ class ChatMessage {
         attachments: (j['attachments'] as List?)
             ?.map((e) => FileMeta.fromJson(e as Map<String, dynamic>))
             .toList(),
+      );
+
+  ChatMessage copyWith({String? text, bool? pending}) => ChatMessage(
+        id: id,
+        role: role,
+        text: text ?? this.text,
+        time: time,
+        outgoing: outgoing,
+        conversationId: conversationId,
+        attachments: attachments,
+        pending: pending ?? this.pending,
       );
 }
 

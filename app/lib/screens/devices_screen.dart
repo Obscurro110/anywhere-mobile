@@ -4,6 +4,30 @@ import 'package:provider/provider.dart';
 import '../core/protocol.dart';
 import '../services/app_state.dart';
 
+/// 独立页面（从「设置 → 已连接设备」进入）。
+class DevicesPage extends StatelessWidget {
+  const DevicesPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('设备'),
+        actions: [
+          IconButton(
+            tooltip: '刷新',
+            icon: const Icon(Icons.refresh),
+            onPressed: () => state.client.send(Envelope(type: MsgType.presence)),
+          ),
+        ],
+      ),
+      body: const DevicesScreen(),
+    );
+  }
+}
+
+/// 设备列表（可单独嵌入）。
 class DevicesScreen extends StatelessWidget {
   const DevicesScreen({super.key});
 
@@ -57,7 +81,8 @@ class DevicesScreen extends StatelessWidget {
                     color: d.isDesktop ? Colors.lightBlueAccent : Colors.greenAccent,
                   ),
                   title: Text(d.deviceName),
-                  subtitle: Text('${d.platform} · ${d.deviceId.length >= 8 ? d.deviceId.substring(0, 8) : d.deviceId}'),
+                  subtitle: Text(
+                      '${d.platform} · ${d.deviceId.length >= 8 ? d.deviceId.substring(0, 8) : d.deviceId}'),
                   trailing: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -91,7 +116,10 @@ class _SelfCard extends StatelessWidget {
             const Text('本机', style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             _row('名称', state.config.deviceName),
-            _row('设备ID', state.config.deviceId.length >= 12 ? state.config.deviceId.substring(0, 12) : state.config.deviceId),
+            _row('设备ID',
+                state.config.deviceId.length >= 12
+                    ? state.config.deviceId.substring(0, 12)
+                    : state.config.deviceId),
             _row('用户', state.config.userId),
             _row('服务器', state.config.serverUrl),
           ],

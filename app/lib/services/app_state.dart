@@ -16,7 +16,7 @@ import 'relay_client.dart';
 const _uuid = Uuid();
 
 /// Central application state. Owns the [RelayClient], chat history, peer list,
-/// transferred files and delivered notifications.
+/// transferred files, delivered notifications and the desktop capability list.
 class AppState extends ChangeNotifier {
   AppState(this.config) {
     _client = RelayClient(config);
@@ -33,7 +33,19 @@ class AppState extends ChangeNotifier {
   final List<FileMeta> receivedFiles = [];
   final List<Map<String, dynamic>> inbox = []; // notifications
 
+  /// Models / MCP / skills reported by the desktop.
+  Capabilities capabilities = Capabilities();
+
+  /// Currently selected run options (sent with every message).
+  ChatOptions options = const ChatOptions();
+
+  /// Which desktop to talk to. null = broadcast.
+  String? targetDeviceId;
+
   String? _activeConversationId;
+
+  /// True while we're waiting for the desktop's reply (drives the UI spinner).
+  bool get awaitingReply => messages.isNotEmpty && messages.last.pending;
 
   RelayClient get client => _client;
   String get deviceId => config.deviceId;
@@ -42,6 +54,10 @@ class AppState extends ChangeNotifier {
   void _bind() {
     _client.statusStream.listen((s) {
       status = s;
+      if (s == RelayStatus.connected) {
+        // Ask the desktop for its model / MCP / skill list on (re)connect.
+        Future.delayed(const Duration(milliseconds: 600), requestCapabilities);
+      }
       notifyListeners();
     });
     _client.messages.listen(_onEnvelope);
@@ -61,6 +77,30 @@ class AppState extends ChangeNotifier {
     _client = RelayClient(config);
     _bind();
     _client.connect();
+    notifyListeners();
+  }
+
+  // ---- capabilities ----
+  void requestCapabilities() {
+    if (!_client.isConnected) return;
+    _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: ChatPayload(
+        role: ChatRole.capabilitiesRequest,
+        text: '',
+      ).toJson(),
+    ));
+  }
+
+  void setOptions(ChatOptions next) {
+    options = next;
+    notifyListeners();
+  }
+
+  void setTargetDevice(String? id) {
+    targetDeviceId = id;
     notifyListeners();
   }
 
@@ -96,25 +136,64 @@ class AppState extends ChangeNotifier {
     peers
       ..clear()
       ..addAll(list);
+    // Auto-target the first desktop if the user hasn't chosen one.
+    if (targetDeviceId == null) {
+      final desktop = list.where((d) => d.isDesktop);
+      if (desktop.isNotEmpty) targetDeviceId = desktop.first.deviceId;
+    } else if (!list.any((d) => d.deviceId == targetDeviceId)) {
+      targetDeviceId = null;
+    }
   }
 
   void _handleChat(Envelope env) {
     final p = ChatPayload.fromJson((env.payload as Map).cast<String, dynamic>());
-    messages.add(ChatMessage(
-      id: env.id,
-      role: p.role,
-      text: p.text,
-      time: DateTime.fromMillisecondsSinceEpoch(env.ts),
-      outgoing: false,
-      conversationId: p.conversationId,
-      attachments: (p.attachments ?? [])
-          .map((e) => FileMeta.fromJson(e))
-          .toList(),
-    ));
+
+    // Desktop capability list
+    if (p.role == ChatRole.capabilities) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final raw = decoded['__relayCapabilities'] ?? decoded;
+        capabilities = Capabilities.fromJson((raw as Map).cast<String, dynamic>());
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] capabilities decode failed: $e');
+      }
+      return;
+    }
+
+    if (p.role == ChatRole.system) {
+      // internal message, don't show
+      return;
+    }
+
+    final isAssistant = p.role == ChatRole.assistant;
+
+    // Merge into the pending assistant bubble if we were waiting for one.
+    if (isAssistant && messages.isNotEmpty && messages.last.pending) {
+      messages[messages.length - 1] = ChatMessage(
+        id: env.id,
+        role: p.role,
+        text: p.text,
+        time: DateTime.fromMillisecondsSinceEpoch(env.ts),
+        outgoing: false,
+        conversationId: p.conversationId,
+        attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+      );
+    } else {
+      messages.add(ChatMessage(
+        id: env.id,
+        role: p.role,
+        text: p.text,
+        time: DateTime.fromMillisecondsSinceEpoch(env.ts),
+        outgoing: false,
+        conversationId: p.conversationId,
+        attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+      ));
+    }
     _persistHistory();
 
     // if it came from desktop while app in background, surface a notification
-    if (p.role == 'assistant') {
+    if (isAssistant) {
       notifications.show('Anywhere', p.text, id: env.ts.remainder(100000));
     }
   }
@@ -141,16 +220,27 @@ class AppState extends ChangeNotifier {
     if (fileJson == null) return;
     final meta = FileMeta.fromJson((fileJson as Map).cast<String, dynamic>());
     receivedFiles.insert(0, meta);
-    notifications.show('File received', meta.name, id: env.ts.remainder(100000));
+    messages.add(ChatMessage(
+      id: env.id,
+      role: ChatRole.system,
+      text: '',
+      time: DateTime.fromMillisecondsSinceEpoch(env.ts),
+      outgoing: false,
+      attachments: [meta],
+    ));
+    _persistHistory();
+    notifications.show('收到文件', meta.name, id: env.ts.remainder(100000));
   }
 
   void _handleDeliveryStatus(Envelope env) {
-    final status = env.payload?['status'];
-    if (status == 'undelivered') {
-      final idx = messages.indexWhere((m) => m.id == env.id);
-      if (idx >= 0) {
-        // simply annotate it isn't delivered; full queueing handled desktop-side
-        debugPrint('[AppState] message ${env.id} undelivered');
+    final st = env.payload?['status'];
+    if (st == 'undelivered') {
+      debugPrint('[AppState] message ${env.id} undelivered');
+      // Mark the pending bubble as failed so the UI stops spinning.
+      if (messages.isNotEmpty && messages.last.pending) {
+        messages[messages.length - 1] = messages.last
+            .copyWith(text: '⚠️ 电脑端未收到（可能未启动或未连接）', pending: false);
+        _persistHistory();
       }
     }
   }
@@ -159,27 +249,49 @@ class AppState extends ChangeNotifier {
   bool sendChat(String text, {String? toDeviceId}) {
     final text2 = text.trim();
     if (text2.isEmpty) return false;
+
     final env = Envelope(
       type: MsgType.chat,
       from: config.deviceId,
-      to: toDeviceId ?? '*',
+      to: toDeviceId ?? targetDeviceId ?? '*',
       payload: ChatPayload(
-        role: 'user',
+        role: ChatRole.user,
         text: text2,
         conversationId: _activeConversationId,
+        options: options.isEmpty ? null : options,
       ).toJson(),
     );
+
     messages.add(ChatMessage(
       id: env.id,
-      role: 'user',
+      role: ChatRole.user,
       text: text2,
       time: DateTime.now(),
       outgoing: true,
       conversationId: _activeConversationId,
     ));
+
+    // Optimistic "thinking" bubble — replaced when the desktop answers.
+    messages.add(ChatMessage(
+      id: 'pending-${_uuid.v4()}',
+      role: ChatRole.assistant,
+      text: '',
+      time: DateTime.now(),
+      outgoing: false,
+      pending: true,
+    ));
+
     _persistHistory();
     notifyListeners();
-    return _client.send(env);
+
+    final ok = _client.send(env);
+    if (!ok) {
+      if (messages.isNotEmpty && messages.last.pending) {
+        messages.removeLast();
+        notifyListeners();
+      }
+    }
+    return ok;
   }
 
   /// Upload a local file and share it with the desktop (or all devices).
@@ -188,11 +300,20 @@ class AppState extends ChangeNotifier {
     final env = Envelope(
       type: MsgType.fileShare,
       from: config.deviceId,
-      to: toDeviceId ?? '*',
+      to: toDeviceId ?? targetDeviceId ?? '*',
       payload: {'file': meta.toJson()},
     );
     _client.send(env);
-    receivedFiles.insert(0, meta); // show our own sent file too
+    receivedFiles.insert(0, meta);
+    messages.add(ChatMessage(
+      id: env.id,
+      role: ChatRole.user,
+      text: '',
+      time: DateTime.now(),
+      outgoing: true,
+      attachments: [meta],
+    ));
+    _persistHistory();
     notifyListeners();
   }
 
@@ -215,7 +336,9 @@ class AppState extends ChangeNotifier {
         final list = jsonDecode(raw) as List;
         messages
           ..clear()
-          ..addAll(list.map((e) => ChatMessage.fromJson(e as Map<String, dynamic>)));
+          ..addAll(list
+              .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+              .where((m) => !m.pending));
       } catch (_) {}
     }
     final rawInbox = p.getString('inbox');
@@ -231,7 +354,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> _persistHistory() async {
     final p = await SharedPreferences.getInstance();
-    final trimmed = messages.length > 500 ? messages.sublist(messages.length - 500) : messages;
+    final keep = messages.where((m) => !m.pending).toList();
+    final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
     await p.setString('chat_history', jsonEncode(trimmed.map((e) => e.toJson()).toList()));
   }
 

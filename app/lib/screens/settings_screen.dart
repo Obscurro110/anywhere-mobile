@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_config.dart';
 import '../services/app_state.dart';
+import 'devices_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -56,13 +57,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final caps = state.capabilities;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // ---------- 设备 ----------
+        const Text('设备', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+        const SizedBox(height: 8),
+        Card(
+          color: const Color(0xFF1B1F2B),
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.devices, color: Colors.lightBlueAccent),
+                title: const Text('已连接设备'),
+                subtitle: Text(state.peers.isEmpty
+                    ? '暂无其他在线设备'
+                    : '${state.peers.length} 台在线 · ${state.peers.map((d) => d.deviceName).join('、')}'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const DevicesPage()),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: Icon(
+                  caps.isEmpty ? Icons.cloud_off : Icons.cloud_done,
+                  color: caps.isEmpty ? Colors.white38 : Colors.greenAccent,
+                ),
+                title: const Text('电脑端能力'),
+                subtitle: Text(caps.isEmpty
+                    ? '未获取到（点右侧刷新）'
+                    : '模型 ${caps.models.length} · MCP ${caps.mcp.length} · Skill ${caps.skills.length}'),
+                trailing: IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: state.requestCapabilities,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 40),
+
+        // ---------- 连接设置 ----------
         const Text('连接设置', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         const SizedBox(height: 12),
-        _field('中继服务器地址', _server, hint: 'ws://your-server:8787/ws'),
+        _field('中继服务器地址', _server, hint: 'wss://your-domain/ws'),
         _field('访问令牌 (Token)', _token, obscure: true),
         _field('用户 ID', _userId),
         _field('本机名称', _deviceName),
@@ -73,6 +114,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           label: const Text('保存并重连'),
         ),
         const Divider(height: 40),
+
+        // ---------- 数据 ----------
         const Text('数据', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         const SizedBox(height: 8),
         OutlinedButton.icon(
@@ -90,14 +133,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 24),
         const Text(
           'Anywhere Mobile · 与电脑版 Anywhere Desktop 通过公网中继互通\n'
-          '支持对话、文件互传与通知推送',
+          '支持对话（含模型 / 思考预算 / MCP / Skill / 会话压缩）、文件互传与通知推送',
           style: TextStyle(color: Colors.white38, fontSize: 12),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 8),
         Center(
-          child: Text('设备ID: ${state.config.deviceId}',
-              style: const TextStyle(color: Colors.white24, fontSize: 11)),
+          child: Text(
+            '设备ID: ${state.config.deviceId.length >= 12 ? state.config.deviceId.substring(0, 12) : state.config.deviceId}',
+            style: const TextStyle(color: Colors.white24, fontSize: 11),
+          ),
         ),
       ],
     );
