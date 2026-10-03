@@ -8,35 +8,15 @@ import 'notifications_screen.dart';
 import 'settings_screen.dart';
 import 'tasks_screen.dart';
 
-/// App 外壳：
-///  - 底部只保留「对话」与「设置」两个标签
-///  - 「通知」在右上角图标
-///  - 「目标设备 / 定时任务」收进右上角 ⋮ 菜单（不占对话区）
-class HomeShell extends StatefulWidget {
+/// App 外壳：只有「对话」一个主界面。
+///
+/// 设置、通知、定时任务都是**二级页面**（右侧图标/菜单进入），
+/// 不再用底部 Tab 把「对话」和「设置」并列 —— 那会让配置页显得和主功能同等地位。
+class HomeShell extends StatelessWidget {
   const HomeShell({super.key});
 
-  @override
-  State<HomeShell> createState() => _HomeShellState();
-}
-
-class _HomeShellState extends State<HomeShell> {
-  int _index = 0;
-
-  static const _tabs = [
-    _Tab('对话', Icons.chat_bubble_outline, Icons.chat_bubble),
-    _Tab('设置', Icons.settings_outlined, Icons.settings),
-  ];
-
-  void _openNotifications() {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const NotificationsPage()),
-    );
-  }
-
-  void _openTasks() {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const TasksPage()),
-    );
+  void _push(BuildContext context, Widget page) {
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 
   @override
@@ -44,135 +24,164 @@ class _HomeShellState extends State<HomeShell> {
     final unread = context.select<AppState, int>(
       (s) => s.inbox.where((n) => n['read'] != true).length,
     );
+    final state = context.watch<AppState>();
 
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: 12,
         title: Row(
           children: [
-            Text(_tabs[_index].label),
-            const Spacer(),
-            const ConnectionBadge(),
-            // 通知
-            IconButton(
-              tooltip: '通知',
-              onPressed: _openNotifications,
-              icon: Badge(
-                isLabelVisible: unread > 0,
-                label: Text('$unread'),
-                child: const Icon(Icons.notifications_outlined),
-              ),
-            ),
-            // 更多：目标设备 / 定时任务
-            PopupMenuButton<String>(
-              tooltip: '更多',
-              icon: const Icon(Icons.more_vert),
-              color: const Color(0xFF1F2330),
-              onSelected: (v) {
-                if (v == 'tasks') _openTasks();
-              },
-              itemBuilder: (ctx) => [
-                PopupMenuItem<String>(
-                  enabled: false,
-                  padding: EdgeInsets.zero,
-                  child: const _TargetDeviceMenu(),
-                ),
-                const PopupMenuDivider(),
-                const PopupMenuItem<String>(
-                  value: 'tasks',
-                  child: ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.schedule, size: 20),
-                    title: Text('定时任务'),
-                  ),
-                ),
-              ],
+            // 与电脑端对话
+            const Text('对话', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(width: 10),
+            _TargetPill(
+              label: state.targetLabel,
+              onTap: () => _pickTarget(context, state),
             ),
           ],
         ),
-      ),
-      body: IndexedStack(
-        index: _index,
-        children: const [
-          ChatScreen(),
-          SettingsScreen(),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: [
-          for (final t in _tabs)
-            NavigationDestination(
-              icon: Icon(t.icon),
-              selectedIcon: Icon(t.selectedIcon),
-              label: t.label,
+        actions: [
+          const ConnectionBadge(),
+          IconButton(
+            tooltip: '通知',
+            onPressed: () => _push(context, const NotificationsPage()),
+            icon: Badge(
+              isLabelVisible: unread > 0,
+              label: Text('$unread'),
+              child: const Icon(Icons.notifications_outlined),
             ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            icon: const Icon(Icons.more_vert),
+            color: const Color(0xFF1F2330),
+            onSelected: (v) {
+              switch (v) {
+                case 'tasks':
+                  _push(context, const TasksPage());
+                case 'settings':
+                  _push(context, const SettingsPage());
+              }
+            },
+            itemBuilder: (ctx) => const [
+              PopupMenuItem(
+                value: 'tasks',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.schedule, size: 20),
+                  title: Text('定时任务'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'settings',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.settings_outlined, size: 20),
+                  title: Text('设置'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 4),
         ],
+      ),
+      body: const ChatScreen(),
+    );
+  }
+
+  /// 点标题栏的设备胶囊 = 切换发送目标
+  void _pickTarget(BuildContext context, AppState state) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1F2B),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('发送到', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            if (state.peers.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Text('暂无其他在线设备，将发送给所有设备',
+                    style: TextStyle(fontSize: 12, color: Colors.white38)),
+              ),
+            for (final opt in <_TargetOpt>[
+              _TargetOpt(null, '所有设备', Icons.campaign_outlined),
+              ...state.peers.map((d) => _TargetOpt(
+                    d.deviceId,
+                    '${d.deviceName} (${d.platform})',
+                    Icons.devices,
+                  )),
+            ])
+              ListTile(
+                dense: true,
+                leading: Icon(opt.icon,
+                    size: 20,
+                    color: opt.id == state.targetDeviceId
+                        ? Colors.lightBlueAccent
+                        : Colors.white38),
+                title: Text(opt.label,
+                    style: TextStyle(
+                      color: opt.id == state.targetDeviceId
+                          ? Colors.lightBlueAccent
+                          : null,
+                    )),
+                trailing: opt.id == state.targetDeviceId
+                    ? const Icon(Icons.check, size: 18, color: Colors.lightBlueAccent)
+                    : null,
+                onTap: () {
+                  state.setTargetDevice(opt.id);
+                  Navigator.pop(ctx);
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// 菜单里的「发送到」选择器 —— 不再占用对话区顶部。
-class _TargetDeviceMenu extends StatelessWidget {
-  const _TargetDeviceMenu();
+/// 标题栏里的「发送到」胶囊 —— 把原先占一整行的设备条压成一个小标签。
+class _TargetPill extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _TargetPill({required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final peers = state.peers;
-    final current = state.targetDeviceId;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 12, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('发送到',
-              style: TextStyle(fontSize: 12, color: Colors.white54)),
-          const SizedBox(height: 6),
-          for (final opt in <_TargetOpt>[
-            _TargetOpt(null, '所有设备（广播）'),
-            ...peers.map((d) => _TargetOpt(d.deviceId, '${d.deviceName} (${d.platform})')),
-          ])
-            InkWell(
-              onTap: () {
-                context.read<AppState>().setTargetDevice(opt.id);
-                Navigator.pop(context);
-              },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    Icon(
-                      opt.id == null ? Icons.campaign_outlined : Icons.devices,
-                      size: 18,
-                      color: opt.id == current ? Colors.lightBlueAccent : Colors.white38,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        opt.label,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: opt.id == current ? Colors.lightBlueAccent : Colors.white,
-                        ),
-                      ),
-                    ),
-                    if (opt.id == current)
-                      const Icon(Icons.check, size: 16, color: Colors.lightBlueAccent),
-                  ],
+    return Material(
+      color: const Color(0xFF232838),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.north_east, size: 12, color: Colors.white54),
+              const SizedBox(width: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 110),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
                 ),
               ),
-            ),
-          if (peers.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: Text('（暂无其他在线设备）',
-                  style: TextStyle(fontSize: 12, color: Colors.white38)),
-            ),
-        ],
+              const Icon(Icons.expand_more, size: 14, color: Colors.white38),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -181,12 +190,6 @@ class _TargetDeviceMenu extends StatelessWidget {
 class _TargetOpt {
   final String? id;
   final String label;
-  const _TargetOpt(this.id, this.label);
-}
-
-class _Tab {
-  final String label;
   final IconData icon;
-  final IconData selectedIcon;
-  const _Tab(this.label, this.icon, this.selectedIcon);
+  const _TargetOpt(this.id, this.label, this.icon);
 }

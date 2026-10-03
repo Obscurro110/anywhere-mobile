@@ -12,6 +12,7 @@ import '../core/protocol.dart';
 import '../models/models.dart';
 import 'notification_service.dart';
 import 'relay_client.dart';
+import 'update_service.dart';
 
 const _uuid = Uuid();
 
@@ -150,9 +151,42 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 断开后用当前配置重新连接（设置页「重新连接」按钮用）。
+  void reconnect() {
+    _client.dispose();
+    _client = RelayClient(config);
+    _bind();
+    _client.connect();
+    notifyListeners();
+  }
+
+  /// 本机 App 版本号（「v1.3.2」这种），设置页状态卡展示用。
+  String appVersion = '?';
+  Future<void> loadAppVersion() async {
+    try {
+      final v = await AppVersion.current();
+      appVersion = v.versionName;
+      notifyListeners();
+    } catch (_) {
+      // 读不到就保持 '?'
+    }
+  }
+
   void setTargetDevice(String? id) {
     targetDeviceId = id;
     notifyListeners();
+  }
+
+  /// 标题栏胶囊上显示的当前发送目标。
+  String get targetLabel {
+    if (targetDeviceId == null) {
+      // 只有一台对端设备时，直接显示它的名字，省得用户还要点开看
+      final others = peers.where((d) => d.deviceId != config.deviceId).toList();
+      if (others.length == 1) return others.first.deviceName;
+      return others.isEmpty ? '所有设备' : '所有设备 (${others.length})';
+    }
+    final hit = peers.where((d) => d.deviceId == targetDeviceId);
+    return hit.isNotEmpty ? hit.first.deviceName : '已选设备';
   }
 
   // ---- incoming envelopes ----

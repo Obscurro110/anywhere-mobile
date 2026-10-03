@@ -139,7 +139,15 @@ jobs:
 
       - name: Analyze
         working-directory: app
-        run: flutter analyze --no-fatal-infos || true
+        run: |
+          # 先跑一遍完整分析（可能有很多 info/warning，不拦）
+          flutter analyze --no-fatal-infos --no-fatal-warnings || true
+          # 再单独卡 error —— 有真正的编译错误就必须失败
+          echo "--- 检查是否有 error ---"
+          if flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | grep -E "^\s*error\s" ; then
+            echo "::error::flutter analyze 发现 error，构建已中止"; exit 1
+          fi
+          echo "✅ 无 error"
 
       - name: Build release APK
         working-directory: app

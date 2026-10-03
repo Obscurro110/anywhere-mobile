@@ -1,190 +1,244 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../core/app_config.dart';
 import '../services/app_state.dart';
+import '../widgets/setting_tiles.dart';
 import '../widgets/update_card.dart';
 import 'devices_screen.dart';
+import 'relay_settings_screen.dart';
 import 'tasks_screen.dart';
 
-class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
-
-  @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  late TextEditingController _server;
-  late TextEditingController _token;
-  late TextEditingController _userId;
-  late TextEditingController _deviceName;
-
-  @override
-  void initState() {
-    super.initState();
-    final c = context.read<AppState>().config;
-    _server = TextEditingController(text: c.serverUrl);
-    _token = TextEditingController(text: c.token);
-    _userId = TextEditingController(text: c.userId);
-    _deviceName = TextEditingController(text: c.deviceName);
-  }
-
-  @override
-  void dispose() {
-    _server.dispose();
-    _token.dispose();
-    _userId.dispose();
-    _deviceName.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final state = context.read<AppState>();
-    final next = AppConfig(
-      userId: _userId.text.trim(),
-      token: _token.text.trim(),
-      serverUrl: _server.text.trim(),
-      deviceId: state.config.deviceId,
-      deviceName: _deviceName.text.trim(),
-    );
-    await state.updateConfig(next);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已保存并重新连接')),
-      );
-    }
-  }
+/// 设置页（二级页面，从右上角 ⋮ 进入）。
+///
+/// 排版原则：
+///  - 顶部一张「状态卡」一眼看清连接情况
+///  - 下面按用途分组的卡片，每组只放 2~4 条
+///  - 长表单（中继参数）收进子页面，不在这里展开
+///  - 底部才放「关于 / 更新」这类低频内容
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({super.key});
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final caps = state.capabilities;
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        // ---------- 设备 ----------
-        const Text('设备', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 8),
-        Card(
-          color: const Color(0xFF1B1F2B),
-          child: Column(
-            children: [
-              ListTile(
-                leading: const Icon(Icons.devices, color: Colors.lightBlueAccent),
-                title: const Text('已连接设备'),
-                subtitle: Text(state.peers.isEmpty
-                    ? '暂无其他在线设备'
-                    : '${state.peers.length} 台在线 · ${state.peers.map((d) => d.deviceName).join('、')}'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const DevicesPage()),
-                ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.schedule, color: Colors.amberAccent),
-                title: const Text('定时任务'),
-                subtitle: Text(state.tasks.isEmpty
-                    ? '点此同步电脑端的定时任务'
-                    : '${state.tasks.length} 个任务 · 可「立即运行」'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const TasksPage()),
-                ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: Icon(
-                  caps.isEmpty ? Icons.cloud_off : Icons.cloud_done,
-                  color: caps.isEmpty ? Colors.white38 : Colors.greenAccent,
-                ),
-                title: const Text('电脑端能力'),
-                subtitle: Text(caps.isEmpty
-                    ? '未获取到（点右侧刷新）'
-                    : '助手 ${caps.prompts.length} · 模型 ${caps.models.length} · MCP ${caps.mcp.length} · Skill ${caps.skills.length}'),
-                trailing: IconButton(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: state.requestCapabilities,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 40),
+    return Scaffold(
+      appBar: AppBar(title: const Text('设置')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 28),
+        children: [
+          _StatusCard(state: state),
+          const SizedBox(height: 18),
 
-        // ---------- 连接设置 ----------
-        const Text('连接设置', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 12),
-        _field('中继服务器地址', _server, hint: 'wss://your-domain/ws'),
-        _field('访问令牌 (Token)', _token, obscure: true),
-        _field('用户 ID', _userId),
-        _field('本机名称', _deviceName),
-        const SizedBox(height: 8),
-        FilledButton.icon(
-          onPressed: _save,
-          icon: const Icon(Icons.save),
-          label: const Text('保存并重连'),
-        ),
-        const Divider(height: 40),
+          // ---------- 与电脑端 ----------
+          const SettingGroupTitle('与电脑端'),
+          SettingCard(children: [
+            SettingTile(
+              icon: Icons.devices,
+              iconColor: Colors.lightBlueAccent,
+              title: '设备',
+              value: state.peers.isEmpty
+                  ? '暂无在线'
+                  : '${state.peers.length} 台在线',
+              subtitle: state.peers.isEmpty
+                  ? null
+                  : state.peers.map((d) => d.deviceName).join('、'),
+              onTap: () => _push(context, const DevicesPage()),
+            ),
+            SettingTile(
+              icon: Icons.schedule,
+              iconColor: Colors.amberAccent,
+              title: '定时任务',
+              value: state.tasks.isEmpty ? '未同步' : '${state.tasks.length} 个',
+              subtitle: '可查看并「立即运行」',
+              onTap: () => _push(context, const TasksPage()),
+            ),
+            SettingTile(
+              icon: caps.isEmpty ? Icons.cloud_off : Icons.cloud_done,
+              iconColor: caps.isEmpty ? Colors.white38 : Colors.greenAccent,
+              title: '电脑端能力',
+              value: caps.isEmpty
+                  ? '未获取'
+                  : '助手 ${caps.prompts.length} · 模型 ${caps.models.length}',
+              subtitle: caps.isEmpty
+                  ? '点此从电脑端拉取'
+                  : 'MCP ${caps.mcp.length} · Skill ${caps.skills.length}',
+              onTap: state.requestCapabilities,
+            ),
+          ]),
 
-        // ---------- 关于 / 更新 ----------
-        const Text('关于', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 8),
-        const UpdateCard(),
-        const Divider(height: 40),
+          // ---------- 连接 ----------
+          const SettingGroupTitle('连接'),
+          SettingCard(children: [
+            SettingTile(
+              icon: Icons.dns_outlined,
+              title: '中继服务器与账号',
+              value: _shortHost(state.config.serverUrl),
+              subtitle: '服务器地址 / 令牌 / 用户 ID',
+              onTap: () => _push(context, const RelaySettingsScreen()),
+            ),
+          ]),
 
-        // ---------- 数据 ----------
-        const Text('数据', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: () async {
-            await state.clearHistory();
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('聊天记录已清空')),
-              );
-            }
-          },
-          icon: const Icon(Icons.delete_sweep_outlined),
-          label: const Text('清空聊天记录'),
-        ),
-        const SizedBox(height: 24),
-        const Text(
-          'Anywhere Mobile · 与电脑版 Anywhere Desktop 通过公网中继互通\n'
-          '支持对话（含模型 / 思考预算 / MCP / Skill / 会话压缩）、文件互传与通知推送',
-          style: TextStyle(color: Colors.white38, fontSize: 12),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 8),
-        Center(
-          child: Text(
-            '设备ID: ${state.config.deviceId.length >= 12 ? state.config.deviceId.substring(0, 12) : state.config.deviceId}',
-            style: const TextStyle(color: Colors.white24, fontSize: 11),
-          ),
-        ),
-      ],
+          // ---------- 数据 ----------
+          const SettingGroupTitle('数据'),
+          SettingCard(children: [
+            SettingTile(
+              icon: Icons.cleaning_services_outlined,
+              title: '清空聊天记录',
+              subtitle: '只清除本机记录，不影响电脑端',
+              onTap: () => _confirmClear(context, state),
+            ),
+          ]),
+
+          // ---------- 关于 ----------
+          const SettingGroupTitle('关于'),
+          const UpdateCard(),
+
+          const SizedBox(height: 22),
+          const _Footer(),
+        ],
+      ),
     );
   }
 
-  Widget _field(String label, TextEditingController c, {String? hint, bool obscure = false}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: TextField(
-        controller: c,
-        obscureText: obscure,
-        decoration: InputDecoration(
-          labelText: label,
-          hintText: hint,
-          filled: true,
-          fillColor: const Color(0xFF1B1F2B),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide.none,
-          ),
+  static void _push(BuildContext context, Widget page) {
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+  }
+
+  static String _shortHost(String url) {
+    if (url.isEmpty) return '未配置';
+    final m = RegExp(r'^(wss?|https?)://([^/:]+)').firstMatch(url);
+    return m?.group(2) ?? url;
+  }
+
+  static Future<void> _confirmClear(BuildContext context, AppState state) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空聊天记录'),
+        content: const Text('确定要清除本机的所有聊天记录吗？此操作不可撤销。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await state.clearHistory();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('聊天记录已清空')));
+    }
+  }
+}
+
+/// 顶部状态卡：连接状态 + 当前设备 + 版本，一屏看完关键信息。
+class _StatusCard extends StatelessWidget {
+  final AppState state;
+  const _StatusCard({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = state.client.isConnected;
+    final version = state.appVersion;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: connected
+              ? const [Color(0xFF1D2A3A), Color(0xFF1A1F2E)]
+              : const [Color(0xFF2A1F1F), Color(0xFF1A1F2E)],
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: connected ? const Color(0xFF2E5A7A) : const Color(0xFF5A2E2E),
         ),
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                connected ? Icons.cloud_done : Icons.cloud_off,
+                size: 20,
+                color: connected ? Colors.greenAccent : Colors.redAccent,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                connected ? '已连接中继' : '未连接',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF00000040),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text('v$version',
+                    style: const TextStyle(fontSize: 11, color: Colors.white70)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _kv('本机', '${state.config.deviceName} · ${_short(state.config.deviceId)}'),
+          if (state.capabilities.desktopVersion.isNotEmpty)
+            _kv('电脑端', 'v${state.capabilities.desktopVersion}'),
+          if (state.peers.isNotEmpty)
+            _kv('在线设备', state.peers.map((d) => d.deviceName).join('、')),
+        ],
+      ),
+    );
+  }
+
+  static String _short(String id) =>
+      id.length >= 10 ? id.substring(0, 10) : id;
+
+  Widget _kv(String k, String v) => Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 62,
+              child: Text(k,
+                  style: const TextStyle(fontSize: 12, color: Colors.white38)),
+            ),
+            Expanded(
+              child: Text(v, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            ),
+          ],
+        ),
+      );
+}
+
+class _Footer extends StatelessWidget {
+  const _Footer();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: const [
+        Text(
+          'Anywhere Mobile',
+          style: TextStyle(color: Colors.white38, fontSize: 12),
+        ),
+        SizedBox(height: 4),
+        Text(
+          '与电脑版 Anywhere Desktop 通过公网中继互通',
+          style: TextStyle(color: Colors.white24, fontSize: 11),
+          textAlign: TextAlign.center,
+        ),
+      ],
     );
   }
 }

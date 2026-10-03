@@ -12,6 +12,8 @@ Future<void> main() async {
   final config = await AppConfig.load(deviceId);
   final state = AppState(config);
   await state.init();
+  // 版本号读一次，设置页状态卡要用
+  await state.loadAppVersion();
   runApp(
     ChangeNotifierProvider<AppState>.value(
       value: state,
