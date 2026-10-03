@@ -1,5 +1,5 @@
 {
-  "name": "anywhere-desktop",
+  "name": "anywhere-desktop-relay",
   "version": "1.2.6",
   "description": "AI Anywhere Desktop",
   "main": "./out/main/index.js",
@@ -53,6 +53,7 @@
     "openai": "6.18.0",
     "pinyin-pro": "^3.28.0",
     "webdav": "^5.9.0",
+    "ws": "^8.18.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

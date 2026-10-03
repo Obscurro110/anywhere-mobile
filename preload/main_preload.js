@@ -75,6 +75,14 @@ const api = {
   installAppUpdate: () => electronAPI.ipcRenderer.invoke('app:update:install'),
   clearAppUpdateCache: () => electronAPI.ipcRenderer.invoke('app:update:clearCache'),
 
+  // ===== [anywhere-mobile] 手机互通中继 =====
+  getRelayConfig: () => electronAPI.ipcRenderer.invoke('relay:getConfig'),
+  setRelayConfig: (input = {}) => electronAPI.ipcRenderer.invoke('relay:setConfig', input),
+  getRelayStatus: () => electronAPI.ipcRenderer.invoke('relay:status'),
+  sendRelayChat: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendChat', payload),
+  sendRelayNotification: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendNotification', payload),
+  sendRelayFile: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendFile', payload),
+
 
 getDroppedFilePath: (file) => {
     try {

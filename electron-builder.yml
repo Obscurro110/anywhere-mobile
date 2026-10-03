@@ -1,5 +1,5 @@
-appId: com.komorebi.anywhere.desktop
-productName: AI Anywhere Desktop
+appId: com.komorebi.anywhere.desktop.relay
+productName: AI Anywhere Desktop (Relay)
 directories:
   buildResources: build
 files:
@@ -18,7 +18,7 @@ asarUnpack:
   - resources/**
 
 win:
-  executableName: anywhere-desktop
+  executableName: anywhere-desktop-relay
   icon: build/icon.ico
   electronLanguages:
     - zh-CN

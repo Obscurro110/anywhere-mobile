@@ -59,6 +59,8 @@ import * as compactApi from './core/compact.js'
 
 import { applyNetworkProxyConfig, installRequestHeaderBridge } from './core/net.js'
 import { startTaskScheduler } from './core/task_scheduler.js'
+// [anywhere-mobile] 手机互通中继桥
+import { startRelay } from './relay/index.js'
 
 let appTray = null
 let appQuitStarted = false
@@ -730,6 +732,10 @@ app.whenReady().then(async () => {
   await syncDesktopRuntimeFromConfig()
   ensureTray()
   await openWindow('main')
+
+  // [anywhere-mobile] 启动与手机 App 的中继连接
+  startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })
+
   setTimeout(() => {
     preheatScreenshotWindow()
   }, 800)

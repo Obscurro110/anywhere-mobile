@@ -94,7 +94,8 @@ const collapsedCards = ref({
   networkProxy: false,
   voice: false,
   data: false,
-  webdav: false
+  webdav: false,
+  relay: false
 });
 
 const cardDefinitions = {
@@ -103,10 +104,70 @@ const cardDefinitions = {
   networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
   voice: { id: 'voice', titleKey: 'setting.voice.title' },
   data: { id: 'data', titleKey: 'setting.dataManagement.title' },
-  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' }
+  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' },
+  relay: { id: 'relay', titleKey: null, staticTitle: '手机互通' }
 };
 
 const settingsCards = ref([]);
+
+// ===== [anywhere-mobile] 手机互通（中继）=====
+const relayForm = reactive({
+  serverUrl: '',
+  token: '',
+  userId: 'default-user',
+  deviceName: ''
+})
+const relayStatus = ref({ connected: false, deviceId: null, peers: [] })
+const relaySaving = ref(false)
+
+async function loadRelayConfig() {
+  try {
+    const res = await window.api?.getRelayConfig?.()
+    if (res && res.ok && res.config) {
+      relayForm.serverUrl = res.config.serverUrl || ''
+      relayForm.token = res.config.token || ''
+      relayForm.userId = res.config.userId || 'default-user'
+      relayForm.deviceName = res.config.deviceName || ''
+    }
+  } catch (e) { /* ignore */ }
+  await refreshRelayStatus()
+}
+
+async function refreshRelayStatus() {
+  try {
+    const res = await window.api?.getRelayStatus?.()
+    if (res && res.ok) {
+      relayStatus.value = {
+        connected: !!res.connected,
+        deviceId: res.deviceId || null,
+        peers: res.peers || []
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function saveRelayConfig() {
+  if (!relayForm.serverUrl || !relayForm.token || !relayForm.userId) {
+    ElMessage.error('请填写：中继服务器地址、Token、用户ID')
+    return
+  }
+  relaySaving.value = true
+  try {
+    const res = await window.api?.setRelayConfig?.({ ...relayForm })
+    if (res && res.ok) {
+      ElMessage.success('已保存，正在重新连接…')
+      setTimeout(refreshRelayStatus, 1500)
+    } else {
+      ElMessage.error(res?.error?.message || '保存失败')
+    }
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e?.message || e))
+  } finally {
+    relaySaving.value = false
+  }
+}
+// ===== [/anywhere-mobile] =====
+
 const shortcutRecorder = ref({
   target: '',
   index: -1,
@@ -315,7 +376,8 @@ function initCardOrder() {
       cardDefinitions.networkProxy,
       cardDefinitions.voice,
       cardDefinitions.data,
-      cardDefinitions.webdav
+      cardDefinitions.webdav,
+      cardDefinitions.relay
     ];
   }
   
@@ -335,7 +397,12 @@ const onOrderChange = async () => {
 
 function toggleCard(cardName) {
   collapsedCards.value[cardName] = !collapsedCards.value[cardName];
-  
+
+  // [anywhere-mobile] 展开手机互通卡片时刷新一次状态
+  if (cardName === 'relay' && !collapsedCards.value['relay']) {
+    refreshRelayStatus();
+  }
+
   if (currentConfig.value) {
     const plainState = JSON.parse(JSON.stringify(collapsedCards.value));
     
@@ -431,10 +498,15 @@ onMounted(() => {
     ensureNetworkProxyConfig();
     initCardOrder();
   }
+
+  // [anywhere-mobile] 初始化手机互通配置与状态
+  loadRelayConfig();
 });
 
 onActivated(() => {
   window.addEventListener('keydown', handleShortcutRecorderKeydown, true)
+  // [anywhere-mobile] 切回设置页时刷新互通状态
+  refreshRelayStatus();
 })
 
 onDeactivated(() => {
@@ -2309,6 +2381,76 @@ async function pullSelectedCloudSkillsToLocal() {
                       </div>
                     </div>
                   </div>
+
+                  <!-- ===== [anywhere-mobile] 手机互通 ===== -->
+                  <div v-if="element.id === 'relay'" class="card-body">
+                    <div class="setting-option-item">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">连接状态</span>
+                        <span class="setting-option-description">
+                          {{ relayStatus.connected ? '已连接中继' : '未连接' }}
+                          <template v-if="relayStatus.deviceId">，本机 ID：{{ relayStatus.deviceId }}</template>
+                        </span>
+                      </div>
+                      <div style="display: flex; align-items: center; gap: 10px;">
+                        <el-tag :type="relayStatus.connected ? 'success' : 'info'" size="small">
+                          {{ relayStatus.connected ? '在线' : '离线' }}
+                        </el-tag>
+                        <el-button size="small" plain @click="refreshRelayStatus">刷新</el-button>
+                      </div>
+                    </div>
+
+                    <div class="setting-option-item">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">中继服务器地址</span>
+                        <span class="setting-option-description">例如 wss://your-domain/ws</span>
+                      </div>
+                      <el-input v-model="relayForm.serverUrl" placeholder="wss://…/ws" style="width: 340px;" />
+                    </div>
+
+                    <div class="setting-option-item">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">Token</span>
+                        <span class="setting-option-description">手机与电脑必须填相同的 Token</span>
+                      </div>
+                      <el-input v-model="relayForm.token" type="password" show-password placeholder="中继令牌"
+                        style="width: 340px;" />
+                    </div>
+
+                    <div class="setting-option-item">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">用户 ID</span>
+                        <span class="setting-option-description">手机与电脑必须填相同的用户 ID</span>
+                      </div>
+                      <el-input v-model="relayForm.userId" placeholder="default-user" style="width: 340px;" />
+                    </div>
+
+                    <div class="setting-option-item no-border">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">设备名称</span>
+                        <span class="setting-option-description">显示在手机上的这台电脑的名字</span>
+                      </div>
+                      <el-input v-model="relayForm.deviceName" placeholder="My PC" style="width: 340px;" />
+                    </div>
+
+                    <div class="setting-option-item no-border">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">保存并连接</span>
+                        <span class="setting-option-description">保存后会自动重新连接中继服务器</span>
+                      </div>
+                      <el-button type="primary" :loading="relaySaving" @click="saveRelayConfig">保存</el-button>
+                    </div>
+
+                    <div v-if="relayStatus.peers && relayStatus.peers.length" class="setting-option-item no-border">
+                      <div class="setting-text-content">
+                        <span class="setting-option-label">在线设备</span>
+                        <span class="setting-option-description">
+                          {{ relayStatus.peers.map(p => p.deviceName || p.deviceId).join('、') }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- ===== [/anywhere-mobile] ===== -->
 
                 </div>
               </el-collapse-transition>
