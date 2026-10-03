@@ -60,6 +60,8 @@ import {
   deleteMessages as storeDeleteMessages
 } from '../core/conversationStore.js'
 import { readLocalProjects } from '../core/projects.js'
+import { listSkills } from '../core/skill.js'
+import { getModelCompactConfig, updateModelCompactConfig } from '../core/compact.js'
 
 // ---------------------------------------------------------------------------
 // 日志落盘
@@ -196,6 +198,7 @@ async function readCapabilities() {
     tasks: [],
     promptKey: phonePromptKey,
     reasoningEffortOptions: [],
+  compact: null,
     desktopVersion: RELAY_VERSION,
     desktopVersionCode: RELAY_VERSION_CODE,
     upstreamVersion: app.getVersion()
@@ -224,31 +227,46 @@ async function readCapabilities() {
     }
 
     // ---- MCP：config.mcpServers ----
+    // 带上 description / 连接方式，手机端才能解释「这个 MCP 是干什么的」
     const servers = config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {}
     for (const [id, s] of Object.entries(servers)) {
+      if (!s || typeof s !== 'object') continue
+      const type = s.type || (s.url ? 'sse' : 'stdio')
       result.mcp.push({
         id,
-        label: (s && (s.name || s.label)) || id,
-        enabled: s?.enable !== false
+        label: s.name || s.label || id,
+        enabled: s.enable !== false && s.isActive !== false,
+        description: (s.description || s.desc || '').toString(),
+        type: String(type),
+        // 连接信息（给详情页展示，注意不包含任何 token）
+        command: (s.command || '').toString(),
+        url: (s.url || '').toString(),
+        argsCount: Array.isArray(s.args) ? s.args.length : 0,
+        toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
+        builtin: s.type === 'builtin'
       })
     }
 
-    // ---- Skill：skillPath 下的目录/文件 ----
+    // ---- Skill：用电脑端自己的 listSkills（能拿到 description）----
+    // 以前是自己 readdir 拼目录名，结果只有名字、没有介绍。
     const skillPath = typeof config.skillPath === 'string' ? config.skillPath : ''
-    if (skillPath && existsSync(skillPath)) {
+    if (skillPath) {
       try {
-        for (const entry of readdirSync(skillPath)) {
-          const full = join(skillPath, entry)
-          let isDir = false
-          try { isDir = statSync(full).isDirectory() } catch {}
-          if (isDir) {
-            result.skills.push({ id: entry, label: entry })
-          } else if (/\.(md|json|ya?ml|txt)$/i.test(entry)) {
-            result.skills.push({ id: entry.replace(/\.[^.]+$/, ''), label: entry.replace(/\.[^.]+$/, '') })
-          }
+        const skills = listSkills(skillPath)
+        for (const sk of Array.isArray(skills) ? skills : []) {
+          if (!sk?.id) continue
+          result.skills.push({
+            id: sk.id,
+            label: sk.name || sk.id,
+            description: (sk.description || '').toString(),
+            userInvocable: sk.userInvocable !== false,
+            disabled: sk.disabled === true,
+            context: sk.context || 'normal',
+            allowedTools: Array.isArray(sk.allowedTools) ? sk.allowedTools : []
+          })
         }
       } catch (err) {
-        rwarn('[relay] list skills failed:', err?.message || err)
+        rwarn('[relay] listSkills failed:', err?.message || err)
       }
     }
 
@@ -287,7 +305,18 @@ async function readCapabilities() {
         schedule: describeTaskSchedule(task),
         promptKey: task.promptKey || '__DEFAULT__',
         modelRoute: task.modelRoute || 'general',
-        lastRunTime: task.lastRunTime || ''
+        lastRunTime: task.lastRunTime || '',
+        // 下面这些是手机端「编辑任务」要回填的完整配置
+        intervalMinutes: Number(task.intervalMinutes) || 60,
+        intervalStartTime: task.intervalStartTime || '00:00',
+        dailyTime: task.dailyTime || '12:00',
+        weeklyDays: Array.isArray(task.weeklyDays) ? task.weeklyDays : [],
+        weeklyTime: task.weeklyTime || '12:00',
+        monthlyDays: Array.isArray(task.monthlyDays) ? task.monthlyDays : [],
+        monthlyTime: task.monthlyTime || '12:00',
+        singleDate: task.singleDate || '',
+        singleTime: task.singleTime || '12:00',
+        historyCount: Array.isArray(task.history) ? task.history.length : 0
       })
     }
     result.tasks.sort((a, b) => String(a.id).localeCompare(String(b.id)))
@@ -301,6 +330,27 @@ async function readCapabilities() {
       skills: Array.isArray(promptCfg.defaultSkills) ? promptCfg.defaultSkills : []
     }
     result.reasoningEffortOptions = ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']
+
+    // ---- 会话压缩配置（按模型存）----
+    // 手机端的「压缩」以前只是个摆设（opts.compress 电脑端压根没读）。
+    // 这里把真实配置报上去：自动压缩开关 + 上下文长度 + 已有摘要能不能还原。
+    try {
+      const activeModel = promptCfg.model || result.models[0]?.value || ''
+      if (activeModel) {
+        const cc = await getModelCompactConfig(activeModel)
+        const cfgState = cc?.config && typeof cc.config === 'object' ? cc.config : {}
+        result.compact = {
+          model: activeModel,
+          autoCompactEnabled: cfgState.autoCompactEnabled !== false,
+          hideCompactedMessages: cfgState.hideCompactedMessages !== false,
+          contextLength: Number(cfgState.contextLength) || 0,
+          contextLengthSource: cfgState.contextLengthSource || '',
+          compactPrompt: (cfgState.compactPrompt || '').toString()
+        }
+      }
+    } catch (err) {
+      rwarn('[relay] read compact config failed:', err?.message || err)
+    }
   } catch (err) {
     rwarn('[relay] readCapabilities failed:', err?.message || err)
   }
@@ -455,21 +505,36 @@ async function listPhoneConversations() {
 /**
  * 读取某个会话的消息列表（手机看会话内容用）。
  * 只取 role/content，去掉向量、工具调用等大字段。
+ *
+ * 注意：`index` 是**在 chat_show 里的下标**，手机端「删除这条」要把它回传，
+ * 电脑端 `deleteMessage(index)` 就是按这个下标删的。
+ * `messageId` 是 assistant 气泡的 id，手机端「重新回答」要回传它。
  */
 async function readPhoneConversationMessages(conversationId) {
   const dirPath = await readChatDirPath()
   if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured', messages: [] }
-  const res = await storeGetMessages({ dirPath, conversationId })
-  const raw = Array.isArray(res?.messages) ? res.messages : []
-  const messages = raw
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'system'))
-    .map((m) => ({
-      id: String(m.storageId ?? m.id ?? ''),
-      role: String(m.role || ''),
-      text: extractMessageText(m.content),
+
+  const opened = await openConversation({ dirPath, reference: conversationId })
+  if (!opened?.ok || !opened.sessionData) {
+    return { ok: false, reason: 'conversation_not_found', messages: [] }
+  }
+  const chatShow = Array.isArray(opened.sessionData.chat_show) ? opened.sessionData.chat_show : []
+
+  const messages = []
+  chatShow.forEach((m, index) => {
+    if (!m || typeof m !== 'object') return
+    const role = String(m.role || '')
+    if (role !== 'user' && role !== 'assistant' && role !== 'system') return
+    const text = extractMessageText(m.content)
+    if (!text) return
+    messages.push({
+      index,
+      id: String(m.id ?? ''), // assistant 气泡 id，「重新回答」用
+      role,
+      text,
       time: m.completedTimestamp || m.timestamp || ''
-    }))
-    .filter((m) => m.text)
+    })
+  })
   return { ok: true, messages, count: messages.length }
 }
 
@@ -587,6 +652,188 @@ async function openPhoneConversation(conversationId, relayTo) {
   }
   rwarn('[relay] openWindow for conversation returned:', res)
   return { ok: false, reason: 'open_window_failed' }
+}
+
+// ---------------------------------------------------------------------------
+// 定时任务管理（手机端）
+// 任务数据在 config.tasks[taskId]，改完用 updateConfigWithoutFeatures 落盘 ——
+// 和电脑端 Tasks.vue 的 atomicSave 走的是同一条路径。
+// ---------------------------------------------------------------------------
+function newTaskDefaults(name, builtinMcpIds) {
+  return {
+    name,
+    triggerType: 'interval',
+    intervalMinutes: 60,
+    intervalStartTime: '00:00',
+    intervalTimeRanges: [],
+    dailyTime: '12:00',
+    weeklyDays: [1, 2, 3, 4, 5],
+    weeklyTime: '12:00',
+    monthlyDays: [1],
+    monthlyTime: '12:00',
+    singleDate: new Date().toLocaleDateString('sv-SE'),
+    singleTime: '12:00',
+    promptKey: '__DEFAULT__',
+    modelRoute: 'general',
+    description: '',
+    extraMcp: Array.isArray(builtinMcpIds) ? builtinMcpIds : [],
+    extraSkills: [],
+    autoSave: true,
+    autoSaveProjectId: '',
+    autoClose: false,
+    enabled: false,
+    history: []
+  }
+}
+
+/** 读 config → 交给 mutate 改 → 落盘。返回落盘后的 config。 */
+async function mutateConfig(mutate) {
+  if (!ctx?.dataApi?.getConfig || !ctx?.dataApi?.updateConfigWithoutFeatures) {
+    throw new Error('config_api_unavailable')
+  }
+  const res = await ctx.dataApi.getConfig()
+  const config = res?.config && typeof res.config === 'object' ? res.config : {}
+  if (!config.tasks || typeof config.tasks !== 'object') config.tasks = {}
+  const ret = mutate(config)
+  await ctx.dataApi.updateConfigWithoutFeatures({
+    config: JSON.parse(JSON.stringify(config))
+  })
+  return { config, ret }
+
+}
+
+/** 任务名不能含文件系统非法字符（电脑端同样限制） */
+function validateTaskName(name) {
+  const n = String(name || '').trim()
+  if (!n) return 'name_required'
+  if (/[\\/:*?"<>|]/.test(n)) return 'name_invalid_char'
+  return ''
+}
+
+/** 新建任务 */
+async function createPhoneTask(name) {
+  const bad = validateTaskName(name)
+  if (bad) return { ok: false, reason: bad }
+  const taskId = `task_${Date.now()}`
+  const { config } = await mutateConfig((cfg) => {
+    const builtinIds = Object.entries(cfg.mcpServers || {})
+      .filter(([, s]) => s && s.type === 'builtin' && s.isActive !== false)
+      .map(([id]) => id)
+    cfg.tasks[taskId] = newTaskDefaults(String(name).trim(), builtinIds)
+  })
+  rlog('[relay] created task', taskId, config.tasks[taskId]?.name)
+  return { ok: true, taskId }
+}
+
+/** 删除任务 */
+async function deletePhoneTask(taskId) {
+  const id = String(taskId || '').trim()
+  if (!id) return { ok: false, reason: 'taskId_required' }
+  let existed = false
+  await mutateConfig((cfg) => {
+    existed = !!cfg.tasks[id]
+    delete cfg.tasks[id]
+  })
+  rlog('[relay] deleted task', id, 'existed =', existed)
+  return { ok: true, removed: existed }
+}
+
+/**
+ * 更新任务字段（重命名 / 启停 / 改调度都走这里）。
+ * 只允许改白名单里的键，避免手机端误写坏配置。
+ */
+const TASK_WRITABLE_KEYS = new Set([
+  'name', 'description', 'triggerType',
+  'intervalMinutes', 'intervalStartTime', 'intervalTimeRanges',
+  'dailyTime', 'weeklyDays', 'weeklyTime',
+  'monthlyDays', 'monthlyTime',
+  'singleDate', 'singleTime',
+  'promptKey', 'modelRoute', 'extraMcp', 'extraSkills',
+  'autoSave', 'autoSaveProjectId', 'autoClose'
+])
+
+async function updatePhoneTask(taskId, patch) {
+  const id = String(taskId || '').trim()
+  if (!id) return { ok: false, reason: 'taskId_required' }
+  if (!patch || typeof patch !== 'object') return { ok: false, reason: 'patch_required' }
+
+  if (typeof patch.name === 'string') {
+    const bad = validateTaskName(patch.name)
+    if (bad) return { ok: false, reason: bad }
+  }
+
+  let found = false
+  await mutateConfig((cfg) => {
+    const task = cfg.tasks[id]
+    if (!task || typeof task !== 'object') return
+    found = true
+    for (const [k, v] of Object.entries(patch)) {
+      if (!TASK_WRITABLE_KEYS.has(k)) continue
+      task[k] = v
+    }
+  })
+  if (!found) return { ok: false, reason: 'task_not_found' }
+  return { ok: true }
+}
+
+/**
+ * 启用 / 停用任务。
+ * 电脑端的 `enabled` 是由 appliedDevices 派生的，所以这里同步维护
+ * appliedDevices —— 只加/删「本机」这一项，不动其他设备的授权。
+ */
+async function setPhoneTaskEnabled(taskId, enabled) {
+  const id = String(taskId || '').trim()
+  if (!id) return { ok: false, reason: 'taskId_required' }
+  const identity = ctx?.dataApi?.getTaskDeviceIdentity
+    ? ctx.dataApi.getTaskDeviceIdentity()
+    : null
+
+  let found = false
+  await mutateConfig((cfg) => {
+    const task = cfg.tasks[id]
+    if (!task || typeof task !== 'object') return
+    found = true
+    const list = Array.isArray(task.appliedDevices) ? [...task.appliedDevices] : []
+    const key = identity?.deviceId || identity?.id || identity?.deviceName || 'desktop'
+    const idx = list.findIndex((d) => {
+      const k = d?.deviceId || d?.id || d?.deviceName
+      return k === key
+    })
+    if (enabled) {
+      if (idx === -1) {
+        list.push(
+          identity && typeof identity === 'object'
+            ? { ...identity }
+            : { deviceId: key, deviceName: 'Desktop' }
+        )
+      }
+      task.lastRunTime = Date.now()
+    } else if (idx !== -1) {
+      list.splice(idx, 1)
+    }
+    task.appliedDevices = list
+  })
+  if (!found) return { ok: false, reason: 'task_not_found' }
+  rlog('[relay] task', id, 'enabled =', enabled)
+  return { ok: true, enabled: !!enabled }
+}
+
+/** 清空某个任务的历史（只清记录，不删电脑上的会话文件） */
+async function clearPhoneTaskHistory(taskId) {
+  const id = String(taskId || '').trim()
+  if (!id) return { ok: false, reason: 'taskId_required' }
+  let count = 0
+  let found = false
+  await mutateConfig((cfg) => {
+    const task = cfg.tasks[id]
+    if (!task || typeof task !== 'object') return
+    found = true
+    count = Array.isArray(task.history) ? task.history.length : 0
+    task.history = []
+  })
+  if (!found) return { ok: false, reason: 'task_not_found' }
+  rlog('[relay] cleared task history', id, 'count =', count)
+  return { ok: true, cleared: count }
 }
 
 async function routePhoneChat(msg) {
@@ -805,6 +1052,136 @@ async function routePhoneChat(msg) {
         }
       }),
       { role: 'conversation-action-result', to }
+    )
+    return
+  }
+
+  // 手机对某条消息的操作（重新回答 / 删除这条）→ 转发给会话窗口执行
+  if (role === 'message-action') {
+    const action = String(msg?.action ?? '').trim()
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const conversationId = String(msg?.conversationId ?? '').trim()
+
+    const fail = (reason) => {
+      relay?.sendChat(
+        JSON.stringify({
+          __relayMessageAction: { action, reqId, ok: false, reason }
+        }),
+        { role: 'message-action-result', to }
+      )
+    }
+
+    if (!action) return fail('action_required')
+
+    // 找到承载这个会话的窗口；没有就说明还没「在电脑端打开」
+    let targetWin = null
+    if (isWindowAlive(phoneWindowId)) {
+      const wantKey = conversationId ? `conv:${conversationId}` : 'phone'
+      if (phoneWindowKey === wantKey) targetWin = phoneWindowId
+    }
+    if (!targetWin) {
+      rlog('[relay] message-action but no bound window; conv =', conversationId, 'key =', phoneWindowKey)
+      return fail('conversation_not_open')
+    }
+
+    try {
+      ctx.dispatchWindowEvent(
+        {
+          event: 'relay:command',
+          payload: {
+            action,
+            reqId,
+            relayTo: to,
+            messageId: msg?.messageId,
+            index: msg?.index
+          },
+          target: targetWin
+        },
+        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
+      )
+      rlog('[relay] dispatched message-action', action, 'to window', targetWin, 'reqId =', reqId)
+    } catch (err) {
+      rwarn('[relay] dispatch message-action failed:', err?.message || err)
+      fail(String(err?.message || err))
+    }
+    return
+  }
+
+  // 手机切换「自动压缩」开关（按模型的配置）
+  if (role === 'set-auto-compact') {
+    const enabled = msg?.enabled === true
+    let model = String(msg?.model ?? '').trim()
+    let res = { ok: false }
+    try {
+      if (!model) {
+        const caps = await readCapabilities()
+        model = caps?.compact?.model || caps?.current?.model || caps?.models?.[0]?.value || ''
+      }
+      if (!model) throw new Error('model_unknown')
+      const out = await updateModelCompactConfig(model, { autoCompactEnabled: enabled })
+      res = { ok: true, model, autoCompactEnabled: enabled, config: out?.config || null }
+      rlog('[relay] autoCompact', model, '=', enabled)
+    } catch (err) {
+      rwarn('[relay] set-auto-compact failed:', err?.message || err)
+      res = { ok: false, reason: String(err?.message || err) }
+    }
+    relay?.sendChat(
+      JSON.stringify({ __relayAutoCompact: res }),
+      { role: 'set-auto-compact-result', to }
+    )
+    return
+  }
+
+  // ---- 定时任务管理（新建 / 删除 / 改名 / 启停 / 改调度 / 清历史）----
+  if (role === 'task-manage') {
+    const op = String(msg?.op ?? '').trim()
+    const taskId = String(msg?.taskId ?? '').trim()
+    let res
+    try {
+      switch (op) {
+        case 'create':
+          res = await createPhoneTask(msg?.name)
+          break
+        case 'delete':
+          res = await deletePhoneTask(taskId)
+          break
+        case 'update':
+          res = await updatePhoneTask(taskId, msg?.patch)
+          break
+        case 'setEnabled':
+          res = await setPhoneTaskEnabled(taskId, msg?.enabled === true)
+          break
+        case 'clearHistory':
+          res = await clearPhoneTaskHistory(taskId)
+          break
+        default:
+          res = { ok: false, reason: 'unknown_op' }
+      }
+    } catch (err) {
+      rwarn('[relay] task-manage failed:', op, err?.message || err)
+      res = { ok: false, reason: String(err?.message || err) }
+    }
+
+    // 回执里带上最新的任务列表，手机端不用再单独拉一次
+    let tasks = []
+    try {
+      tasks = (await readCapabilities()).tasks || []
+    } catch (_) {}
+
+    relay?.sendChat(
+      JSON.stringify({
+        __relayTaskManageResult: {
+          op,
+          taskId: res?.taskId || taskId,
+          ok: res?.ok !== false,
+          removed: !!res?.removed,
+          cleared: res?.cleared || 0,
+          enabled: res?.enabled,
+          reason: res?.reason || ''
+        },
+        __relayTasks: tasks
+      }),
+      { role: 'task-manage-result', to }
     )
     return
   }

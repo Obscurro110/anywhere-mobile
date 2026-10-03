@@ -741,7 +741,84 @@ const normalizeWindowEventPayload = (input) => {
     return input.payload;
   }
 
+  // 手机远程命令（重新回答 / 删除这条）—— 走独立分支，不进 append 流程
+  if (input.event === 'relay:command' && input.payload && typeof input.payload === 'object') {
+    return { __relayCommand: input.payload };
+  }
+
   return input.payload ?? input;
+};
+
+// ---------------------------------------------------------------------------
+// [anywhere-mobile] 手机远程命令
+// 手机点了「重新回答 / 删除这条」时，主进程把命令发到本窗口，由本窗口执行
+// （这些操作必须在窗口里跑：要改 chat_show、要触发 AI 请求）。
+// ---------------------------------------------------------------------------
+const relayCommandSeq = ref(0);
+
+const handleRelayCommand = async (cmd) => {
+  if (!cmd || typeof cmd !== 'object') return;
+  const action = String(cmd.action || '');
+  const reqId = String(cmd.reqId || '');
+  relayLog('[relay] command received:', action, 'reqId =', reqId);
+
+  const reply = (ok, extra = {}) => {
+    try {
+      window.api?.sendRelayChat?.({
+        text: JSON.stringify({
+          __relayMessageAction: { action, reqId, ok, ...extra }
+        }),
+        to: cmd.relayTo || '*'
+      });
+    } catch (err) {
+      relayWarn('[relay] command reply failed:', err);
+    }
+  };
+
+  try {
+    if (action === 'reask') {
+      // 电脑端要求传 assistant 消息 id
+      const targetId = Number(cmd.messageId);
+      if (!Number.isFinite(targetId)) {
+        reply(false, { reason: 'messageId_required' });
+        return;
+      }
+      await reaskAI(targetId);
+      reply(true);
+      return;
+    }
+
+    if (action === 'deleteMessage') {
+      const idx = Number(cmd.index);
+      if (!Number.isFinite(idx)) {
+        reply(false, { reason: 'index_required' });
+        return;
+      }
+      deleteMessage(idx);
+      reply(true);
+      return;
+    }
+
+    if (action === 'runCompact') {
+      // 手动压缩：等价于在电脑端压缩对话框点「压缩」
+      if (loading.value || compacting?.value) {
+        reply(false, { reason: 'busy' });
+        return;
+      }
+      reply(true);
+      try {
+        await handleRunCompactWithConfig({});
+      } catch (err) {
+        relayWarn('[relay] runCompact failed:', err);
+      }
+      return;
+    }
+
+    reply(false, { reason: 'unknown_action' });
+  } catch (err) {
+    relayWarn('[relay] command failed:', action, err);
+    reply(false, { reason: String(err?.message || err) });
+  }
 };
 
 const enqueueWindowPayload = (payload) => {
@@ -769,6 +846,20 @@ const handleAppendMessageEvent = async (data, options = {}) => {
       preview: getAppendPayloadPreview(data)
     });
     showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
+    // 告诉手机：这条消息没丢，排队了。
+    // 否则手机那边 pending 气泡一直转圈，用户会以为卡死。
+    if (data?.relayTo) {
+      try {
+        window.api?.sendRelayChat?.({
+          text: JSON.stringify({
+            __relayBuffered: { text: getAppendPayloadPreview(data) || '', reason: 'generating' }
+          }),
+          to: data.relayTo
+        });
+      } catch (err) {
+        relayWarn('[relay] buffered notice failed:', err);
+      }
+    }
     return;
   }
 
@@ -5687,7 +5778,13 @@ onMounted(async () => {
   if (window.api && typeof window.api.onWindowEvent === 'function') {
     window.api.onWindowEvent(async (envelope) => {
       const payload = normalizeWindowEventPayload(envelope);
-      if (payload && typeof payload === 'object' && payload.type) {
+      if (!payload || typeof payload !== 'object') return;
+      // 手机远程命令单独处理，不进 append / AI 流程
+      if (payload.__relayCommand) {
+        await handleRelayCommand(payload.__relayCommand);
+        return;
+      }
+      if (payload.type) {
         if (!isWindowBootstrapped.value) {
           enqueueWindowPayload(payload);
           return;
