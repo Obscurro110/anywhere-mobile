@@ -1,0 +1,161 @@
+name: Build Desktop (Relay 绿色版)
+
+# 自动构建带「手机互通」的 Anywhere Desktop 绿色版，
+# 产物：anywhere-desktop-relay-win-x64.zip -> 发布到 Release "desktop-latest"
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 ref（留空=默认分支最新）'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'desktop-integration/**'
+      - '.github/workflows/build-desktop-relay.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出本仓库（拿补丁与文档）
+        uses: actions/checkout@v4
+        with:
+          path: ours
+
+      - name: 关闭 CRLF 自动转换
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: 克隆上游 anywheredesktop（完整克隆，便于 3-way 合并）
+        shell: pwsh
+        run: |
+          $ref = "${{ github.event.inputs.upstream_ref }}"
+          git clone https://github.com/Komorebi-yaodong/anywheredesktop.git upstream
+          if ($ref -ne '') {
+            Set-Location upstream
+            git fetch --all --tags
+            git checkout $ref
+          }
+          Set-Location upstream
+          git log --oneline -1
+          Write-Host "UPSTREAM_SHA=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_ENV
+
+      - name: 应用互通补丁
+        shell: pwsh
+        run: |
+          $patch = Resolve-Path "ours/desktop-integration/anywhere-desktop-relay.patch"
+          Set-Location upstream
+          Write-Host "==> 尝试 3-way 应用"
+          git apply --3way --ignore-whitespace "$patch"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "==> 3-way 失败，改为按文件逐个应用"
+            foreach ($f in @(
+              'electron-builder.yml','main/index.js','package.json',
+              'preload/main_preload.js','render/main/components/Setting.vue'
+            )) {
+              git apply --ignore-whitespace --include=$f "$patch"
+              if ($LASTEXITCODE -ne 0) { throw "补丁应用失败: $f（上游改动较大，需要重新生成补丁）" }
+              Write-Host "    [OK] $f"
+            }
+          }
+          Write-Host "==> 补丁应用完成"
+
+      - name: 校验关键文件存在
+        shell: pwsh
+        run: |
+          Set-Location upstream
+          $need = @('main/relay/index.js','main/relay/relay-client.js')
+          foreach ($p in $need) { if (-not (Test-Path $p)) { throw "缺少 $p" } }
+          $idx = Get-Content main/index.js -Raw
+          if ($idx -notmatch 'startRelay') { throw "main/index.js 未注入 startRelay" }
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not $pkg.dependencies.ws) { throw "package.json 缺少 ws 依赖" }
+          Write-Host "校验通过：name=$($pkg.name)  ws=$($pkg.dependencies.ws)"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: 安装依赖
+        shell: pwsh
+        run: |
+          Set-Location upstream
+          pnpm install --frozen-lockfile
+        env:
+          ELECTRON_GET_USE_PROXY: 0
+
+      - name: 编译
+        shell: pwsh
+        run: |
+          Set-Location upstream
+          pnpm run build
+
+      - name: 打包（绿色版 / unpacked）
+        shell: pwsh
+        run: |
+          Set-Location upstream
+          # CI 里网络通畅，仍复用本地 Electron 以免二次下载
+          npx electron-builder --dir --publish never "-c.electronDist=node_modules/electron/dist" "-c.directories.output=dist-out"
+
+      - name: 附加说明文档
+        shell: pwsh
+        run: |
+          $dest = "upstream/dist-out/win-unpacked"
+          if (Test-Path "ours/desktop-integration/新电脑安装说明.md") {
+            Copy-Item "ours/desktop-integration/新电脑安装说明.md" "$dest/使用说明.md" -Force
+          }
+          @(
+            "Anywhere Desktop (Relay) 绿色版",
+            "======================",
+            "上游提交: $env:UPSTREAM_SHA",
+            "构建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC",
+            "",
+            "双击 anywhere-desktop-relay.exe 运行。",
+            "首次运行请在 [设置 -> 手机互通] 里填写中继服务器地址 / Token / 用户ID。",
+            "注意：Token 两端（手机与电脑）必须一致。"
+          ) | Set-Content "$dest/版本信息.txt" -Encoding UTF8
+
+      - name: 压缩为 zip
+        shell: pwsh
+        run: |
+          Set-Location upstream/dist-out/win-unpacked
+          Compress-Archive -Path * -DestinationPath ../../../anywhere-desktop-relay-win-x64.zip -Force
+          Set-Location ../../..
+          Get-Item anywhere-desktop-relay-win-x64.zip | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - name: 发布到 Release (desktop-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-latest
+          name: 'Desktop (Relay) · latest'
+          body: |
+            ## Anywhere Desktop (Relay) 绿色版
+
+            - 上游提交：`${{ env.UPSTREAM_SHA }}`
+            - 产物：`anywhere-desktop-relay-win-x64.zip`（Windows x64，免安装）
+
+            ### 使用
+            1. 解压到任意目录（如 `D:\AnywhereRelay`）
+            2. 双击 `anywhere-desktop-relay.exe`
+            3. 「设置 → 手机互通」填写：中继服务器地址 / Token / 用户 ID（需与手机端一致）
+
+            > 详见包内 `使用说明.md`
+          prerelease: true
+          files: anywhere-desktop-relay-win-x64.zip
+          fail_on_unmatched_files: true
