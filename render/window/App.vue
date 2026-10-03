@@ -764,7 +764,12 @@ const handleRelayCommand = async (cmd) => {
 
   const reply = (ok, extra = {}) => {
     try {
+      // 注意 role 必须是 'message-action-result'！
+      // sendRelayChat 默认 role 是 'assistant' —— 用默认值的话，
+      // 这段 JSON 会被手机当成一条**新的 AI 回复**塞进聊天列表，
+      // 既看不到失败原因，还会多出一个乱码气泡。
       window.api?.sendRelayChat?.({
+        role: 'message-action-result',
         text: JSON.stringify({
           __relayMessageAction: { action, reqId, ok, ...extra }
         }),
@@ -783,34 +788,76 @@ const handleRelayCommand = async (cmd) => {
         reply(false, { reason: 'messageId_required' });
         return;
       }
+      // reaskAI 内部只会对「最后一条可见消息」生效（其它情况它只弹个
+      // 电脑端提示然后 return）—— 而它没有返回值，我们无法区分成功失败。
+      // 所以这里先自己判断，给手机一个明确的失败原因，而不是假装成功。
+      const lastVisibleIdx = chat_show.value.findLastIndex(
+        (m) => m?.role === 'user' || m?.role === 'assistant'
+      );
+      if (lastVisibleIdx < 0) {
+        reply(false, { reason: 'nothing_to_reask' });
+        return;
+      }
+      const lastVisible = chat_show.value[lastVisibleIdx];
+      if (lastVisible?.role !== 'assistant' || String(lastVisible?.id ?? '') !== String(targetId)) {
+        relayLog('[relay] reask rejected: target is not the last assistant message. target =', targetId, 'last =', lastVisible?.id, lastVisible?.role);
+        reply(false, { reason: 'not_last_message' });
+        return;
+      }
+      if (loading.value || isReasking) {
+        reply(false, { reason: 'busy' });
+        return;
+      }
       await reaskAI(targetId);
       reply(true);
       return;
     }
 
     if (action === 'deleteMessage') {
-      const idx = Number(cmd.index);
-      if (!Number.isFinite(idx)) {
-        reply(false, { reason: 'index_required' });
+      // 重要：**不能**直接用手机传来的 index。
+      // 手机那个 index 是从数据库读出来的（openConversation → loadUiMessages，
+      // 带分页 limit），而 deleteMessage(index) 用的是本窗口**内存里**的
+      // chat_show —— 两者长度/顺序可能不同，直接用会删错行。
+      // 所以优先用 messageId 在本窗口的 chat_show 里现查下标。
+      const wantId = cmd.messageId === undefined || cmd.messageId === null
+        ? ''
+        : String(cmd.messageId);
+      let idx = -1;
+      if (wantId) {
+        idx = chat_show.value.findIndex((m) => String(m?.id ?? '') === wantId);
+      }
+      if (idx < 0) {
+        // 回退：用手机给的下标，但要确认它落在本窗口范围内
+        const fallback = Number(cmd.index);
+        if (Number.isFinite(fallback) && fallback >= 0 && fallback < chat_show.value.length) {
+          idx = fallback;
+          relayWarn('[relay] deleteMessage: id not found, falling back to index', idx);
+        }
+      }
+      if (idx < 0) {
+        relayWarn('[relay] deleteMessage: message not found in this window. id =', wantId, 'index =', cmd.index);
+        reply(false, { reason: 'message_not_found' });
         return;
       }
       deleteMessage(idx);
-      reply(true);
+      reply(true, { index: idx });
       return;
     }
 
     if (action === 'runCompact') {
-      // 手动压缩：等价于在电脑端压缩对话框点「压缩」
-      if (loading.value || compacting?.value) {
-        reply(false, { reason: 'busy' });
+      // 手动压缩一次。
+      //
+      // 注意：不能走 handleRunCompactWithConfig()，那个函数会先调
+      // handleSaveCompactConfig()，把 contextLength 标记成「手动设置」
+      // （contextLengthManual=true）—— 手机点一下就会改掉电脑端的配置，
+      // 属于意外副作用。所以这里直接调 runConversationCompact，
+      // 它自己会做所有前置判断并返回 true/false。
+      const ok = await runConversationCompact({ manual: true });
+      if (ok === false) {
+        reply(false, { reason: 'compact_unavailable' });
         return;
       }
       reply(true);
-      try {
-        await handleRunCompactWithConfig({});
-      } catch (err) {
-        relayWarn('[relay] runCompact failed:', err);
-      }
       return;
     }
 
@@ -851,6 +898,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
     if (data?.relayTo) {
       try {
         window.api?.sendRelayChat?.({
+          // role 必须是 'buffered'：默认值是 'assistant'，
+          // 那样这段 JSON 会被手机当成一条 AI 回复显示出来（乱码气泡）。
+          role: 'buffered',
           text: JSON.stringify({
             __relayBuffered: { text: getAppendPayloadPreview(data) || '', reason: 'generating' }
           }),
@@ -5781,6 +5831,11 @@ onMounted(async () => {
       if (!payload || typeof payload !== 'object') return;
       // 手机远程命令单独处理，不进 append / AI 流程
       if (payload.__relayCommand) {
+        // 窗口还没初始化完时 chat_show 是空的，直接执行会「找不到这条消息」。
+        // 等一小会儿再试，避免用户手速快时第一次点击失败。
+        if (!isWindowBootstrapped.value) {
+          await new Promise((r) => setTimeout(r, 600));
+        }
         await handleRelayCommand(payload.__relayCommand);
         return;
       }

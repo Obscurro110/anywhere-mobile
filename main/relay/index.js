@@ -686,20 +686,33 @@ function newTaskDefaults(name, builtinMcpIds) {
   }
 }
 
-/** 读 config → 交给 mutate 改 → 落盘。返回落盘后的 config。 */
-async function mutateConfig(mutate) {
-  if (!ctx?.dataApi?.getConfig || !ctx?.dataApi?.updateConfigWithoutFeatures) {
-    throw new Error('config_api_unavailable')
-  }
-  const res = await ctx.dataApi.getConfig()
-  const config = res?.config && typeof res.config === 'object' ? res.config : {}
-  if (!config.tasks || typeof config.tasks !== 'object') config.tasks = {}
-  const ret = mutate(config)
-  await ctx.dataApi.updateConfigWithoutFeatures({
-    config: JSON.parse(JSON.stringify(config))
-  })
-  return { config, ret }
+/**
+ * 读 config → 交给 mutate 改 → 落盘。返回落盘后的 config。
+ *
+ * 用队列串行化：read-modify-write 之间如果没有互斥，两个手机操作同时到
+ * （或手机操作与电脑端界面同时改）会互相覆盖，后写的把先写的抹掉。
+ * 电脑端 Tasks.vue 的 atomicSave 也是同样的排队思路。
+ */
+let configWriteQueue = Promise.resolve()
 
+function mutateConfig(mutate) {
+  const run = async () => {
+    if (!ctx?.dataApi?.getConfig || !ctx?.dataApi?.updateConfigWithoutFeatures) {
+      throw new Error('config_api_unavailable')
+    }
+    const res = await ctx.dataApi.getConfig()
+    const config = res?.config && typeof res.config === 'object' ? res.config : {}
+    if (!config.tasks || typeof config.tasks !== 'object') config.tasks = {}
+    const ret = mutate(config)
+    await ctx.dataApi.updateConfigWithoutFeatures({
+      config: JSON.parse(JSON.stringify(config))
+    })
+    return { config, ret }
+  }
+  // 无论上一个成功还是失败都继续排队，否则一次异常会把队列永久卡死
+  const next = configWriteQueue.then(run, run)
+  configWriteQueue = next.catch(() => {})
+  return next
 }
 
 /** 任务名不能含文件系统非法字符（电脑端同样限制） */
@@ -1073,11 +1086,25 @@ async function routePhoneChat(msg) {
 
     if (!action) return fail('action_required')
 
-    // 找到承载这个会话的窗口；没有就说明还没「在电脑端打开」
+    // 找到承载这个会话的窗口。
+    //
+    // 有两种窗口，key 不一样：
+    //   · 'phone'        —— 手机聊天窗口（手机直接聊天，窗口里自动建了一个会话）
+    //   · 'conv:<id>'    —— 手机点开某个已有电脑端会话的窗口
+    //
+    // 手机气泡带回来的 conversationId 是**窗口自己那个会话**的 id，
+    // 所以在 'phone' 模式下它跟 key 对不上 —— 以前只做严格相等，
+    // 结果「重新回答」「删除这条」永远找不到窗口（日志：no bound window）。
+    // 现在改成：phone 模式的窗口一律接受；conv:<id> 模式必须 id 对得上。
     let targetWin = null
     if (isWindowAlive(phoneWindowId)) {
-      const wantKey = conversationId ? `conv:${conversationId}` : 'phone'
-      if (phoneWindowKey === wantKey) targetWin = phoneWindowId
+      if (phoneWindowKey === 'phone') {
+        targetWin = phoneWindowId
+      } else if (conversationId && phoneWindowKey === `conv:${conversationId}`) {
+        targetWin = phoneWindowId
+      } else if (!conversationId) {
+        targetWin = phoneWindowId
+      }
     }
     if (!targetWin) {
       rlog('[relay] message-action but no bound window; conv =', conversationId, 'key =', phoneWindowKey)
@@ -1085,7 +1112,7 @@ async function routePhoneChat(msg) {
     }
 
     try {
-      ctx.dispatchWindowEvent(
+      const dispatched = ctx.dispatchWindowEvent(
         {
           event: 'relay:command',
           payload: {
@@ -1099,6 +1126,13 @@ async function routePhoneChat(msg) {
         },
         { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
       )
+      // dispatchWindowEvent 返回 { ok, delivered, reason }。
+      // 之前没检查：窗口要是刚好在两步之间关掉了，这里会静默失败，
+      // 手机端一直等一个永远不来的回执（表现为"点了没反应"）。
+      if (dispatched && dispatched.ok === false) {
+        rwarn('[relay] message-action dispatch not delivered:', dispatched.reason)
+        return fail(dispatched.reason || 'dispatch_failed')
+      }
       rlog('[relay] dispatched message-action', action, 'to window', targetWin, 'reqId =', reqId)
     } catch (err) {
       rwarn('[relay] dispatch message-action failed:', err?.message || err)
