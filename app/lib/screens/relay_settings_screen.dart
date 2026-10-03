@@ -133,7 +133,7 @@ class _RelaySettingsScreenState extends State<RelaySettingsScreen> {
 
           _field('中继服务器地址', _server, hint: 'wss://your-domain/ws'),
           _field('用户 ID', _userId, hint: 'default-user'),
-          _field('本机名称', _deviceName, hint: 'My Phone'),
+          _deviceNameRow(),
           _tokenField(),
 
           const SizedBox(height: 6),
@@ -145,6 +145,82 @@ class _RelaySettingsScreenState extends State<RelaySettingsScreen> {
         ],
       ),
     );
+  }
+
+  /// 设备名：默认自动取手机型号，不用用户填。
+  /// 只读展示，旁边给一个「重命名」入口，想改的人才改。
+  Widget _deviceNameRow() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Expanded(
+            child: InputDecorator(
+              decoration: InputDecoration(
+                labelText: '本机名称',
+                helperText: '自动取自手机型号，电脑端设备列表里显示这个名字',
+                helperStyle: const TextStyle(fontSize: 11, color: Colors.white38),
+                border: const OutlineInputBorder(),
+                suffixIcon: _deviceName.text.trim().isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: '重新探测',
+                        icon: const Icon(Icons.autorenew, size: 18),
+                        onPressed: _detectName,
+                      ),
+              ),
+              child: Text(
+                _deviceName.text.trim().isEmpty ? '检测中…' : _deviceName.text.trim(),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: '重命名',
+            icon: const Icon(Icons.edit_outlined),
+            onPressed: _renameName,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 重新探测一次手机型号名
+  Future<void> _detectName() async {
+    final name = await AppConfig.detectDeviceName();
+    if (!mounted) return;
+    setState(() => _deviceName.text = name);
+  }
+
+  /// 手动改名的弹窗
+  Future<void> _renameName() async {
+    final ctrl = TextEditingController(text: _deviceName.text);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名本机'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: '例如：我的手机',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    setState(() => _deviceName.text = name);
+    // 立刻保存，免得用户忘了点「保存并重连」
+    final state = context.read<AppState>();
+    state.setDeviceName(name);
   }
 
   Widget _field(String label, TextEditingController c, {String? hint}) {

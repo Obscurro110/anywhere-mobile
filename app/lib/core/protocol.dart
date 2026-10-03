@@ -56,6 +56,24 @@ class ChatRole {
 
   /// Desktop -> phone: result of a conversation-open request.
   static const conversationOpenResult = 'conversation-open-result';
+
+  /// Phone -> desktop: please send me the messages of this conversation.
+  static const conversationMessagesRequest = 'conversation-messages-request';
+
+  /// Desktop -> phone: messages of a conversation.
+  static const conversationMessages = 'conversation-messages';
+
+  /// Phone -> desktop: delete this conversation.
+  static const conversationDelete = 'conversation-delete';
+
+  /// Phone -> desktop: rename this conversation.
+  static const conversationRename = 'conversation-rename';
+
+  /// Phone -> desktop: delete these messages inside a conversation.
+  static const conversationMessagesDelete = 'conversation-messages-delete';
+
+  /// Desktop -> phone: result of delete / rename / deleteMessages.
+  static const conversationActionResult = 'conversation-action-result';
 }
 
 /// A single unit of data flowing over the relay.
@@ -382,6 +400,9 @@ class ConversationOption {
   final String createdAt;
   final int size;
   final String format;
+  /// 所属项目（电脑端用 projects.yml 组织会话；未归类时为空）
+  final String projectId;
+  final String projectName;
 
   ConversationOption({
     required this.id,
@@ -390,6 +411,8 @@ class ConversationOption {
     this.createdAt = '',
     this.size = 0,
     this.format = 'sqlite',
+    this.projectId = '',
+    this.projectName = '',
   });
 
   /// 相对时间，例如「3 分钟前」「昨天」
@@ -415,6 +438,45 @@ class ConversationOption {
         createdAt: j['createdAt'] as String? ?? '',
         size: (j['size'] as num?)?.toInt() ?? 0,
         format: j['format'] as String? ?? 'sqlite',
+        projectId: j['projectId'] as String? ?? '',
+        projectName: j['projectName'] as String? ?? '',
+      );
+
+  ConversationOption copyWith({String? title, String? projectId, String? projectName}) =>
+      ConversationOption(
+        id: id,
+        title: title ?? this.title,
+        updatedAt: updatedAt,
+        createdAt: createdAt,
+        size: size,
+        format: format,
+        projectId: projectId ?? this.projectId,
+        projectName: projectName ?? this.projectName,
+      );
+}
+
+/// 会话里的一条消息（只带展示所需的字段）。
+class ConvMessage {
+  final String id;
+  final String role;
+  final String text;
+  final String time;
+
+  ConvMessage({
+    required this.id,
+    required this.role,
+    required this.text,
+    this.time = '',
+  });
+
+  bool get isUser => role == 'user';
+  bool get isSystem => role == 'system';
+
+  factory ConvMessage.fromJson(Map<String, dynamic> j) => ConvMessage(
+        id: j['id'] as String? ?? '',
+        role: j['role'] as String? ?? '',
+        text: j['text'] as String? ?? '',
+        time: j['time'] as String? ?? '',
       );
 }
 

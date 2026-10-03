@@ -170,9 +170,12 @@ jobs:
           SHA=$(sha256sum out/anywhere-mobile.apk | cut -d' ' -f1)
           SIZE=$(stat -c%s out/anywhere-mobile.apk)
           REPO="${{ github.repository }}"
-          URL="https://github.com/${REPO}/releases/download/apk-latest/anywhere-mobile.apk"
+          # APK 挂在对应版本的 Release 上（tag: vX.Y.Z），不再重复传到 apk-latest
+          URL="https://github.com/${REPO}/releases/download/v${VN}/anywhere-mobile-${VN}.apk"
+          # 供 App 读取的稳定指针（只有 version.json，没有 APK）
+          POINTER="https://github.com/${REPO}/releases/download/apk-latest/version.json"
 
-          VN="$VN" VC="$VC" NOTES="$NOTES" SHA="$SHA" SIZE="$SIZE" URL="$URL" \
+          VN="$VN" VC="$VC" NOTES="$NOTES" SHA="$SHA" SIZE="$SIZE" URL="$URL" POINTER="$POINTER" \
           node -e '
             const fs = require("fs");
             const out = {
@@ -181,6 +184,8 @@ jobs:
               versionCode: Number(process.env.VC),
               notes: process.env.NOTES || "",
               url: process.env.URL,
+              apkUrl: process.env.URL,
+              pointerUrl: process.env.POINTER,
               sha256: process.env.SHA,
               size: Number(process.env.SIZE),
               builtAt: new Date().toISOString(),
@@ -198,16 +203,21 @@ jobs:
           path: app/out/anywhere-mobile*.apk
           if-no-files-found: error
 
-      # ---- 发布到 Releases：main 分支 -> 滚动更新（apk-latest）----
-      # apk-latest 只作为「App 检查更新」的稳定地址，不占用 Latest 标记
+      # ---- 发布滚动更新指针（tag: apk-latest）----
+      # 只挂 version.json 作为 App「检查更新」的稳定地址，**不再重复上传 APK**
+      # （APK 统一放在 vX.Y.Z 那条正式 Release 里，避免每个版本多传一份 51MB）。
+      # version.json 里带 apkUrl，App 据此去对应的版本 Release 下载。
       - name: Publish rolling Release (main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-latest
-          name: "Anywhere Mobile — latest APK"
+          name: "Anywhere Mobile — 更新指针"
           body: |
-            🤖 滚动更新 Release（App 内「检查更新」读取这里的 version.json）
+            🤖 这是「App 内检查更新」读取的指针文件，**不提供下载**。
+
+            请到下方对应版本的 Release 下载 APK：
+            **v${{ steps.ver.outputs.name }}**
 
             当前版本：**v${{ steps.ver.outputs.name }}** (build ${{ steps.ver.outputs.code }})
 
@@ -216,11 +226,10 @@ jobs:
             ---
             提交: `${{ github.sha }}`
           files: |
-            app/out/anywhere-mobile.apk
             app/out/version.json
           make_latest: false
           draft: false
-          prerelease: true
+          prerelease: false
 
       # ---- 发布到 Releases：每个版本一条正式 Release（vX.Y.Z）----
       - name: Publish versioned Release (main)

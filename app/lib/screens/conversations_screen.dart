@@ -3,8 +3,9 @@ import 'package:provider/provider.dart';
 
 import '../models/models.dart';
 import '../services/app_state.dart';
+import 'conversation_detail_screen.dart';
 
-/// 电脑端对话：列出电脑端已有的本地会话，点开即可接着聊。
+/// 电脑端对话：列出电脑端已有的本地会话，按项目分组，可点开接着聊或管理。
 ///
 /// 原理：手机点某条会话 → 电脑端用 `conversation:open` 读出该会话并在本机
 /// 打开一个窗口（带 relayTo）→ 之后手机的每条消息都进那个会话，AI 的回复
@@ -94,98 +95,210 @@ class _ConversationsPageState extends State<ConversationsPage> {
       );
     }
 
-    final activeId = state.activeConversationId;
+    // 按项目分组：先按电脑端 projects 顺序，再「未归类」
+    final grouped = <String, List<ConversationOption>>{};
+    for (final p in state.conversationProjects) {
+      grouped[p] = [];
+    }
+    final ungrouped = <ConversationOption>[];
+    for (final c in state.conversations) {
+      if (c.projectName.isNotEmpty && grouped.containsKey(c.projectName)) {
+        grouped[c.projectName]!.add(c);
+      } else if (c.projectName.isNotEmpty) {
+        grouped.putIfAbsent(c.projectName, () => []).add(c);
+      } else {
+        ungrouped.add(c);
+      }
+    }
+    // 去掉空项目
+    grouped.removeWhere((_, v) => v.isEmpty);
 
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 20),
-      itemCount: state.conversations.length + 1,
-      itemBuilder: (context, i) {
-        // 顶部：提示当前是否对接着某个电脑端会话
-        if (i == 0) {
-          if (activeId == null) {
-            return const Padding(
-              padding: EdgeInsets.fromLTRB(6, 4, 6, 12),
-              child: Text(
-                '点一条会话即可在电脑端打开它，之后手机的对话就进入该会话',
-                style: TextStyle(fontSize: 12, color: Colors.white38),
-              ),
-            );
-          }
-          return Container(
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1D2A3A),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFF2E5A7A)),
-            ),
-            child: Row(
+    final rows = <Widget>[];
+
+    // 顶部：当前接的会话提示
+    if (state.activeConversationId != null) {
+      rows.add(_activeBanner(context, state));
+    }
+
+    for (final entry in grouped.entries) {
+      rows.add(_projectHeader(entry.key, entry.value.length));
+      for (final c in entry.value) {
+        rows.add(_tile(context, state, c));
+      }
+    }
+    if (ungrouped.isNotEmpty) {
+      rows.add(_projectHeader('未归类', ungrouped.length, muted: true));
+      for (final c in ungrouped) {
+        rows.add(_tile(context, state, c));
+      }
+    }
+
+    rows.add(const SizedBox(height: 20));
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      children: rows,
+    );
+  }
+
+  Widget _activeBanner(BuildContext context, AppState state) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1D2A3A),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2E5A7A)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.link, size: 18, color: Colors.lightBlueAccent),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.link, size: 18, color: Colors.lightBlueAccent),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('正在电脑端会话中对话',
-                          style: TextStyle(fontSize: 12, color: Colors.white70)),
-                      if (state.activeConversationTitle.isNotEmpty)
-                        Text(
-                          state.activeConversationTitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                    ],
+                const Text('正在电脑端会话中对话',
+                    style: TextStyle(fontSize: 12, color: Colors.white70)),
+                if (state.activeConversationTitle.isNotEmpty)
+                  Text(
+                    state.activeConversationTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.bold),
                   ),
-                ),
-                TextButton(
-                  onPressed: state.leaveDesktopConversation,
-                  child: const Text('退出'),
-                ),
               ],
             ),
-          );
-        }
-
-        final c = state.conversations[i - 1];
-        final isActive = c.id == activeId;
-
-        return Card(
-          color: isActive ? const Color(0xFF1D2A3A) : const Color(0xFF1B1F2B),
-          margin: const EdgeInsets.only(bottom: 8),
-          child: ListTile(
-            contentPadding: const EdgeInsets.fromLTRB(14, 6, 8, 6),
-            leading: Icon(
-              isActive ? Icons.chat_bubble : Icons.chat_bubble_outline,
-              color: isActive ? Colors.lightBlueAccent : Colors.white38,
-            ),
-            title: Text(
-              c.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 14.5),
-            ),
-            subtitle: Row(
-              children: [
-                if (c.updatedLabel.isNotEmpty)
-                  Text(c.updatedLabel,
-                      style: const TextStyle(fontSize: 11, color: Colors.white38)),
-                if (isActive) ...[
-                  const SizedBox(width: 8),
-                  const Text('对话中',
-                      style: TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
-                ],
-              ],
-            ),
-            trailing: isActive
-                ? null
-                : const Icon(Icons.open_in_new, size: 18, color: Colors.white24),
-            onTap: isActive ? null : () => _open(context, state, c),
           ),
-        );
-      },
+          TextButton(
+            onPressed: state.leaveDesktopConversation,
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _projectHeader(String name, int count, {bool muted = false}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 14, 6, 6),
+      child: Row(
+        children: [
+          Icon(Icons.folder_outlined,
+              size: 14, color: muted ? Colors.white24 : Colors.amberAccent),
+          const SizedBox(width: 6),
+          Text(
+            name,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: muted ? Colors.white38 : Colors.white70,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text('$count',
+              style: const TextStyle(fontSize: 11, color: Colors.white24)),
+        ],
+      ),
+    );
+  }
+
+  Widget _tile(BuildContext context, AppState state, ConversationOption c) {
+    final isActive = c.id == state.activeConversationId;
+
+    return Card(
+      color: isActive ? const Color(0xFF1D2A3A) : const Color(0xFF1B1F2B),
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        contentPadding: const EdgeInsets.fromLTRB(14, 6, 4, 6),
+        leading: Icon(
+          isActive ? Icons.chat_bubble : Icons.chat_bubble_outline,
+          color: isActive ? Colors.lightBlueAccent : Colors.white38,
+        ),
+        title: Text(
+          c.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 14.5),
+        ),
+        subtitle: Row(
+          children: [
+            if (c.updatedLabel.isNotEmpty)
+              Text(c.updatedLabel,
+                  style: const TextStyle(fontSize: 11, color: Colors.white38)),
+            if (isActive) ...[
+              const SizedBox(width: 8),
+              const Text('对话中',
+                  style: TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+            ],
+          ],
+        ),
+        trailing: PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert, size: 18, color: Colors.white38),
+          color: const Color(0xFF232733),
+          onSelected: (v) {
+            switch (v) {
+              case 'open':
+                _open(context, state, c);
+              case 'view':
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => ConversationDetailPage(conversation: c),
+                ));
+              case 'rename':
+                _rename(context, state, c);
+              case 'delete':
+                _delete(context, state, c);
+            }
+          },
+          itemBuilder: (ctx) => [
+            if (!isActive)
+              const PopupMenuItem(
+                value: 'open',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.open_in_new, size: 18),
+                  title: Text('在电脑端打开'),
+                ),
+              ),
+            const PopupMenuItem(
+              value: 'view',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.article_outlined, size: 18),
+                title: Text('查看对话'),
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'rename',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.edit_outlined, size: 18),
+                title: Text('重命名'),
+              ),
+            ),
+            PopupMenuItem(
+              value: 'delete',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.delete_outline,
+                    size: 18, color: Colors.redAccent),
+                title: const Text('删除会话',
+                    style: TextStyle(color: Colors.redAccent)),
+              ),
+            ),
+          ],
+        ),
+        onTap: isActive
+            ? () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => ConversationDetailPage(conversation: c),
+                ))
+            : () => _open(context, state, c),
+      ),
     );
   }
 
@@ -208,7 +321,6 @@ class _ConversationsPageState extends State<ConversationsPage> {
       SnackBar(content: Text('正在电脑端打开「${c.title}」…')),
     );
     if (!mounted) return;
-    // 等电脑端回执（回执会更新 activeConversationId）
     for (var i = 0; i < 12; i++) {
       await Future.delayed(const Duration(milliseconds: 500));
       if (!mounted) return;
@@ -226,6 +338,68 @@ class _ConversationsPageState extends State<ConversationsPage> {
         }
         return;
       }
+    }
+  }
+
+  Future<void> _rename(
+      BuildContext context, AppState state, ConversationOption c) async {
+    final ctrl = TextEditingController(text: c.title);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名会话'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty || name == c.title) return;
+    if (!context.mounted) return;
+    final ok = state.renameConversationOnDesktop(c.id, name);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ok ? '已重命名为「$name」' : '重命名失败')),
+      );
+    }
+  }
+
+  Future<void> _delete(
+      BuildContext context, AppState state, ConversationOption c) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除会话'),
+        content: Text(
+          '将从电脑端永久删除这个会话及其全部对话记录：\n\n「${c.title}」\n\n此操作不可撤销。',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!context.mounted) return;
+    final sent = state.deleteConversationOnDesktop(c.id);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(sent ? '已请求删除「${c.title}」' : '发送失败')),
+      );
     }
   }
 }

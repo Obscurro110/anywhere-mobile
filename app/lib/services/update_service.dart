@@ -55,7 +55,11 @@ class ReleaseInfo {
         versionName: j['versionName'] as String? ?? '',
         versionCode: (j['versionCode'] as num?)?.toInt() ?? 0,
         notes: j['notes'] as String? ?? '',
-        url: j['url'] as String? ?? '',
+        // apkUrl 是明确指向该版本 Release 的下载地址；
+        // 老格式只有 url，兜底用（2026-10 起 apk-latest 不再挂 APK）
+        url: (j['apkUrl'] as String?)?.isNotEmpty == true
+            ? j['apkUrl'] as String
+            : (j['url'] as String? ?? ''),
         sha256: j['sha256'] as String? ?? '',
         size: (j['size'] as num?)?.toInt() ?? 0,
         builtAt: j['builtAt'] as String? ?? '',
@@ -87,9 +91,9 @@ class UpdateService {
   String get _versionJsonUrl =>
       'https://github.com/$owner/$repo/releases/download/$releaseTag/version.json';
 
-  /// API 兜底
-  String get _apiUrl =>
-      'https://api.github.com/repos/$owner/$repo/releases/tags/$releaseTag';
+  /// API 兜底：apk-latest 只作指针（无 APK），真正带 APK 的是各版本 Release，
+  /// 所以兜底时查「最新正式 Release」。
+  String get _apiUrl => 'https://api.github.com/repos/$owner/$repo/releases/latest';
 
   static const _timeout = Duration(seconds: 20);
 
@@ -107,7 +111,7 @@ class UpdateService {
       debugPrint('[UpdateService] direct version.json failed: $e');
     }
 
-    // 2) 兜底：GitHub API 从 Release body/资产里找
+    // 2) 兜底：GitHub API 从「最新正式 Release」的资产里找
     final resp = await http
         .get(Uri.parse(_apiUrl), headers: {'Accept': 'application/vnd.github+json'})
         .timeout(_timeout);
@@ -119,14 +123,24 @@ class UpdateService {
     final assets = (j['assets'] as List?) ?? [];
     String url = '';
     int size = 0;
+    // 优先精确匹配 anywhere-mobile-<版本>.apk，其次任意 anywhere-mobile*.apk
+    final verMatch = RegExp(r'v?(\d+\.\d+\.\d+)').firstMatch(tag);
+    final ver = verMatch?.group(1) ?? '';
+    Map<String, dynamic>? fallback;
     for (final a in assets) {
       final m = (a as Map).cast<String, dynamic>();
-      if ((m['name'] as String? ?? '').startsWith('anywhere-mobile') &&
-          (m['name'] as String? ?? '').endsWith('.apk')) {
+      final n = m['name'] as String? ?? '';
+      if (!n.endsWith('.apk')) continue;
+      fallback ??= m;
+      if (ver.isNotEmpty && n == 'anywhere-mobile-$ver.apk') {
         url = m['browser_download_url'] as String? ?? '';
         size = (m['size'] as num?)?.toInt() ?? 0;
         break;
       }
+    }
+    if (url.isEmpty && fallback != null) {
+      url = fallback['browser_download_url'] as String? ?? '';
+      size = (fallback['size'] as num?)?.toInt() ?? 0;
     }
     // 版本号从 tag 或 name 里粗解析
     final name = (j['name'] as String?) ?? tag;

@@ -36,6 +36,9 @@ dependencies:
   # app version + in-app update
   package_info_plus: ^8.1.1
 
+  # 读取手机型号名，用作设备显示名（自动填，不用用户手填）
+  device_info_plus: ^10.1.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

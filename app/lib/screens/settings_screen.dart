@@ -98,12 +98,12 @@ class SettingsPage extends StatelessWidget {
           ]),
 
           // ---------- 数据 ----------
-          const SettingGroupTitle('数据'),
+          const SettingGroupTitle('本机数据'),
           SettingCard(children: [
             SettingTile(
               icon: Icons.cleaning_services_outlined,
-              title: '清空聊天记录',
-              subtitle: '只清除本机记录，不影响电脑端',
+              title: '清空本机聊天记录',
+              subtitle: '仅清空这台手机上的显示缓存；电脑端的会话不受影响',
               onTap: () => _confirmClear(context, state),
             ),
           ]),
@@ -133,8 +133,13 @@ class SettingsPage extends StatelessWidget {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('清空聊天记录'),
-        content: const Text('确定要清除本机的所有聊天记录吗？此操作不可撤销。'),
+        title: const Text('清空本机聊天记录'),
+        content: const Text(
+          '仅清空这台手机上显示的聊天记录。\n\n'
+          '电脑端的会话和 AI 的记忆都不受影响——'
+          '下次发消息时，电脑端仍会带着完整上下文回答。\n\n'
+          '如需真正删除某个会话，请到「电脑端对话」里操作。',
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -149,7 +154,7 @@ class SettingsPage extends StatelessWidget {
     await state.clearHistory();
     if (context.mounted) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('聊天记录已清空')));
+          .showSnackBar(const SnackBar(content: Text('已清空本机记录')));
     }
   }
 }

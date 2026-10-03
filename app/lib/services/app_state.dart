@@ -51,8 +51,23 @@ class AppState extends ChangeNotifier {
   bool conversationsOk = true;
   String? conversationsError;
 
+  /// 电脑端项目的名字列表（用于列表分组）
+  List<String> conversationProjects = const [];
+
+  /// 某个会话的消息（会话详情页看）
+  List<ConvMessage> conversationMessages = const [];
+  bool loadingConversationMessages = false;
+  String? conversationMessagesError;
+
   /// 最近一次「打开电脑端会话」的结果
   Map<String, dynamic>? lastConversationOpen;
+
+  /// 最近一次会话管理操作（删除/重命名/删消息）的结果
+  Map<String, dynamic>? lastConversationAction;
+
+  /// 最近一次删消息的条数（给 UI 提示用）
+  int _lastDeletedCount = 0;
+  int get lastDeletedCount => _lastDeletedCount;
 
   /// Currently selected run options (sent with every message).
   ChatOptions options = const ChatOptions();
@@ -239,6 +254,84 @@ class AppState extends ChangeNotifier {
     _setActiveConversation(null, '');
   }
 
+  // ---- 电脑端会话管理 ----
+
+  /// 拉取某个会话的消息内容（会话详情页）。
+  bool requestConversationMessages(String conversationId) {
+    if (!_client.isConnected) return false;
+    conversationMessages = const [];
+    conversationMessagesError = null;
+    loadingConversationMessages = true;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationMessagesRequest,
+        'text': '',
+        'conversationId': conversationId,
+      },
+    ));
+  }
+
+  /// 删除电脑端某个会话（会话文件一起删除）。
+  bool deleteConversationOnDesktop(String conversationId) {
+    if (!_client.isConnected) return false;
+    lastConversationAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationDelete,
+        'text': '',
+        'conversationId': conversationId,
+      },
+    ));
+  }
+
+  /// 重命名电脑端某个会话。
+  bool renameConversationOnDesktop(String conversationId, String title) {
+    if (!_client.isConnected) return false;
+    final t = title.trim();
+    if (t.isEmpty) return false;
+    lastConversationAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationRename,
+        'text': '',
+        'conversationId': conversationId,
+        'title': t,
+      },
+    ));
+  }
+
+  /// 删除会话里的若干条消息。
+  bool deleteConversationMessages(String conversationId, List<String> storageIds) {
+    if (!_client.isConnected) return false;
+    final ids = storageIds.where((e) => e.isNotEmpty).toList();
+    if (ids.isEmpty) return false;
+    lastConversationAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationMessagesDelete,
+        'text': '',
+        'conversationId': conversationId,
+        'storageIds': ids,
+      },
+    ));
+  }
+
   static String _conversationOpenReason(String reason) {
     switch (reason) {
       case 'chat_dir_not_configured':
@@ -284,6 +377,16 @@ class AppState extends ChangeNotifier {
     _bind();
     _client.connect();
     notifyListeners();
+  }
+
+  /// 改本机显示名（默认自动取手机型号，用户想改才调）。
+  /// 存盘后重连，这样电脑端设备列表里立刻能看到新名字。
+  void setDeviceName(String name) {
+    final n = name.trim();
+    if (n.isEmpty || n == config.deviceName) return;
+    config.deviceName = n;
+    config.save();
+    reconnect();
   }
 
   /// 本机 App 版本号（「v1.3.2」这种），设置页状态卡展示用。
@@ -427,6 +530,12 @@ class AppState extends ChangeNotifier {
             .map((e) => ConversationOption.fromJson((e as Map).cast<String, dynamic>()))
             .where((c) => c.id.isNotEmpty)
             .toList();
+        // 项目名列表（去重，保留电脑端顺序）
+        final projs = (decoded['projects'] as List?) ?? const [];
+        conversationProjects = projs
+            .map((e) => ((e as Map)['name'] ?? '').toString())
+            .where((n) => n.isNotEmpty)
+            .toList();
         conversationsOk = decoded['ok'] != false;
         final reason = decoded['reason']?.toString() ?? '';
         if (!conversationsOk) {
@@ -443,6 +552,85 @@ class AppState extends ChangeNotifier {
         loadingConversations = false;
         conversationsError = '解析会话列表失败';
         notifyListeners();
+      }
+      return;
+    }
+
+    // 电脑端回传某个会话的消息内容
+    if (p.role == ChatRole.conversationMessages) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r =
+            (decoded['__relayConversationMessages'] as Map?)?.cast<String, dynamic>() ?? {};
+        final raw = (r['messages'] as List?) ?? const [];
+        conversationMessages = raw
+            .map((e) => ConvMessage.fromJson((e as Map).cast<String, dynamic>()))
+            .toList();
+        final ok = r['ok'] != false;
+        conversationMessagesError = ok
+            ? null
+            : _conversationOpenReason(r['reason']?.toString() ?? '读取消息失败');
+        loadingConversationMessages = false;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] conversation-messages decode failed: $e');
+        loadingConversationMessages = false;
+        conversationMessagesError = '解析会话消息失败';
+        notifyListeners();
+      }
+      return;
+    }
+
+    // 电脑端回传会话管理操作（删除 / 重命名 / 删消息）结果
+    if (p.role == ChatRole.conversationActionResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayConversationActionResult'] as Map?)
+                ?.cast<String, dynamic>() ??
+            {};
+        final action = r['action']?.toString() ?? '';
+        final ok = r['ok'] == true;
+        final cid = r['conversationId']?.toString() ?? '';
+        lastConversationAction = {
+          'action': action,
+          'ok': ok,
+          'conversationId': cid,
+          'removed': r['removed'] == true,
+          'deleted': (r['deleted'] as num?)?.toInt() ?? 0,
+          'title': r['title']?.toString() ?? '',
+          'reason': r['reason']?.toString() ?? '',
+        };
+
+        if (ok) {
+          switch (action) {
+            case 'delete':
+              conversations = conversations.where((c) => c.id != cid).toList();
+              if (activeConversationId == cid) {
+                _setActiveConversation(null, '');
+              }
+              break;
+            case 'rename':
+              final t = r['title']?.toString() ?? '';
+              conversations = conversations
+                  .map((c) => c.id == cid ? c.copyWith(title: t) : c)
+                  .toList();
+              if (activeConversationId == cid) {
+                _activeConversationTitle = t;
+                unawaited(_persistActiveConversation());
+              }
+              break;
+            case 'deleteMessages':
+              final n = (r['deleted'] as num?)?.toInt() ?? 0;
+              conversationMessages = conversationMessages
+                  .where((m) => m.id.isNotEmpty)
+                  .toList();
+              _lastDeletedCount = n;
+              break;
+          }
+        }
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] conversation-action-result decode failed: $e');
       }
       return;
     }
