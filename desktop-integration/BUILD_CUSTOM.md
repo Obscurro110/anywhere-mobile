@@ -7,23 +7,54 @@
 
 ---
 
-## ⚡ 最快方式：一键应用补丁
+## ⭐ 推荐：用 git 分支维护（而不是补丁）
 
-本目录附带 [`anywhere-desktop-relay.patch`](./anywhere-desktop-relay.patch)（相对官方源码的完整改动）：
+补丁很脆 —— **官方源码一更新，`git apply` 就会大面积失败**。
+更稳的做法是在源码里维护一个**分支**：`anywhere-relay` = 官方最新 + 我们的互通改动。
+以后更新只要 `git rebase origin/main`，让 git 帮你合并。
 
 ```bash
 git clone --depth 1 https://github.com/Komorebi-yaodong/anywheredesktop.git anywhere-desktop-src
 cd anywhere-desktop-src
-git apply /path/to/anywhere-desktop-relay.patch
+
+# 一次性：把互通改动放到分支上
+git checkout -b anywhere-relay
+git apply /path/to/anywhere-desktop-relay.patch     # ← 本目录附带的补丁
+git add -A && git commit -m "feat: relay integration"
+
+# 以后每次更新
+git fetch origin --unshallow
+git rebase origin/main                               # 把官方最新合并进来
 pnpm install
 pnpm run build
-npx electron-builder --dir --publish never "-c.electronDist=node_modules/electron/dist"
+npx electron-builder --dir --publish never "-c.electronDist=node_modules/electron/dist" "-c.directories.output=dist-out"
 ```
 
 补丁含以下文件改动：
 `electron-builder.yml` · `main/index.js` · `main/relay/*` · `package.json` · `preload/main_preload.js` · `render/main/components/Setting.vue` · `scripts/apply-relay-patch.mjs`
 
-> 补丁里把那 2 处 `main/index.js` 改动也包含了，所以**不需要**再跑 `apply-relay-patch.mjs`。
+> ⚠️ 注意：`git apply` 是**全有或全无**的。若整包失败，可按文件逐个打：
+> ```bash
+> git apply --include=main/index.js anywhere-desktop-relay.patch
+> git apply --include=package.json anywhere-desktop-relay.patch
+> # ... 逐个文件
+> ```
+
+## 🚀 一键更新脚本（Windows）
+
+见 [`更新.ps1`](./更新.ps1)。放到运行目录（如 `D:\AnywhereRelay\`），双击运行即可：
+
+1. 切到 `anywhere-relay` 分支
+2. `git fetch --unshallow` + `git rebase origin/main`
+3. `pnpm install` → `pnpm run build` → `electron-builder`
+4. 覆盖到运行目录（**保留脚本自身**）
+
+> 脚本里要改的地方：`$SRC`（源码目录）、`$DEST`（运行目录）、`$PROXY`（拉 GitHub 的代理）。
+> rebase 冲突时脚本会自动 `--abort` 并提示，不会破坏你的源码。
+
+## ⚡ 备用方式：直接应用补丁
+
+如果不想用分支，也可以直接打补丁（适合全新克隆、上游未变动时）：见下方「手动方式」。
 
 ---
 
