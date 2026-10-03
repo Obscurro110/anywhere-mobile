@@ -109,6 +109,46 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 选中某个「快捷助手」，并把它自带的预设（模型 / 思考预算 / MCP / Skill）
+  /// 同步进会话参数。
+  ///
+  /// 电脑端在建立会话时会应用 `prompt.defaultMcpServers` / `defaultSkills`，
+  /// 但手机端如果不显式带上，后续一旦手动改过参数就可能把助手预设覆盖掉，
+  /// 所以这里一次性套用，用户之后仍可单独微调。
+  ///
+  /// 传 null 表示回到「默认助手」（清空助手相关预设，保留其他手动设置）。
+  void applyPrompt(String? key) {
+    if (key == null || key.isEmpty) {
+      options = options.copyWith(clearPromptKey: true);
+      notifyListeners();
+      return;
+    }
+
+    final hit = capabilities.prompts.where((p) => p.key == key);
+    final p = hit.isNotEmpty ? hit.first : null;
+
+    options = ChatOptions(
+      promptKey: key,
+      // 助手没配就用用户当前的选择，不要清空
+      model: (p != null && p.model.isNotEmpty) ? p.model : options.model,
+      reasoningEffort: (p != null && p.reasoningEffort.isNotEmpty)
+          ? p.reasoningEffort
+          : options.reasoningEffort,
+      mcp: (p != null && p.mcp.isNotEmpty) ? p.mcp : options.mcp,
+      skills: (p != null && p.skills.isNotEmpty) ? p.skills : options.skills,
+      compress: options.compress,
+    );
+    notifyListeners();
+  }
+
+  /// 当前选中的助手（没选返回 null）。
+  PromptOption? get activePrompt {
+    final key = options.promptKey;
+    if (key == null || key.isEmpty) return null;
+    final hit = capabilities.prompts.where((p) => p.key == key);
+    return hit.isNotEmpty ? hit.first : null;
+  }
+
   /// 拉取电脑端定时任务列表。
   Future<void> requestTasks() async {
     if (!_client.isConnected) return;

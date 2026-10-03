@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- networking -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -7,10 +8,33 @@
     <!-- keep connection alive in background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <!-- file access (scoped storage friendly) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+
+    <!--
+      App 内自更新（下载 APK 后唤起系统安装器）。
+      patch_android.py 也会补这一条，这里是显式声明。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+
+    <!--
+      ===== 显式移除不需要的权限（插件会自动合并进来）=====
+
+      flutter_local_notifications 自带 SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM，
+      那是给「到点必须精确触发」的本地定时提醒用的。我们的通知全部来自
+      WebSocket 实时推送，不需要精确闹钟 —— 留着会导致 Android 12+ 每次
+      启动都跳「闹钟和提醒」授权页。
+
+      同理文件选择走 SAF（file_picker），不需要读媒体库的宽泛权限。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        tools:node="remove"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"
+        tools:node="remove"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
+        tools:node="remove"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"
+        tools:node="remove"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"
+        tools:node="remove"/>
 
     <application
         android:label="Anywhere"

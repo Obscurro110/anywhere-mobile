@@ -163,6 +163,8 @@ class ChatOptions {
     List<String>? skills,
     bool? compress,
     String? promptKey,
+    /// 置为 true 时把 promptKey 清空（`promptKey: null` 无法区分"不改"和"改成空"）
+    bool clearPromptKey = false,
   }) =>
       ChatOptions(
         model: model ?? this.model,
@@ -170,7 +172,7 @@ class ChatOptions {
         mcp: mcp ?? this.mcp,
         skills: skills ?? this.skills,
         compress: compress ?? this.compress,
-        promptKey: promptKey ?? this.promptKey,
+        promptKey: clearPromptKey ? null : (promptKey ?? this.promptKey),
       );
 }
 
@@ -295,6 +297,9 @@ class SkillOption {
 }
 
 /// 电脑端「快捷助手」（prompt 配置）。
+///
+/// 每个助手自带一套预设（模型 / 思考预算 / MCP / Skill）。选中助手时
+/// 要把这些预设一并应用到会话参数里，否则助手配好的 MCP、Skill 不会生效。
 class PromptOption {
   final String key;
   final String label;
@@ -302,13 +307,42 @@ class PromptOption {
   final String model;
   final String type;
 
+  /// 助手预设的思考预算
+  final String reasoningEffort;
+
+  /// 助手预设的 MCP 工具 id 列表
+  final List<String> mcp;
+
+  /// 助手预设的 Skill 名称列表
+  final List<String> skills;
+
   PromptOption({
     required this.key,
     required this.label,
     this.icon = '',
     this.model = '',
     this.type = 'over',
+    this.reasoningEffort = '',
+    this.mcp = const [],
+    this.skills = const [],
   });
+
+  /// 这个助手是否带了任何预设（用于 UI 上提示"已套用助手预设"）
+  bool get hasPreset =>
+      model.isNotEmpty ||
+      reasoningEffort.isNotEmpty ||
+      mcp.isNotEmpty ||
+      skills.isNotEmpty;
+
+  /// 预设摘要，例如「5 个 MCP · 3 个 Skill」
+  String get presetSummary {
+    final bits = <String>[];
+    if (model.isNotEmpty) bits.add('模型');
+    if (reasoningEffort.isNotEmpty) bits.add('思考');
+    if (mcp.isNotEmpty) bits.add('${mcp.length} 个 MCP');
+    if (skills.isNotEmpty) bits.add('${skills.length} 个 Skill');
+    return bits.join(' · ');
+  }
 
   factory PromptOption.fromJson(Map<String, dynamic> j) => PromptOption(
         key: j['key'] as String? ?? '',
@@ -316,6 +350,15 @@ class PromptOption {
         icon: j['icon'] as String? ?? '',
         model: j['model'] as String? ?? '',
         type: j['type'] as String? ?? 'over',
+        reasoningEffort: j['reasoningEffort'] as String? ?? '',
+        mcp: ((j['mcp'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        skills: ((j['skills'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
       );
 }
 

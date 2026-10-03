@@ -191,24 +191,31 @@ class ConversationOptionsBar extends StatelessWidget {
       context,
       title: '选择快捷助手',
       items: [
-        const _SheetItem<String?>(value: null, label: '默认（使用电脑端当前配置）'),
+        const _SheetItem<String?>(
+          value: null,
+          label: '默认（使用电脑端当前配置）',
+          subtitle: '不套用任何助手预设',
+        ),
         ...caps.prompts.map((p) => _SheetItem<String?>(
               value: p.key,
               label: p.label,
-              subtitle: p.key,
+              // 让用户一眼看到这个助手会带来哪些设置
+              subtitle: p.hasPreset
+                  ? '预设：${p.presetSummary}\n$p.key'
+                  : '无预设 · $p.key',
             )),
       ],
       current: state.options.promptKey,
       onPicked: (v) {
-        // 切换助手 = 让电脑端换一个 promptKey 开新会话
-        state.setOptions(state.options.copyWith(promptKey: v));
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(v == null
-                ? '已切回电脑端默认助手（下一条消息起新生效）'
-                : '已切换到「$v」（下一条消息会开新会话）'),
-          ),
-        );
+        state.applyPrompt(v);
+        if (!context.mounted) return;
+        final applied = state.activePrompt;
+        final msg = v == null
+            ? '已切回电脑端默认助手（下一条消息起新生效）'
+            : applied != null && applied.hasPreset
+                ? '已切换到「${applied.label}」，并套用其预设：${applied.presetSummary}'
+                : '已切换到「$v」（下一条消息会开新会话）';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
       },
     );
   }

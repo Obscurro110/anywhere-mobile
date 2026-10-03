@@ -28,7 +28,7 @@ index 63d2509..8f7f749 100644
 +.env
 +*.local
 diff --git a/electron-builder.yml b/electron-builder.yml
-index 24faf63..3dd3c4b 100644
+index 24faf63..cb6235b 100644
 --- a/electron-builder.yml
 +++ b/electron-builder.yml
 @@ -1,5 +1,5 @@
@@ -39,7 +39,18 @@ index 24faf63..3dd3c4b 100644
  directories:
    buildResources: build
  files:
-@@ -18,7 +18,7 @@ asarUnpack:
+@@ -9,6 +9,10 @@ files:
+   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+   - '!dist/**'
++  # [anywhere-mobile] 打包输出目录必须排除，否则再次打包时会把上一次的
++  # win-unpacked（含 600MB app.asar）当源码收进来，asar 撑爆 4.2GB 上限。
++  - '!dist-out/**'
++  - '!dist-out*/**'
+   - '!release/**'
+   - '!build/icon.iconset/**'
+   - '!build/.iconset-tmp/**'
+@@ -18,7 +22,7 @@ asarUnpack:
    - resources/**
  
  win:
@@ -75,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..6078b9d
+index 0000000..c077508
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,606 @@
+@@ -0,0 +1,667 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -129,10 +140,43 @@ index 0000000..6078b9d
 + *          / ANYWHERE_RELAY_DEVICE_NAME
 + */
 +import { app, ipcMain } from 'electron'
-+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs'
++import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync } from 'node:fs'
 +import { join } from 'node:path'
 +import { RelayClient } from './relay-client.js'
 +import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
++
++// ---------------------------------------------------------------------------
++// 日志落盘
++// ---------------------------------------------------------------------------
++// 打包成 exe 后双击运行没有控制台，排障时看不到 console 输出。
++// 这里把手机互通相关的日志同时写进 userData/relay.log，随时可以看。
++let logFilePath = null
++
++function relayFileLog(tag, ...args) {
++  try {
++    if (!logFilePath) logFilePath = join(app.getPath('userData'), 'relay.log')
++    const line = `${new Date().toISOString()} [${tag}] ${args
++      .map((a) => {
++        if (a instanceof Error) return `${a.message}\n${a.stack || ''}`
++        if (typeof a === 'string') return a
++        try { return JSON.stringify(a) } catch { return String(a) }
++      })
++      .join(' ')}\n`
++    appendFileSync(logFilePath, line, 'utf8')
++  } catch {
++    // 写日志失败不能影响主流程
++  }
++}
++
++/** 主进程自己的日志 */
++const rlog = (...args) => {
++  console.log(...args)
++  relayFileLog('main', ...args)
++}
++const rwarn = (...args) => {
++  console.warn(...args)
++  relayFileLog('main:WARN', ...args)
++}
 +
 +let relay = null
 +let ctx = null // { getWindowByRef, listWindows, dispatchWindowEvent, openWindow, dataApi }
@@ -161,7 +205,7 @@ index 0000000..6078b9d
 +      }
 +    }
 +  } catch (err) {
-+    console.warn('[relay] failed to read relay.json:', err?.message || err)
++    rwarn('[relay] failed to read relay.json:', err?.message || err)
 +  }
 +  // 2) env
 +  if (process.env.ANYWHERE_RELAY_URL && process.env.ANYWHERE_RELAY_TOKEN) {
@@ -183,7 +227,7 @@ index 0000000..6078b9d
 +      { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
 +    )
 +  } catch (err) {
-+    console.warn('[relay] dispatchWindowEvent failed:', err?.message || err)
++    rwarn('[relay] dispatchWindowEvent failed:', err?.message || err)
 +  }
 +}
 +
@@ -281,20 +325,28 @@ index 0000000..6078b9d
 +          }
 +        }
 +      } catch (err) {
-+        console.warn('[relay] list skills failed:', err?.message || err)
++        rwarn('[relay] list skills failed:', err?.message || err)
 +      }
 +    }
 +
 +    // ---- 助手：config.prompts ----
++    // 每个助手自带一套预设（模型 / 思考预算 / MCP / Skill），
++    // 手机端选中助手时要一并同步过去，否则只是换了 promptKey，
++    // 助手配好的 MCP、Skill 不会生效。
 +    const prompts = config.prompts && typeof config.prompts === 'object' ? config.prompts : {}
 +    for (const [key, p] of Object.entries(prompts)) {
 +      if (key === '__DEFAULT__') continue
++      if (!p || typeof p !== 'object') continue
 +      result.prompts.push({
 +        key,
-+        label: (p && (p.name || p.title)) || key,
-+        icon: (p && p.icon) || '',
-+        model: (p && p.model) || '',
-+        type: (p && p.type) || 'over'
++        label: (p.name || p.title) || key,
++        icon: p.icon || '',
++        model: p.model || '',
++        type: p.type || 'over',
++        // ---- 助手预设（会话建立时电脑端本来就会应用这些）----
++        reasoningEffort: p.reasoning_effort || p.reasoningEffort || '',
++        mcp: Array.isArray(p.defaultMcpServers) ? [...p.defaultMcpServers] : [],
++        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : []
 +      })
 +    }
 +
@@ -327,7 +379,7 @@ index 0000000..6078b9d
 +    }
 +    result.reasoningEffortOptions = ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']
 +  } catch (err) {
-+    console.warn('[relay] readCapabilities failed:', err?.message || err)
++    rwarn('[relay] readCapabilities failed:', err?.message || err)
 +  }
 +  return result
 +}
@@ -411,7 +463,7 @@ index 0000000..6078b9d
 +        to
 +      })
 +    } catch (err) {
-+      console.warn('[relay] capabilities reply failed:', err?.message || err)
++      rwarn('[relay] capabilities reply failed:', err?.message || err)
 +    }
 +    return
 +  }
@@ -425,7 +477,7 @@ index 0000000..6078b9d
 +        to
 +      })
 +    } catch (err) {
-+      console.warn('[relay] tasks reply failed:', err?.message || err)
++      rwarn('[relay] tasks reply failed:', err?.message || err)
 +    }
 +    return
 +  }
@@ -466,7 +518,7 @@ index 0000000..6078b9d
 +        const w = ctx.getWindowByRef(phoneWindowId)
 +        w?.destroy?.()
 +      } catch (err) {
-+        console.warn('[relay] destroy old phone window failed:', err?.message || err)
++        rwarn('[relay] destroy old phone window failed:', err?.message || err)
 +      }
 +    }
 +    phoneWindowId = null
@@ -491,14 +543,14 @@ index 0000000..6078b9d
 +      )
 +      return
 +    } catch (err) {
-+      console.warn('[relay] dispatch to phone window failed:', err?.message || err)
++      rwarn('[relay] dispatch to phone window failed:', err?.message || err)
 +    }
 +  }
 +
 +  // 2) 否则开一个专用的「手机」会话窗口
 +  //    isDirectSend_normal 默认为 true → multiline-text 会直接追加并跑 AI
 +  if (typeof ctx?.openWindow !== 'function') {
-+    console.warn('[relay] openWindow unavailable; cannot route phone chat to AI')
++    rwarn('[relay] openWindow unavailable; cannot route phone chat to AI')
 +    return
 +  }
 +  try {
@@ -511,12 +563,12 @@ index 0000000..6078b9d
 +    })
 +    if (res?.ok && res.id) {
 +      phoneWindowId = res.id
-+      console.log('[relay] opened phone chat window:', phoneWindowId)
++      rlog('[relay] opened phone chat window:', phoneWindowId)
 +    } else {
-+      console.warn('[relay] openWindow returned:', res)
++      rwarn('[relay] openWindow returned:', res)
 +    }
 +  } catch (err) {
-+    console.warn('[relay] open phone window failed:', err?.message || err)
++    rwarn('[relay] open phone window failed:', err?.message || err)
 +  }
 +}
 +
@@ -581,10 +633,27 @@ index 0000000..6078b9d
 +  })))
 +
 +  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
-+    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
++    rlog('[relay] <- relay:sendChat  to =', to, ' len =', String(text || '').length)
++    if (!relay?.connected) {
++      rwarn('[relay] relay:sendChat rejected: not connected')
++      return { ok: false, error: { message: 'relay_not_connected' } }
++    }
 +    const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
++    rlog('[relay] -> sendChat delivered =', delivered)
 +    return { ok: true, delivered }
 +  }))
++
++  // 渲染进程（窗口）的日志转发到主进程终端 + relay.log，方便排查手机互通问题
++  ipcMain.on('relay:log', (_e, { level = 'log', args = [] } = {}) => {
++    const list = Array.isArray(args) ? args : [args]
++    if (level === 'warn' || level === 'error') {
++      console.warn('[relay:window]', ...list)
++      relayFileLog('window:WARN', ...list)
++    } else {
++      console.log('[relay:window]', ...list)
++      relayFileLog('window', ...list)
++    }
++  })
 +
 +  ipcMain.handle('relay:sendNotification', guard(async (_e, { title, body, to } = {}) => {
 +    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
@@ -613,6 +682,9 @@ index 0000000..6078b9d
 +export function startRelay(context, overrideConfig = null, { force = false } = {}) {
 +  ctx = context || ctx
 +
++  // 每次启动打一条分隔，方便在 relay.log 里区分会话
++  relayFileLog('main', `==================== relay start v${RELAY_VERSION} (build ${RELAY_VERSION_CODE}) ====================`)
++
 +  // ALWAYS register IPC handlers first, even when there is no config yet.
 +  // Otherwise the settings UI can never save a config (chicken-and-egg).
 +  registerIpc()
@@ -620,7 +692,7 @@ index 0000000..6078b9d
 +  const cfg = overrideConfig || readConfig()
 +
 +  if (!cfg?.serverUrl || !cfg?.token) {
-+    console.log('[relay] no config found; relay disabled. Set userData/relay.json or env vars.')
++    rlog('[relay] no config found; relay disabled. Set userData/relay.json or env vars.')
 +    return null
 +  }
 +
@@ -639,11 +711,11 @@ index 0000000..6078b9d
 +  })
 +
 +  relay.on('connected', () => {
-+    console.log('[relay] connected as', relay.deviceId)
++    rlog('[relay] connected as', relay.deviceId)
 +    emitToWindows('relay:status', { connected: true, deviceId: relay.deviceId })
 +  })
 +  relay.on('disconnected', () => {
-+    console.log('[relay] disconnected')
++    rlog('[relay] disconnected')
 +    emitToWindows('relay:status', { connected: false })
 +  })
 +  relay.on('presence', (peers) => {
@@ -654,7 +726,7 @@ index 0000000..6078b9d
 +  // 聊天：路由进 AI 管线（开窗口 / 定向派发）
 +  relay.on('chat', (msg) => {
 +    routePhoneChat(msg).catch((err) => {
-+      console.warn('[relay] routePhoneChat failed:', err?.message || err)
++      rwarn('[relay] routePhoneChat failed:', err?.message || err)
 +    })
 +  })
 +  // 通知 / 文件：只广播给界面展示
@@ -969,6 +1041,32 @@ index 0000000..41e518c
 + */
 +export const RELAY_VERSION = '1.2.0';
 +export const RELAY_VERSION_CODE = 2;
+diff --git a/main/windowManager.js b/main/windowManager.js
+index 2096f34..eaed491 100644
+--- a/main/windowManager.js
++++ b/main/windowManager.js
+@@ -790,7 +790,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig =
+         ? payload.tempPromptConfig
+         : null,
+     senderId,
+-    isAlwaysOnTop: payload?.isAlwaysOnTop ?? promptConfig?.isAlwaysOnTop ?? true
++    isAlwaysOnTop: payload?.isAlwaysOnTop ?? promptConfig?.isAlwaysOnTop ?? true,
++    // [anywhere-mobile] 手机互通用：这个函数是白名单复制，不在列表里的字段
++    // 不会传给窗口。手机发来的 relayTo / __relayOptions 属于自定义载荷，
++    // 必须显式透传，否则窗口不知道回复要回传给谁（症状：电脑端跑了 AI 但
++    // 回复发不回手机）。
++    ...(typeof payload?.relayTo === 'string' && payload.relayTo ? { relayTo: payload.relayTo } : {}),
++    ...(payload?.__relayOptions && typeof payload.__relayOptions === 'object'
++      ? { __relayOptions: payload.__relayOptions }
++      : {}),
++    // 透传任意以 __relay 开头的自定义字段，方便以后扩展而不用再改这里
++    ...Object.fromEntries(
++      Object.entries(payload && typeof payload === 'object' ? payload : {})
++        .filter(([k]) => k.startsWith('__relay'))
++    )
+   }
+ }
+ 
 diff --git a/package.json b/package.json
 index f3a088c..3378791 100644
 --- a/package.json
@@ -1112,10 +1210,10 @@ index 3d476ea..f9f75db 100644
  getDroppedFilePath: (file) => {
      try {
 diff --git a/preload/window_preload.js b/preload/window_preload.js
-index 71669d3..b0084fd 100644
+index 71669d3..46c305c 100644
 --- a/preload/window_preload.js
 +++ b/preload/window_preload.js
-@@ -234,6 +234,13 @@ const api = {
+@@ -234,6 +234,15 @@ const api = {
    hideMainWindow: () => electronAPI.ipcRenderer.invoke('window:hideMain'),
    listWindows: (type = '') => electronAPI.ipcRenderer.invoke('window:list', type),
    emitWindowEvent: (input) => electronAPI.ipcRenderer.invoke('window:event:emit', input),
@@ -1125,6 +1223,8 @@ index 71669d3..b0084fd 100644
 +  sendRelayNotification: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendNotification', payload),
 +  getRelayStatus: () => electronAPI.ipcRenderer.invoke('relay:status'),
 +  getRelayCapabilities: () => electronAPI.ipcRenderer.invoke('relay:capabilities'),
++  // 把窗口内的 [relay] 日志转发到主进程终端（打包后 DevTools 不方便看）
++  relayLog: (level, ...args) => electronAPI.ipcRenderer.send('relay:log', { level, args }),
 +
    onWindowEvent: (callback) => {
      if (typeof callback !== 'function') return
@@ -1339,10 +1439,10 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..202ce8f 100644
+index 6bb1113..ce1040b 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -10356,6 +10356,96 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10356,124 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -1353,6 +1453,17 @@ index 6bb1113..202ce8f 100644
 +// ============================================================================
 +const relayReplyTarget = ref(null);
 +let relayLastSentAssistantId = null;
++
++/**
++ * 窗口内的日志同时打一份到主进程终端。
++ * 打包成 exe 后窗口 DevTools 不方便开，这样双击运行时就能看到 [relay:window] 日志。
++ */
++const relayLog = (...args) => {
++  try { window.api?.relayLog?.('log', ...args); } catch (_) {}
++};
++const relayWarn = (...args) => {
++  try { window.api?.relayLog?.('warn', ...args); } catch (_) {}
++};
 +
 +/** 从消息对象里抽取纯文本 */
 +const relayMessageText = (m) => {
@@ -1372,22 +1483,26 @@ index 6bb1113..202ce8f 100644
 +  if (!relayTo) return;
 +  relayReplyTarget.value = String(relayTo);
 +  relayLastSentAssistantId = null;
++  relayLog('[relay] armed reply target =', relayReplyTarget.value);
 +};
 +
 +// 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
 +window.api?.onWindowInit?.((data) => {
++  relayLog('[relay] window init, relayTo =', data?.relayTo);
 +  armRelayReply(data?.relayTo);
 +});
 +
 +// 窗口事件里带 relayTo（窗口已存在、后续消息）
 +window.api?.onWindowEvent?.((env) => {
 +  const p = env?.payload;
++  relayLog('[relay] window event:', env?.event, 'relayTo =', p?.relayTo || p?.__relayTo);
 +  if (p && typeof p === 'object') {
 +    armRelayReply(p.relayTo || p.__relayTo);
 +  }
 +  // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
 +  const opts = p?.__relayOptions;
 +  if (opts && typeof opts === 'object') {
++    relayLog('[relay] applying options:', JSON.stringify(opts));
 +    try {
 +      if (typeof opts.model === 'string' && opts.model && opts.model !== model.value) {
 +        handleChangeModel(opts.model);
@@ -1403,12 +1518,14 @@ index 6bb1113..202ce8f 100644
 +        applyNormalizedSkillSelection(opts.skills);
 +      }
 +    } catch (err) {
-+      console.warn('[relay] apply options failed:', err);
++      relayWarn('[relay] apply options failed:', err);
 +    }
 +  }
 +});
 +
 +// 助手回复完成 → 回传手机
++// 注意：assistant 气泡先以 isPreparing:true 入列，流式填充 content，
++// 完成后由 finalize* 删除 isPreparing 字段（不是设成 false）。
 +watch(
 +  () =>
 +    chat_show.value
@@ -1422,17 +1539,28 @@ index 6bb1113..202ce8f 100644
 +    const to = relayReplyTarget.value;
 +    if (!to) return;
 +    const last = chat_show.value[chat_show.value.length - 1];
-+    if (!last || last.role !== 'assistant') return;
-+    if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') return;
++    if (!last || last.role !== 'assistant') {
++      relayLog('[relay] tail is not assistant:', last?.role);
++      return;
++    }
++    if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') {
++      relayLog('[relay] assistant still preparing, status =', last.status, 'isPreparing =', last.isPreparing);
++      return;
++    }
 +    if (last.id === relayLastSentAssistantId) return;
 +    const text = relayMessageText(last).trim();
-+    if (!text) return;
++    if (!text) {
++      relayWarn('[relay] assistant text empty; content =', JSON.stringify(last.content)?.slice(0, 300));
++      return;
++    }
 +    relayLastSentAssistantId = last.id;
++    relayLog('[relay] replying to phone. to =', to, 'len =', text.length);
 +    try {
 +      await window.api.sendRelayChat({ text, to });
++      relayLog('[relay] reply sent ok');
 +      relayReplyTarget.value = null;
 +    } catch (err) {
-+      console.warn('[relay] reply send failed:', err);
++      relayWarn('[relay] reply send failed:', err);
 +    }
 +  }
 +);
