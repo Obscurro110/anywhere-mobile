@@ -67,9 +67,47 @@ jobs:
           # 生成缺失的 android/ 平台脚手架；不覆盖已有 lib/ 与配置
           flutter create . --org com.anywhere --project-name anywhere_mobile
 
-      - name: Patch Android gradle (compileSdk + core library desugaring)
+      # 固定 release 签名：否则每次 CI 会用新生成的 debug key，
+      # 导致新 APK 无法覆盖安装（"与已安装的应用签名不同"）。
+      - name: Setup release signing
+        id: signing
+        working-directory: app
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::warning::未配置 ANDROID_KEYSTORE_BASE64，将使用 debug 签名（无法覆盖安装）"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KS_B64" | base64 -d > android/app/anywhere-release.p12
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=anywhere-release.p12
+          storeType=PKCS12
+          EOF
+          ls -l android/app/anywhere-release.p12
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "已配置固定 release 签名"
+
+      - name: Patch Android gradle (compileSdk + desugaring + signing)
         working-directory: app
         run: python3 tools/patch_android.py
+
+      - name: Verify signing config
+        working-directory: app
+        run: |
+          echo "--- key.properties ---"
+          sed 's/=.*/=***/' android/key.properties
+          echo "--- signingConfig 指向 ---"
+          grep -n "signingConfig" android/app/build.gradle* || true
+          if [ "${{ steps.signing.outputs.enabled }}" = "true" ]; then
+            if grep -q "signingConfigs.debug" android/app/build.gradle*; then
+              echo "::error::release 仍然指向 debug 签名，更新会失败"; exit 1
+            fi
+          fi
 
       - name: Sync version into pubspec
         working-directory: app
@@ -144,22 +182,47 @@ jobs:
           if-no-files-found: error
 
       # ---- 发布到 Releases：main 分支 -> 滚动更新（apk-latest）----
+      # apk-latest 只作为「App 检查更新」的稳定地址，不占用 Latest 标记
       - name: Publish rolling Release (main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-latest
-          name: "Anywhere Mobile v${{ steps.ver.outputs.name }} (latest APK)"
+          name: "Anywhere Mobile — latest APK"
+          body: |
+            🤖 滚动更新 Release（App 内「检查更新」读取这里的 version.json）
+
+            当前版本：**v${{ steps.ver.outputs.name }}** (build ${{ steps.ver.outputs.code }})
+
+            ${{ steps.ver.outputs.notes }}
+
+            ---
+            提交: `${{ github.sha }}`
+          files: |
+            app/out/anywhere-mobile.apk
+            app/out/version.json
+          make_latest: false
+          draft: false
+          prerelease: true
+
+      # ---- 发布到 Releases：每个版本一条正式 Release（vX.Y.Z）----
+      - name: Publish versioned Release (main)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.name }}
+          name: Anywhere Mobile v${{ steps.ver.outputs.name }}
           body: |
             ## Anywhere Mobile v${{ steps.ver.outputs.name }} (build ${{ steps.ver.outputs.code }})
 
             ${{ steps.ver.outputs.notes }}
 
             ---
-            下载 `anywhere-mobile.apk` 安装即可（App 内「设置 → 检查更新」也会提示）。
+            ### 安装
+            下载 `anywhere-mobile.apk` 安装即可。
+            已装旧版的用户可在 App 内「设置 → 关于 → 检查更新」直接升级。
 
             提交: `${{ github.sha }}`
-            时间: ${{ github.event.head_commit.timestamp }}
           files: |
             app/out/anywhere-mobile.apk
             app/out/anywhere-mobile-${{ steps.ver.outputs.name }}.apk

@@ -63,6 +63,9 @@ def patch_groovy(path):
     # 0) force compileSdk
     src = set_compile_sdk(src, kts=False)
 
+    # 0.5) 固定 release 签名（读 android/key.properties）
+    src = patch_signing_groovy(src)
+
     # 1) enable core library desugaring inside compileOptions { ... }
     if "coreLibraryDesugaringEnabled" not in src:
         def add_flag(m):
@@ -96,6 +99,9 @@ def patch_kts(path):
     # 0) force compileSdk
     src = set_compile_sdk(src, kts=True)
 
+    # 0.5) 固定 release 签名
+    src = patch_signing_kts(src)
+
     # 1) enable desugaring
     if "isCoreLibraryDesugaringEnabled" not in src:
         def add_flag(m):
@@ -125,6 +131,139 @@ MANIFEST = os.path.join(APP_DIR, "src", "main", "AndroidManifest.xml")
 
 # App 内「检查更新 → 下载 → 安装」需要此权限才能在 Android 8+ 唤起安装器
 INSTALL_PERMISSION = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
+
+# ---------------------------------------------------------------------------
+# 固定 release 签名
+# ---------------------------------------------------------------------------
+# 没有固定签名时，Flutter 会用 debug 签名，而 CI 每次都是全新机器 ->
+# 每次自动生成的 debug keystore 都不一样 -> 每次 APK 签名都不同 ->
+# 覆盖安装时报「与已安装的应用签名不同」。
+#
+# 这里改成读取 android/key.properties（CI 从 Secrets 落盘），
+# 让每次构建都用同一把钥匙，用户就能正常增量更新。
+SIGN_MARKER = "// anywhere-mobile: release signing"
+KEY_PROPS = "key.properties"
+
+
+def _signing_snippet_groovy():
+    return f"""
+{SIGN_MARKER}
+def anywhereKeystoreProperties = new Properties()
+def anywhereKeystorePropertiesFile = rootProject.file("{KEY_PROPS}")
+if (anywhereKeystorePropertiesFile.exists()) {{
+    anywhereKeystoreProperties.load(new FileInputStream(anywhereKeystorePropertiesFile))
+}}
+"""
+
+
+def _signing_config_groovy():
+    return f"""    signingConfigs {{
+        release {{
+            if (anywhereKeystorePropertiesFile.exists()) {{
+                keyAlias anywhereKeystoreProperties['keyAlias']
+                keyPassword anywhereKeystoreProperties['keyPassword']
+                storeFile file(anywhereKeystoreProperties['storeFile'])
+                storePassword anywhereKeystoreProperties['storePassword']
+                storeType anywhereKeystoreProperties['storeType'] ?: 'PKCS12'
+            }}
+        }}
+    }}
+"""
+
+
+def _signing_snippet_kts():
+    return f"""
+{SIGN_MARKER}
+import java.util.Properties
+import java.io.FileInputStream
+val anywhereKeystoreProperties = Properties()
+val anywhereKeystorePropertiesFile = rootProject.file("{KEY_PROPS}")
+if (anywhereKeystorePropertiesFile.exists()) {{
+    anywhereKeystoreProperties.load(FileInputStream(anywhereKeystorePropertiesFile))
+}}
+"""
+
+
+def _signing_config_kts():
+    return """    signingConfigs {
+        create("release") {
+            if (anywhereKeystorePropertiesFile.exists()) {
+                keyAlias = anywhereKeystoreProperties["keyAlias"] as String
+                keyPassword = anywhereKeystoreProperties["keyPassword"] as String
+                storeFile = file(anywhereKeystoreProperties["storeFile"] as String)
+                storePassword = anywhereKeystoreProperties["storePassword"] as String
+                storeType = (anywhereKeystoreProperties["storeType"] as String?) ?: "PKCS12"
+            }
+        }
+    }
+"""
+
+
+def patch_signing_groovy(src):
+    """注入 properties 加载 + signingConfigs + 把 release 指向它。"""
+    if SIGN_MARKER in src:
+        log("signing already patched (groovy); skipping")
+        return src
+
+    # 1) 在 plugins {} 之后插入 properties 加载
+    m = re.search(r"^plugins\s*\{.*?^\}\s*$", src, flags=re.S | re.M)
+    if m:
+        src = src[:m.end()] + _signing_snippet_groovy() + src[m.end():]
+    else:
+        src = _signing_snippet_groovy() + "\n" + src
+
+    # 2) 在 android { 里（buildTypes 之前）插入 signingConfigs
+    m2 = re.search(r"^(\s*)buildTypes\s*\{", src, flags=re.M)
+    if m2:
+        src = src[:m2.start()] + _signing_config_groovy() + src[m2.start():]
+    else:
+        log("WARN: buildTypes not found; signingConfigs not injected")
+
+    # 3) release 指向 signingConfigs.release
+    src2, n = re.subn(r"signingConfig\s+signingConfigs\.debug",
+                      "signingConfig signingConfigs.release", src)
+    if n == 0:
+        # 模板里可能没有 buildTypes.release 块 —— 补一个
+        m3 = re.search(r"^(\s*)buildTypes\s*\{(.*?)^\1\}", src2, flags=re.S | re.M)
+        if m3:
+            body = m3.group(2)
+            if "release" not in body:
+                indent = m3.group(1) + "    "
+                src2 = (src2[:m3.end(2)]
+                        + f"{indent}release {{\n{indent}    signingConfig signingConfigs.release\n{indent}}}\n"
+                        + src2[m3.end(2):])
+                n = 1
+    log(f"signingConfig -> release ({n} 处)")
+    return src2
+
+
+def patch_signing_kts(src):
+    if SIGN_MARKER in src:
+        log("signing already patched (kts); skipping")
+        return src
+
+    m = re.search(r"^plugins\s*\{.*?^\}\s*$", src, flags=re.S | re.M)
+    if m:
+        src = src[:m.end()] + _signing_snippet_kts() + src[m.end():]
+    else:
+        src = _signing_snippet_kts() + "\n" + src
+
+    m2 = re.search(r"^(\s*)buildTypes\s*\{", src, flags=re.M)
+    if m2:
+        src = src[:m2.start()] + _signing_config_kts() + src[m2.start():]
+    else:
+        log("WARN: buildTypes not found; signingConfigs not injected")
+
+    src2, n = re.subn(r"signingConfig\s*=\s*signingConfigs\.getByName\(\"debug\"\)",
+                      "signingConfig = signingConfigs.getByName(\"release\")", src)
+    if n == 0:
+        src2, n = re.subn(r"signingConfig\s*=\s*signingConfigs\.debug",
+                          "signingConfig = signingConfigs.getByName(\"release\")", src)
+    if n == 0:
+        src2, n = re.subn(r"signingConfig\s*=\s*signingConfigs\[\"debug\"\]",
+                          "signingConfig = signingConfigs.getByName(\"release\")", src)
+    log(f"signingConfig -> release (kts, {n} 处)")
+    return src2
 
 
 def patch_manifest():
