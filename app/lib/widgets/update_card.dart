@@ -88,6 +88,29 @@ class _UpdateCardState extends State<UpdateCard> {
                 const SizedBox(height: 6),
                 Text(info.notes),
               ],
+              const Divider(height: 24),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2A2418),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline, size: 16, color: Colors.amberAccent),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '安装时若提示「与已安装的应用签名不同」：\n'
+                        '请先卸载本应用，再安装新版本（仅需一次）。\n'
+                        '从 v1.3.1 起签名已固定，之后可直接覆盖更新。',
+                        style: TextStyle(fontSize: 12, color: Colors.amberAccent),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
