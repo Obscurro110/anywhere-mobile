@@ -96,7 +96,9 @@ jobs:
         shell: pwsh
         run: |
           Set-Location upstream
-          pnpm install --frozen-lockfile
+          # 补丁改了 package.json（加了 ws），但没改 pnpm-lock.yaml，
+          # 所以不能用 --frozen-lockfile，否则会报锁文件不一致。
+          pnpm install --no-frozen-lockfile
         env:
           ELECTRON_GET_USE_PROXY: 0
 
