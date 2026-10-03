@@ -12,6 +12,8 @@ export '../core/protocol.dart'
         ModelOption,
         McpOption,
         SkillOption,
+        PromptOption,
+        TaskOption,
         Envelope,
         MsgType,
         kProtocolVersion;

@@ -3,9 +3,9 @@ import 'package:provider/provider.dart';
 
 import '../core/app_config.dart';
 import '../services/app_state.dart';
-import '../services/update_service.dart';
 import '../widgets/update_card.dart';
 import 'devices_screen.dart';
+import 'tasks_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -84,6 +84,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const Divider(height: 1),
               ListTile(
+                leading: const Icon(Icons.schedule, color: Colors.amberAccent),
+                title: const Text('定时任务'),
+                subtitle: Text(state.tasks.isEmpty
+                    ? '点此同步电脑端的定时任务'
+                    : '${state.tasks.length} 个任务 · 可「立即运行」'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const TasksPage()),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
                 leading: Icon(
                   caps.isEmpty ? Icons.cloud_off : Icons.cloud_done,
                   color: caps.isEmpty ? Colors.white38 : Colors.greenAccent,
@@ -91,7 +103,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 title: const Text('电脑端能力'),
                 subtitle: Text(caps.isEmpty
                     ? '未获取到（点右侧刷新）'
-                    : '模型 ${caps.models.length} · MCP ${caps.mcp.length} · Skill ${caps.skills.length}'),
+                    : '助手 ${caps.prompts.length} · 模型 ${caps.models.length} · MCP ${caps.mcp.length} · Skill ${caps.skills.length}'),
                 trailing: IconButton(
                   icon: const Icon(Icons.refresh),
                   onPressed: state.requestCapabilities,

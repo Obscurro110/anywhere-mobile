@@ -27,11 +27,23 @@ class ChatRole {
   static const assistant = 'assistant';
   static const system = 'system';
 
-  /// Desktop -> phone: capability list (models / MCP / skills) as JSON text.
+  /// Desktop -> phone: capability list (models / MCP / skills / prompts) as JSON.
   static const capabilities = 'capabilities';
 
   /// Phone -> desktop: please send me your capability list.
   static const capabilitiesRequest = 'capabilities-request';
+
+  /// Desktop -> phone: scheduled task list.
+  static const tasks = 'tasks';
+
+  /// Phone -> desktop: please send me your scheduled task list.
+  static const tasksRequest = 'tasks-request';
+
+  /// Phone -> desktop: run this scheduled task now.
+  static const taskRun = 'task-run';
+
+  /// Desktop -> phone: result of a task-run request.
+  static const taskRunResult = 'task-run-result';
 }
 
 /// A single unit of data flowing over the relay.
@@ -105,12 +117,17 @@ class ChatOptions {
   /// Ask the desktop to compress the conversation before this turn.
   final bool? compress;
 
+  /// Which desktop 「快捷助手」(prompt config key) should host this conversation,
+  /// e.g. `AI`. Changing it makes the desktop start a fresh conversation.
+  final String? promptKey;
+
   const ChatOptions({
     this.model,
     this.reasoningEffort,
     this.mcp,
     this.skills,
     this.compress,
+    this.promptKey,
   });
 
   bool get isEmpty =>
@@ -118,7 +135,8 @@ class ChatOptions {
       reasoningEffort == null &&
       (mcp == null || mcp!.isEmpty) &&
       (skills == null || skills!.isEmpty) &&
-      compress == null;
+      compress == null &&
+      promptKey == null;
 
   Map<String, dynamic> toJson() => {
         if (model != null) 'model': model,
@@ -126,6 +144,7 @@ class ChatOptions {
         if (mcp != null) 'mcp': mcp,
         if (skills != null) 'skills': skills,
         if (compress != null) 'compress': compress,
+        if (promptKey != null) 'promptKey': promptKey,
       };
 
   factory ChatOptions.fromJson(Map<String, dynamic> j) => ChatOptions(
@@ -134,6 +153,7 @@ class ChatOptions {
         mcp: (j['mcp'] as List?)?.map((e) => e.toString()).toList(),
         skills: (j['skills'] as List?)?.map((e) => e.toString()).toList(),
         compress: j['compress'] as bool?,
+        promptKey: j['promptKey'] as String?,
       );
 
   ChatOptions copyWith({
@@ -142,6 +162,7 @@ class ChatOptions {
     List<String>? mcp,
     List<String>? skills,
     bool? compress,
+    String? promptKey,
   }) =>
       ChatOptions(
         model: model ?? this.model,
@@ -149,6 +170,7 @@ class ChatOptions {
         mcp: mcp ?? this.mcp,
         skills: skills ?? this.skills,
         compress: compress ?? this.compress,
+        promptKey: promptKey ?? this.promptKey,
       );
 }
 
@@ -272,11 +294,77 @@ class SkillOption {
       );
 }
 
+/// 电脑端「快捷助手」（prompt 配置）。
+class PromptOption {
+  final String key;
+  final String label;
+  final String icon;
+  final String model;
+  final String type;
+
+  PromptOption({
+    required this.key,
+    required this.label,
+    this.icon = '',
+    this.model = '',
+    this.type = 'over',
+  });
+
+  factory PromptOption.fromJson(Map<String, dynamic> j) => PromptOption(
+        key: j['key'] as String? ?? '',
+        label: j['label'] as String? ?? j['key'] as String? ?? '',
+        icon: j['icon'] as String? ?? '',
+        model: j['model'] as String? ?? '',
+        type: j['type'] as String? ?? 'over',
+      );
+}
+
+/// 电脑端定时任务。
+class TaskOption {
+  final String id;
+  final String label;
+  final String description;
+  final bool enabled;
+  final String schedule;
+  final String promptKey;
+  final String modelRoute;
+  final String lastRunTime;
+
+  TaskOption({
+    required this.id,
+    required this.label,
+    this.description = '',
+    this.enabled = false,
+    this.schedule = '',
+    this.promptKey = '',
+    this.modelRoute = '',
+    this.lastRunTime = '',
+  });
+
+  factory TaskOption.fromJson(Map<String, dynamic> j) => TaskOption(
+        id: j['id'] as String? ?? '',
+        label: j['label'] as String? ?? j['id'] as String? ?? '',
+        description: j['description'] as String? ?? '',
+        enabled: j['enabled'] as bool? ?? false,
+        schedule: j['schedule'] as String? ?? '',
+        promptKey: j['promptKey'] as String? ?? '',
+        modelRoute: j['modelRoute'] as String? ?? '',
+        lastRunTime: j['lastRunTime'] as String? ?? '',
+      );
+}
+
 /// Everything the phone needs to render the same pickers as the desktop.
 class Capabilities {
   final List<ModelOption> models;
   final List<McpOption> mcp;
   final List<SkillOption> skills;
+
+  /// 电脑端「快捷助手」列表
+  final List<PromptOption> prompts;
+
+  /// 电脑端定时任务列表
+  final List<TaskOption> tasks;
+
   final List<String> reasoningEffortOptions;
   final ChatOptions current;
   final int fetchedAt;
@@ -290,6 +378,8 @@ class Capabilities {
     this.models = const [],
     this.mcp = const [],
     this.skills = const [],
+    this.prompts = const [],
+    this.tasks = const [],
     this.reasoningEffortOptions = const [
       'default',
       'none',
@@ -308,6 +398,9 @@ class Capabilities {
 
   bool get isEmpty => models.isEmpty && mcp.isEmpty && skills.isEmpty;
 
+  /// 本次是否带来了任务列表（任务单独请求，用于判断"刷新过了"）
+  bool get hasTasks => tasks.isNotEmpty;
+
   factory Capabilities.fromJson(Map<String, dynamic> j) => Capabilities(
         models: ((j['models'] as List?) ?? [])
             .map((e) => ModelOption.fromJson((e as Map).cast<String, dynamic>()))
@@ -321,6 +414,14 @@ class Capabilities {
             .map((e) => SkillOption.fromJson((e as Map).cast<String, dynamic>()))
             .where((s) => s.id.isNotEmpty)
             .toList(),
+        prompts: ((j['prompts'] as List?) ?? [])
+            .map((e) => PromptOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((p) => p.key.isNotEmpty)
+            .toList(),
+        tasks: ((j['tasks'] as List?) ?? [])
+            .map((e) => TaskOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((t) => t.id.isNotEmpty)
+            .toList(),
         reasoningEffortOptions:
             ((j['reasoningEffortOptions'] as List?) ?? const ['default'])
                 .map((e) => e.toString())
@@ -331,5 +432,19 @@ class Capabilities {
         desktopVersion: j['desktopVersion'] as String? ?? '',
         desktopVersionCode: (j['desktopVersionCode'] as num?)?.toInt() ?? 0,
         upstreamVersion: j['upstreamVersion'] as String? ?? '',
+      );
+
+  Capabilities withTasks(List<TaskOption> next) => Capabilities(
+        models: models,
+        mcp: mcp,
+        skills: skills,
+        prompts: prompts,
+        tasks: next,
+        reasoningEffortOptions: reasoningEffortOptions,
+        current: current,
+        desktopVersion: desktopVersion,
+        desktopVersionCode: desktopVersionCode,
+        upstreamVersion: upstreamVersion,
+        fetchedAt: fetchedAt,
       );
 }

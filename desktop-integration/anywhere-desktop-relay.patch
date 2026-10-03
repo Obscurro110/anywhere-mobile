@@ -75,10 +75,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..c05cf38
+index 0000000..6078b9d
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,606 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -188,13 +188,45 @@ index 0000000..c05cf38
 +}
 +
 +// ---------------------------------------------------------------------------
-+// 能力清单（模型 / MCP / Skill），供手机端渲染选择器
++// 能力清单（模型 / MCP / Skill / 助手 / 定时任务），供手机端渲染
 +// ---------------------------------------------------------------------------
++
++/** 把任务的时间配置拼成一句人话 */
++function describeTaskSchedule(task = {}) {
++  const t = (v) => (typeof v === 'string' && v ? v : '')
++  switch (task.triggerType) {
++    case 'daily':
++      return `每天 ${t(task.dailyTime) || '--:--'}`
++    case 'weekly': {
++      const names = ['日', '一', '二', '三', '四', '五', '六']
++      const days = Array.isArray(task.weeklyDays)
++        ? task.weeklyDays.map((d) => names[Number(d)] ?? d).join('、')
++        : ''
++      return `每周${days || '?'} ${t(task.weeklyTime) || '--:--'}`
++    }
++    case 'monthly': {
++      const days = Array.isArray(task.monthlyDays) ? task.monthlyDays.join('、') : ''
++      return `每月 ${days || '?'} 日 ${t(task.monthlyTime) || '--:--'}`
++    }
++    case 'interval': {
++      const mins = Number(task.intervalMinutes) || 0
++      const ranges = Array.isArray(task.intervalTimeRanges) ? task.intervalTimeRanges.join(' / ') : ''
++      return `每 ${mins || '?'} 分钟${ranges ? `（${ranges}）` : ''}`
++    }
++    case 'single':
++      return `单次 ${t(task.singleDate) || '?'} ${t(task.singleTime) || '--:--'}`
++    default:
++      return t(task.triggerType) || '未设置'
++  }
++}
++
 +async function readCapabilities() {
 +  const result = {
 +    models: [],
 +    mcp: [],
 +    skills: [],
++    prompts: [],
++    tasks: [],
 +    promptKey: phonePromptKey,
 +    reasoningEffortOptions: [],
 +    desktopVersion: RELAY_VERSION,
@@ -253,6 +285,38 @@ index 0000000..c05cf38
 +      }
 +    }
 +
++    // ---- 助手：config.prompts ----
++    const prompts = config.prompts && typeof config.prompts === 'object' ? config.prompts : {}
++    for (const [key, p] of Object.entries(prompts)) {
++      if (key === '__DEFAULT__') continue
++      result.prompts.push({
++        key,
++        label: (p && (p.name || p.title)) || key,
++        icon: (p && p.icon) || '',
++        model: (p && p.model) || '',
++        type: (p && p.type) || 'over'
++      })
++    }
++
++    // ---- 定时任务：config.tasks ----
++    const tasks = config.tasks && typeof config.tasks === 'object' ? config.tasks : {}
++    for (const [id, task] of Object.entries(tasks)) {
++      if (!task || typeof task !== 'object') continue
++      const applied = Array.isArray(task.appliedDevices) ? task.appliedDevices : []
++      result.tasks.push({
++        id,
++        label: (task.name || task.title || task.description || id).toString().slice(0, 60),
++        description: (task.description || '').toString(),
++        enabled: applied.length > 0,
++        triggerType: task.triggerType || '',
++        schedule: describeTaskSchedule(task),
++        promptKey: task.promptKey || '__DEFAULT__',
++        modelRoute: task.modelRoute || 'general',
++        lastRunTime: task.lastRunTime || ''
++      })
++    }
++    result.tasks.sort((a, b) => String(a.id).localeCompare(String(b.id)))
++
 +    // ---- 当前生效的默认值（让手机端能显示"当前"）----
 +    const promptCfg = config.prompts?.[phonePromptKey] || config.prompts?.['AI'] || {}
 +    result.current = {
@@ -281,19 +345,106 @@ index 0000000..c05cf38
 +  }
 +}
 +
++/**
++ * 在电脑端立即运行一个定时任务（手机「立即运行」）。
++ * 复刻 main/core/task_runner.js 的开窗口逻辑，但**跳过**"本机是否启用"检查
++ * —— 用户既然在手机上主动点了，就直接跑。
++ */
++async function runTaskOnDesktop(taskId) {
++  if (typeof ctx?.openWindow !== 'function') {
++    return { ok: false, reason: 'openWindow_unavailable' }
++  }
++  if (!ctx?.dataApi?.getConfig) {
++    return { ok: false, reason: 'dataApi_unavailable' }
++  }
++  const res = await ctx.dataApi.getConfig()
++  const fullConfig = res?.config && typeof res.config === 'object' ? res.config : {}
++  const tasks = fullConfig?.tasks && typeof fullConfig.tasks === 'object' ? fullConfig.tasks : {}
++  const task = tasks[taskId]
++  if (!task || typeof task !== 'object') {
++    return { ok: false, reason: 'task_not_found' }
++  }
++
++  const promptKey = typeof task.promptKey === 'string' && task.promptKey ? task.promptKey : '__DEFAULT__'
++  const modelRoute = ['superior', 'general', 'fast'].includes(task?.modelRoute) ? task.modelRoute : 'general'
++
++  const tempPromptConfig =
++    promptKey === '__DEFAULT__'
++      ? {
++          type: 'general',
++          prompt: '',
++          showMode: 'window',
++          model:
++            typeof ctx.dataApi.resolveDefaultAssistantModel === 'function'
++              ? ctx.dataApi.resolveDefaultAssistantModel(fullConfig, modelRoute)
++              : '',
++          stream: true,
++          isAlwaysOnTop: fullConfig.isAlwaysOnTop_global ?? true,
++          autoCloseOnBlur: fullConfig.autoCloseOnBlur_global ?? true,
++          window_width: 580,
++          window_height: 740,
++          icon: ''
++        }
++      : null
++
++  const openResult = await ctx.openWindow('window', {
++    code: promptKey,
++    type: 'task',
++    payload: typeof task.description === 'string' ? task.description : '',
++    taskConfig: { id: taskId, ...task },
++    tempPromptConfig
++  })
++
++  return { ok: Boolean(openResult?.ok), windowId: openResult?.id || null, promptKey }
++}
++
 +async function routePhoneChat(msg) {
 +  const role = String(msg?.role ?? 'user').toLowerCase()
++  const to = msg?.from || '*'
 +
-+  // 手机请求能力清单（模型 / MCP / Skill）
++  // 手机请求能力清单（模型 / MCP / Skill / 助手 / 任务）
 +  if (role === 'capabilities-request') {
 +    try {
 +      const caps = await readCapabilities()
 +      relay?.sendChat(JSON.stringify({ __relayCapabilities: caps }), {
 +        role: 'capabilities',
-+        to: msg?.from || '*'
++        to
 +      })
 +    } catch (err) {
 +      console.warn('[relay] capabilities reply failed:', err?.message || err)
++    }
++    return
++  }
++
++  // 手机请求定时任务列表
++  if (role === 'tasks-request') {
++    try {
++      const caps = await readCapabilities()
++      relay?.sendChat(JSON.stringify({ __relayTasks: caps.tasks || [], desktopVersion: caps.desktopVersion }), {
++        role: 'tasks',
++        to
++      })
++    } catch (err) {
++      console.warn('[relay] tasks reply failed:', err?.message || err)
++    }
++    return
++  }
++
++  // 手机请求「立即运行」某个定时任务
++  if (role === 'task-run') {
++    try {
++      const taskId = String(msg?.taskId ?? '').trim()
++      if (!taskId) throw new Error('taskId required')
++      const res = await runTaskOnDesktop(taskId)
++      relay?.sendChat(JSON.stringify({ __relayTaskRun: { taskId, ...res } }), {
++        role: 'task-run-result',
++        to
++      })
++    } catch (err) {
++      relay?.sendChat(JSON.stringify({ __relayTaskRun: { taskId: msg?.taskId, ok: false, reason: String(err?.message || err) } }), {
++        role: 'task-run-result',
++        to
++      })
 +    }
 +    return
 +  }
@@ -303,8 +454,23 @@ index 0000000..c05cf38
 +
 +  const text = String(msg?.text ?? '').trim()
 +  if (!text) return
-+  const relayTo = msg?.from || '*'
++  const relayTo = to
 +  const opts = msg?.options && typeof msg.options === 'object' ? msg.options : null
++
++  // 手机切换了「快捷助手」→ 换一个 promptKey 承载这个会话
++  if (opts?.promptKey && opts.promptKey !== phonePromptKey) {
++    phonePromptKey = opts.promptKey
++    // 关掉旧的手机窗口，让新助手用新的配置开一个新会话
++    if (isWindowAlive(phoneWindowId)) {
++      try {
++        const w = ctx.getWindowByRef(phoneWindowId)
++        w?.destroy?.()
++      } catch (err) {
++        console.warn('[relay] destroy old phone window failed:', err?.message || err)
++      }
++    }
++    phoneWindowId = null
++  }
 +
 +  const relayFields = {
 +    relayTo,

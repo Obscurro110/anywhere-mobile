@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../models/models.dart';
 import '../services/app_state.dart';
+import '../widgets/conversation_options_bar.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -95,17 +96,10 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final peers = state.peers;
     _scrollToBottom();
 
     return Column(
       children: [
-        _TargetBar(
-          peers: peers,
-          value: state.targetDeviceId,
-          onChanged: state.setTargetDevice,
-        ),
-        _CapabilityBar(state: state),
         Expanded(
           child: state.messages.isEmpty
               ? const _EmptyChat()
@@ -119,6 +113,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
         ),
+        // 会话参数：紧贴输入框上方（参考电脑端 ChatInput 的布局）
+        const ConversationOptionsBar(),
         _Composer(
           controller: _controller,
           onSend: _send,
@@ -127,435 +123,6 @@ class _ChatScreenState extends State<ChatScreen> {
           awaiting: state.awaitingReply,
         ),
       ],
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 目标设备选择
-// ---------------------------------------------------------------------------
-class _TargetBar extends StatelessWidget {
-  final List<PeerDevice> peers;
-  final String? value;
-  final ValueChanged<String?> onChanged;
-
-  const _TargetBar({required this.peers, required this.value, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      color: const Color(0xFF161923),
-      child: Row(
-        children: [
-          const Icon(Icons.send_to_mobile, size: 16, color: Colors.white54),
-          const SizedBox(width: 8),
-          const Text('发送到：', style: TextStyle(fontSize: 12, color: Colors.white54)),
-          const SizedBox(width: 4),
-          Expanded(
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String?>(
-                value: peers.any((d) => d.deviceId == value) ? value : null,
-                isDense: true,
-                isExpanded: true,
-                dropdownColor: const Color(0xFF1F2330),
-                items: [
-                  const DropdownMenuItem(value: null, child: Text('所有设备（广播）')),
-                  ...peers.map((d) => DropdownMenuItem(
-                        value: d.deviceId,
-                        child: Text('${d.deviceName} (${d.platform})',
-                            overflow: TextOverflow.ellipsis),
-                      )),
-                ],
-                onChanged: onChanged,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 能力工具条：模型 / 思考预算 / MCP / Skill / 压缩
-// ---------------------------------------------------------------------------
-class _CapabilityBar extends StatelessWidget {
-  final AppState state;
-  const _CapabilityBar({required this.state});
-
-  static const _effortLabels = {
-    'default': '默认',
-    'none': '关闭',
-    'low': '低',
-    'medium': '中',
-    'high': '高',
-    'xhigh': '很高',
-    'max': '最大',
-  };
-
-  String get _modelLabel {
-    final v = state.options.model;
-    if (v == null || v.isEmpty) return '默认模型';
-    final hit = state.capabilities.models.where((m) => m.value == v);
-    if (hit.isNotEmpty) return hit.first.label;
-    final parts = v.split('|');
-    return parts.length > 1 ? parts[1] : v;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final caps = state.capabilities;
-    final opts = state.options;
-
-    return Container(
-      color: const Color(0xFF141821),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            _chip(
-              context,
-              icon: Icons.memory,
-              label: _modelLabel,
-              active: (opts.model ?? '').isNotEmpty,
-              onTap: () => _pickModel(context),
-            ),
-            _chip(
-              context,
-              icon: Icons.psychology_outlined,
-              label:
-                  '思考: ${_effortLabels[opts.reasoningEffort ?? 'default'] ?? opts.reasoningEffort}',
-              active: opts.reasoningEffort != null && opts.reasoningEffort != 'default',
-              onTap: () => _pickEffort(context),
-            ),
-            _chip(
-              context,
-              icon: Icons.build_outlined,
-              label: 'MCP${(opts.mcp?.isNotEmpty ?? false) ? ' ${opts.mcp!.length}' : ''}',
-              active: opts.mcp?.isNotEmpty ?? false,
-              onTap: () => _pickMcp(context),
-            ),
-            _chip(
-              context,
-              icon: Icons.auto_awesome_outlined,
-              label: 'Skill${(opts.skills?.isNotEmpty ?? false) ? ' ${opts.skills!.length}' : ''}',
-              active: opts.skills?.isNotEmpty ?? false,
-              onTap: () => _pickSkills(context),
-            ),
-            _chip(
-              context,
-              icon: Icons.compress,
-              label: opts.compress == true ? '压缩: 开' : '压缩',
-              active: opts.compress == true,
-              onTap: () {
-                state.setOptions(
-                  ChatOptions(
-                    model: opts.model,
-                    reasoningEffort: opts.reasoningEffort,
-                    mcp: opts.mcp,
-                    skills: opts.skills,
-                    compress: !(opts.compress ?? false),
-                  ),
-                );
-              },
-            ),
-            IconButton(
-              tooltip: '刷新能力列表',
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.refresh, size: 18),
-              onPressed: state.requestCapabilities,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _chip(
-    BuildContext context, {
-    required IconData icon,
-    required String label,
-    required bool active,
-    required VoidCallback onTap,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      child: Material(
-        color: active ? const Color(0xFF2C3550) : const Color(0xFF1B1F2B),
-        borderRadius: BorderRadius.circular(20),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(20),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 14, color: active ? Colors.lightBlueAccent : Colors.white54),
-                const SizedBox(width: 5),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 110),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: active ? Colors.white : Colors.white70,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ---- pickers ----
-  void _pickModel(BuildContext context) {
-    final caps = state.capabilities;
-    if (caps.models.isEmpty) {
-      _needCapabilities(context);
-      return;
-    }
-    _showSheet<String?>(
-      context,
-      title: '选择模型',
-      items: [
-        const _SheetItem<String?>(value: null, label: '默认（跟随电脑端）'),
-        ...caps.models.map((m) => _SheetItem<String?>(
-              value: m.value,
-              label: m.label,
-              subtitle: m.provider,
-            )),
-      ],
-      current: state.options.model,
-      onPicked: (v) {
-        final o = state.options;
-        state.setOptions(ChatOptions(
-          model: v,
-          reasoningEffort: o.reasoningEffort,
-          mcp: o.mcp,
-          skills: o.skills,
-          compress: o.compress,
-        ));
-      },
-    );
-  }
-
-  void _pickEffort(BuildContext context) {
-    final list = state.capabilities.reasoningEffortOptions.isEmpty
-        ? const ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']
-        : state.capabilities.reasoningEffortOptions;
-    _showSheet<String?>(
-      context,
-      title: '思考预算',
-      items: [
-        const _SheetItem<String?>(value: null, label: '默认（跟随电脑端）'),
-        ...list.map((e) => _SheetItem<String?>(
-              value: e,
-              label: _effortLabels[e] ?? e,
-            )),
-      ],
-      current: state.options.reasoningEffort,
-      onPicked: (v) {
-        final o = state.options;
-        state.setOptions(ChatOptions(
-          model: o.model,
-          reasoningEffort: v,
-          mcp: o.mcp,
-          skills: o.skills,
-          compress: o.compress,
-        ));
-      },
-    );
-  }
-
-  void _pickMcp(BuildContext context) {
-    final caps = state.capabilities;
-    if (caps.mcp.isEmpty) {
-      _needCapabilities(context);
-      return;
-    }
-    final selected = {...?state.options.mcp};
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1B1F2B),
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => _MultiSheet(
-          title: 'MCP 工具',
-          children: caps.mcp
-              .map((m) => CheckboxListTile(
-                    dense: true,
-                    value: selected.contains(m.id),
-                    title: Text(m.label),
-                    subtitle: m.enabled ? null : const Text('（电脑端已停用）'),
-                    onChanged: (v) => setLocal(() {
-                      if (v == true) {
-                        selected.add(m.id);
-                      } else {
-                        selected.remove(m.id);
-                      }
-                    }),
-                  ))
-              .toList(),
-          onConfirm: () {
-            final o = state.options;
-            state.setOptions(ChatOptions(
-              model: o.model,
-              reasoningEffort: o.reasoningEffort,
-              mcp: selected.toList(),
-              skills: o.skills,
-              compress: o.compress,
-            ));
-            Navigator.pop(ctx);
-          },
-        ),
-      ),
-    );
-  }
-
-  void _pickSkills(BuildContext context) {
-    final caps = state.capabilities;
-    if (caps.skills.isEmpty) {
-      _needCapabilities(context);
-      return;
-    }
-    final selected = {...?state.options.skills};
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1B1F2B),
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => _MultiSheet(
-          title: 'Skill',
-          children: caps.skills
-              .map((s) => CheckboxListTile(
-                    dense: true,
-                    value: selected.contains(s.id),
-                    title: Text(s.label),
-                    onChanged: (v) => setLocal(() {
-                      if (v == true) {
-                        selected.add(s.id);
-                      } else {
-                        selected.remove(s.id);
-                      }
-                    }),
-                  ))
-              .toList(),
-          onConfirm: () {
-            final o = state.options;
-            state.setOptions(ChatOptions(
-              model: o.model,
-              reasoningEffort: o.reasoningEffort,
-              mcp: o.mcp,
-              skills: selected.toList(),
-              compress: o.compress,
-            ));
-            Navigator.pop(ctx);
-          },
-        ),
-      ),
-    );
-  }
-
-  void _needCapabilities(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('电脑端还没上报能力列表，请确认电脑端「手机互通」已连接后点刷新'),
-      ),
-    );
-    state.requestCapabilities();
-  }
-
-  static void _showSheet<T>(
-    BuildContext context, {
-    required String title,
-    required List<_SheetItem<T>> items,
-    required T current,
-    required ValueChanged<T> onPicked,
-  }) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1B1F2B),
-      isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(14),
-              child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-            ),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: items
-                    .map((it) => ListTile(
-                          dense: true,
-                          title: Text(it.label),
-                          subtitle: it.subtitle == null ? null : Text(it.subtitle!),
-                          trailing: it.value == current
-                              ? const Icon(Icons.check, color: Colors.lightBlueAccent)
-                              : null,
-                          onTap: () {
-                            onPicked(it.value);
-                            Navigator.pop(ctx);
-                          },
-                        ))
-                    .toList(),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SheetItem<T> {
-  final T value;
-  final String label;
-  final String? subtitle;
-  const _SheetItem({required this.value, required this.label, this.subtitle});
-}
-
-class _MultiSheet extends StatelessWidget {
-  final String title;
-  final List<Widget> children;
-  final VoidCallback onConfirm;
-
-  const _MultiSheet({
-    required this.title,
-    required this.children,
-    required this.onConfirm,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(14),
-            child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          Flexible(child: ListView(shrinkWrap: true, children: children)),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton(onPressed: onConfirm, child: const Text('确定')),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -632,7 +199,6 @@ class _Bubble extends StatelessWidget {
               )
             else if (msg.text.isNotEmpty)
               SelectableText(msg.text, style: const TextStyle(fontSize: 15)),
-            // 附件
             for (final f in atts)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -701,7 +267,7 @@ class _Composer extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
         color: const Color(0xFF12151E),
         child: Row(
           children: [

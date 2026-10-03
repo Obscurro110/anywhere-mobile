@@ -33,8 +33,17 @@ class AppState extends ChangeNotifier {
   final List<FileMeta> receivedFiles = [];
   final List<Map<String, dynamic>> inbox = []; // notifications
 
-  /// Models / MCP / skills reported by the desktop.
+  /// Models / MCP / skills / prompts reported by the desktop.
   Capabilities capabilities = Capabilities();
+
+  /// 电脑端定时任务（单独请求，避免每次能力刷新都拉）
+  List<TaskOption> tasks = const [];
+
+  /// 最近一次「立即运行」的结果
+  Map<String, dynamic>? lastTaskRun;
+
+  /// 是否正在拉取任务列表
+  bool loadingTasks = false;
 
   /// Currently selected run options (sent with every message).
   ChatOptions options = const ChatOptions();
@@ -96,6 +105,48 @@ class AppState extends ChangeNotifier {
 
   void setOptions(ChatOptions next) {
     options = next;
+    notifyListeners();
+  }
+
+  /// 拉取电脑端定时任务列表。
+  Future<void> requestTasks() async {
+    if (!_client.isConnected) return;
+    loadingTasks = true;
+    notifyListeners();
+    _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: ChatPayload(role: ChatRole.tasksRequest, text: '').toJson(),
+    ));
+    // 给电脑端一点时间回传；超时后关掉 loading，避免一直转圈
+    await Future.delayed(const Duration(seconds: 6));
+    if (loadingTasks) {
+      loadingTasks = false;
+      notifyListeners();
+    }
+  }
+
+  /// 让电脑端「立即运行」某个定时任务。
+  bool runTask(String taskId, {String? toDeviceId}) {
+    if (!_client.isConnected) return false;
+    lastTaskRun = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: toDeviceId ?? targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.taskRun,
+        'text': '',
+        'taskId': taskId,
+      },
+    ));
+  }
+
+  /// 清掉「立即运行」的结果提示。
+  void clearTaskRun() {
+    lastTaskRun = null;
     notifyListeners();
   }
 
@@ -163,6 +214,47 @@ class AppState extends ChangeNotifier {
 
     if (p.role == ChatRole.system) {
       // internal message, don't show
+      return;
+    }
+
+    // 电脑端回传定时任务列表
+    if (p.role == ChatRole.tasks) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final raw = (decoded['__relayTasks'] as List?) ?? const [];
+        tasks = raw
+            .map((e) => TaskOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((t) => t.id.isNotEmpty)
+            .toList();
+        loadingTasks = false;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] tasks decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端回传「立即运行」结果
+    if (p.role == ChatRole.taskRunResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayTaskRun'] as Map?)?.cast<String, dynamic>() ?? {};
+        final ok = r['ok'] == true;
+        lastTaskRun = {
+          'ok': ok,
+          'taskId': r['taskId']?.toString() ?? '',
+          'reason': r['reason']?.toString() ?? '',
+          'at': DateTime.now().millisecondsSinceEpoch,
+        };
+        notifications.show(
+          ok ? '任务已触发' : '任务未能运行',
+          ok ? '电脑端已开始执行该定时任务' : (r['reason']?.toString() ?? '未知原因'),
+          id: DateTime.now().millisecondsSinceEpoch.remainder(100000),
+        );
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] task-run-result decode failed: $e');
+      }
       return;
     }
 
