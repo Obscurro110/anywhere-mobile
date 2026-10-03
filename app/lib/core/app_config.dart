@@ -32,8 +32,11 @@ class AppConfig {
   /// HTTP base derived from the ws url, for file upload/download.
   String get httpBase {
     var u = serverUrl;
-    if (u.startsWith('wss://')) u = u.replaceFirst('wss://', 'https://');
-    else if (u.startsWith('ws://')) u = u.replaceFirst('ws://', 'http://');
+    if (u.startsWith('wss://')) {
+      u = u.replaceFirst('wss://', 'https://');
+    } else if (u.startsWith('ws://')) {
+      u = u.replaceFirst('ws://', 'http://');
+    }
     final i = u.indexOf('/ws');
     return i >= 0 ? u.substring(0, i) : u;
   }

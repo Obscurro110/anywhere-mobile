@@ -4,7 +4,9 @@
 // `MyApp`（counter demo），本项目不存在该类，已用此文件替换。
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:anywhere_mobile/core/protocol.dart';
+// 用 models.dart：它 re-export protocol 里的类型，同时还定义了 ChatMessage。
+// 直接 import protocol.dart 会找不到 ChatMessage。
+import 'package:anywhere_mobile/models/models.dart';
 import 'package:anywhere_mobile/services/update_service.dart';
 
 void main() {

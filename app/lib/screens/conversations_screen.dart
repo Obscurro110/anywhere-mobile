@@ -280,14 +280,14 @@ class _ConversationsPageState extends State<ConversationsPage> {
                 title: Text('重命名'),
               ),
             ),
-            PopupMenuItem(
+            const PopupMenuItem(
               value: 'delete',
               child: ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.delete_outline,
+                leading: Icon(Icons.delete_outline,
                     size: 18, color: Colors.redAccent),
-                title: const Text('删除会话',
+                title: Text('删除会话',
                     style: TextStyle(color: Colors.redAccent)),
               ),
             ),

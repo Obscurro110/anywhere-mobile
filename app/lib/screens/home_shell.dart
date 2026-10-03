@@ -111,11 +111,11 @@ class HomeShell extends StatelessWidget {
           const SizedBox(width: 4),
         ],
       ),
-      body: Column(
+      body: const Column(
         children: [
           // 电脑端正在生成时发的消息会进「缓冲区」，这里明确告诉用户没丢
-          const _BufferBanner(),
-          const Expanded(child: ChatScreen()),
+          _BufferBanner(),
+          Expanded(child: ChatScreen()),
         ],
       ),
     );
