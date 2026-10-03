@@ -1,0 +1,839 @@
+﻿diff --git a/electron-builder.yml b/electron-builder.yml
+index 24faf63..3dd3c4b 100644
+--- a/electron-builder.yml
++++ b/electron-builder.yml
+@@ -1,5 +1,5 @@
+-appId: com.komorebi.anywhere.desktop
+-productName: AI Anywhere Desktop
++appId: com.komorebi.anywhere.desktop.relay
++productName: AI Anywhere Desktop (Relay)
+ directories:
+   buildResources: build
+ files:
+@@ -18,7 +18,7 @@ asarUnpack:
+   - resources/**
+ 
+ win:
+-  executableName: anywhere-desktop
++  executableName: anywhere-desktop-relay
+   icon: build/icon.ico
+   electronLanguages:
+     - zh-CN
+diff --git a/main/index.js b/main/index.js
+index f63f831..c004fc7 100644
+--- a/main/index.js
++++ b/main/index.js
+@@ -59,6 +59,8 @@ import * as compactApi from './core/compact.js'
+ 
+ import { applyNetworkProxyConfig, installRequestHeaderBridge } from './core/net.js'
+ import { startTaskScheduler } from './core/task_scheduler.js'
++// [anywhere-mobile] 手机互通中继桥
++import { startRelay } from './relay/index.js'
+ 
+ let appTray = null
+ let appQuitStarted = false
+@@ -730,6 +732,10 @@ app.whenReady().then(async () => {
+   await syncDesktopRuntimeFromConfig()
+   ensureTray()
+   await openWindow('main')
++
++  // [anywhere-mobile] 启动与手机 App 的中继连接
++  startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })
++
+   setTimeout(() => {
+     preheatScreenshotWindow()
+   }, 800)
+diff --git a/main/relay/index.js b/main/relay/index.js
+new file mode 100644
+index 0000000..e717de5
+--- /dev/null
++++ b/main/relay/index.js
+@@ -0,0 +1,207 @@
++/**
++ * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
++ * =========================================================
++ * Drop this file into the desktop project as:  main/relay/index.js
++ * and copy relay-client.js next to it as:      main/relay/relay-client.js
++ *
++ * Then wire it in `main/index.js` (see desktop-integration/README.md):
++ *
++ *   import { startRelay } from './relay/index.js'
++ *   ...
++ *   app.whenReady().then(async () => {
++ *     ...
++ *     await openWindow('main')
++ *     startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })
++ *   })
++ *
++ * What it does
++ * ------------
++ *  - Connects the desktop to the public relay server (same server as the phone).
++ *  - Incoming phone messages/files are forwarded to the renderer as
++ *    `window:event-bus` events with `event === 'relay:incoming'`, so the UI can
++ *    display them and (optionally) feed them into the existing AI pipeline.
++ *  - Exposes IPC handlers the renderer can call to reply / send files / push
++ *    notifications back to the phone:
++ *        relay:status            -> { ok, connected, deviceId, peers }
++ *        relay:sendChat          -> { ok, delivered }
++ *        relay:sendNotification  -> { ok, delivered }
++ *        relay:sendFile          -> { ok, file }
++ *        relay:getConfig         -> { ok, config }
++ *        relay:setConfig         -> { ok }   (persists to userData/relay.json)
++ *  - Exports notifyFromDesktop() so task/scheduler code can push notifications.
++ *
++ * Config resolution order (first hit wins):
++ *   1. userData/relay.json   { "serverUrl", "token", "userId", "deviceName" }
++ *   2. env: ANYWHERE_RELAY_URL / ANYWHERE_RELAY_TOKEN / ANYWHERE_RELAY_USER_ID
++ *          / ANYWHERE_RELAY_DEVICE_NAME
++ */
++import { app, ipcMain } from 'electron'
++import { readFileSync, writeFileSync, existsSync } from 'node:fs'
++import { join } from 'node:path'
++import { RelayClient } from './relay-client.js'
++
++let relay = null
++let ctx = null // { getWindowByRef, listWindows, dispatchWindowEvent }
++
++const CONFIG_PATH = () => join(app.getPath('userData'), 'relay.json')
++
++function readConfig() {
++  // 1) userData/relay.json
++  try {
++    const p = CONFIG_PATH()
++    if (existsSync(p)) {
++      const cfg = JSON.parse(readFileSync(p, 'utf8'))
++      if (cfg?.serverUrl && cfg?.token) return cfg
++    }
++  } catch (err) {
++    console.warn('[relay] failed to read relay.json:', err?.message || err)
++  }
++  // 2) env
++  if (process.env.ANYWHERE_RELAY_URL && process.env.ANYWHERE_RELAY_TOKEN) {
++    return {
++      serverUrl: process.env.ANYWHERE_RELAY_URL,
++      token: process.env.ANYWHERE_RELAY_TOKEN,
++      userId: process.env.ANYWHERE_RELAY_USER_ID || 'default-user',
++      deviceName: process.env.ANYWHERE_RELAY_DEVICE_NAME || 'Anywhere Desktop'
++    }
++  }
++  return null
++}
++
++function emitToWindows(event, payload) {
++  if (!ctx?.dispatchWindowEvent) return
++  try {
++    ctx.dispatchWindowEvent(
++      { event, payload, target: 'broadcast' },
++      { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
++    )
++  } catch (err) {
++    console.warn('[relay] dispatchWindowEvent failed:', err?.message || err)
++  }
++}
++
++let ipcRegistered = false
++
++function registerIpc() {
++  if (ipcRegistered) return
++  ipcRegistered = true
++
++  const guard = (fn) => async (...args) => {
++    try {
++      return await fn(...args)
++    } catch (err) {
++      return { ok: false, error: { message: String(err?.message || err) } }
++    }
++  }
++
++  ipcMain.handle('relay:status', guard(async () => ({
++    ok: true,
++    connected: !!relay?.connected,
++    deviceId: relay?.deviceId || null,
++    peers: relay?.peers || []
++  })))
++
++  ipcMain.handle('relay:getConfig', guard(async () => {
++    // Return the full config (this is the user's own desktop app; the token
++    // already lives in plaintext under userData/relay.json).
++    return { ok: true, config: readConfig() || null }
++  }))
++
++  ipcMain.handle('relay:setConfig', guard(async (_e, input = {}) => {
++    const cfg = { ...readConfig(), ...input }
++    if (!cfg.serverUrl || !cfg.token) {
++      return { ok: false, error: { message: 'serverUrl and token are required' } }
++    }
++    writeFileSync(CONFIG_PATH(), JSON.stringify(cfg, null, 2), 'utf8')
++    // reconnect with new config
++    startRelay(ctx, cfg, { force: true })
++    return { ok: true, config: cfg }
++  }))
++
++  ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
++    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
++    const delivered = relay.sendChat(text, { role: 'assistant', to: to || '*' })
++    return { ok: true, delivered }
++  }))
++
++  ipcMain.handle('relay:sendNotification', guard(async (_e, { title, body, to } = {}) => {
++    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
++    const delivered = relay.sendNotification(title, body, { to: to || '*' })
++    return { ok: true, delivered }
++  }))
++
++  ipcMain.handle('relay:sendFile', guard(async (_e, { path: filePath, to } = {}) => {
++    if (!relay?.connected) return { ok: false, error: { message: 'relay_not_connected' } }
++    const file = await relay.sendFile(filePath, { to: to || '*' })
++    return { ok: true, file }
++  }))
++}
++
++/**
++ * Start (or restart) the relay connection.
++ * @param {object} context { getWindowByRef, listWindows, dispatchWindowEvent }
++ * @param {object} [overrideConfig] optional explicit config (used by setConfig)
++ */
++export function startRelay(context, overrideConfig = null, { force = false } = {}) {
++  ctx = context || ctx
++  const cfg = overrideConfig || readConfig()
++
++  if (!cfg?.serverUrl || !cfg?.token) {
++    console.log('[relay] no config found; relay disabled. Set userData/relay.json or env vars.')
++    return null
++  }
++
++  if (relay && !force) return relay
++  if (relay && force) {
++    try { relay.disconnect() } catch {}
++    relay = null
++  }
++
++  relay = new RelayClient({
++    serverUrl: cfg.serverUrl,
++    token: cfg.token,
++    userId: cfg.userId || 'default-user',
++    deviceName: cfg.deviceName || 'Anywhere Desktop'
++  })
++
++  relay.on('connected', () => {
++    console.log('[relay] connected as', relay.deviceId)
++    emitToWindows('relay:status', { connected: true, deviceId: relay.deviceId })
++  })
++  relay.on('disconnected', () => {
++    console.log('[relay] disconnected')
++    emitToWindows('relay:status', { connected: false })
++  })
++  relay.on('presence', (peers) => {
++    emitToWindows('relay:presence', { peers })
++  })
++
++  // phone -> desktop
++  relay.on('chat', (msg) => emitToWindows('relay:incoming', { kind: 'chat', ...msg }))
++  relay.on('notification', (n) => emitToWindows('relay:incoming', { kind: 'notification', ...n }))
++  relay.on('file', (file) => emitToWindows('relay:incoming', { kind: 'file', file }))
++
++  relay.connect()
++  registerIpc()
++  return relay
++}
++
++/** Access the live client (e.g. from task_scheduler). */
++export function getRelay() {
++  return relay
++}
++
++/**
++ * Push a notification to the phone(s). Call this when a scheduled task
++ * finishes, e.g. in main/core/task_scheduler.js after a run completes.
++ */
++export function notifyFromDesktop(title, body, { to = '*' } = {}) {
++  if (!relay?.connected) return false
++  return relay.sendNotification(title, body, { to })
++}
++
++/** Send an assistant message from the desktop to the phone(s). */
++export function replyToPhone(text, { to = '*' } = {}) {
++  if (!relay?.connected) return false
++  return relay.sendChat(text, { role: 'assistant', to })
++}
+diff --git a/main/relay/relay-client.js b/main/relay/relay-client.js
+new file mode 100644
+index 0000000..3593470
+--- /dev/null
++++ b/main/relay/relay-client.js
+@@ -0,0 +1,263 @@
++import { EventEmitter } from 'node:events';
++import WebSocket from 'ws';
++import http from 'node:http';
++import { readFile } from 'node:fs/promises';
++import { randomUUID } from 'node:crypto';
++
++/**
++ * RelayClient (desktop side)
++ * ------------------------------------------------------------------
++ * Drop-in bridge that connects the Anywhere Desktop (Electron main process)
++ * to the public relay, enabling:
++ *   - two-way chat with the Android app
++ *   - file transfer (upload/download)
++ *   - notification push (e.g. scheduled task results)
++ *
++ * Usage (inside Anywhere Desktop main process):
++ *
++ *   import { RelayClient } from './relay-bridge/relay-client.js';
++ *   const relay = new RelayClient({
++ *     serverUrl: 'ws://your-server:8787/ws',
++ *     token: process.env.RELAY_TOKEN,
++ *     userId: 'default-user',
++ *     deviceName: 'My PC',
++ *   });
++ *   relay.on('chat', (msg) => { ... });        // incoming chat from phone
++ *   relay.on('file', (meta) => { ... });        // incoming file offer
++ *   relay.on('notification:ack', (m) => {...}); // phone acked a push
++ *   relay.connect();
++ *
++ *   // send a chat message from desktop -> phone
++ *   relay.sendChat('hello phone', { role: 'assistant' });
++ *
++ *   // push a notification (e.g. task finished)
++ *   relay.sendNotification('任务完成', '今日日报已生成');
++ *
++ *   // send a file
++ *   await relay.sendFile('D:/reports/daily.md');
++ */
++export class RelayClient extends EventEmitter {
++  constructor({ serverUrl, token, userId = 'default-user', deviceName = 'Desktop', deviceId }) {
++    super();
++    this.serverUrl = serverUrl;
++    this.token = token;
++    this.userId = userId;
++    this.deviceName = deviceName;
++    this.deviceId = deviceId || `desktop-${randomUUID().slice(0, 8)}`;
++    this.ws = null;
++    this._closedByUser = false;
++    this._retry = 0;
++    this._peers = new Map();
++    this._pending = new Map(); // id -> { resolve, reject }
++  }
++
++  // ---- lifecycle ----
++  connect() {
++    this._closedByUser = false;
++    const url =
++      `${this.serverUrl}?token=${encodeURIComponent(this.token)}` +
++      `&deviceId=${encodeURIComponent(this.deviceId)}` +
++      `&deviceName=${encodeURIComponent(this.deviceName)}` +
++      `&platform=desktop`;
++
++    this.ws = new WebSocket(url);
++
++    this.ws.on('open', () => {
++      this._retry = 0;
++      this.emit('connected', { deviceId: this.deviceId });
++    });
++
++    this.ws.on('message', (data) => this._onMessage(data));
++
++    this.ws.on('close', () => {
++      this.emit('disconnected');
++      if (!this._closedByUser) this._scheduleReconnect();
++    });
++
++    this.ws.on('error', (err) => this.emit('error', err));
++    return this;
++  }
++
++  _scheduleReconnect() {
++    const delay = Math.min(30000, 2000 + this._retry * 2000);
++    this._retry++;
++    setTimeout(() => !this._closedByUser && this.connect(), delay);
++  }
++
++  disconnect() {
++    this._closedByUser = true;
++    try {
++      this.ws?.close();
++    } catch {}
++  }
++
++  get connected() {
++    return this.ws?.readyState === WebSocket.OPEN;
++  }
++
++  get peers() {
++    return [...this._peers.values()];
++  }
++
++  // ---- messaging ----
++  _onMessage(data) {
++    let msg;
++    try {
++      msg = JSON.parse(data.toString());
++    } catch {
++      return;
++    }
++
++    switch (msg.type) {
++      case 'welcome':
++        this.emit('ready', msg.payload);
++        break;
++      case 'presence': {
++        this._peers.clear();
++        for (const d of msg.payload?.devices || []) {
++          if (d.deviceId !== this.deviceId) this._peers.set(d.deviceId, d);
++        }
++        this.emit('presence', this.peers);
++        break;
++      }
++      case 'chat':
++        this.emit('chat', { ...msg.payload, id: msg.id, from: msg.from, ts: msg.ts });
++        break;
++      case 'notification':
++        this.emit('notification', { ...msg.payload, from: msg.from });
++        break;
++      case 'file_share':
++        this.emit('file', msg.payload?.file);
++        break;
++      case 'delivery_status':
++        this.emit('delivery_status', msg.payload);
++        break;
++      case 'file_stored':
++        this._resolvePending(msg.id, msg.payload);
++        break;
++      case 'error':
++        this._rejectPending(msg.id, msg.payload);
++        this.emit('relay_error', msg.payload);
++        break;
++      default:
++        this.emit('message', msg);
++    }
++  }
++
++  _send(obj) {
++    if (!this.connected) return false;
++    obj.from = this.deviceId;
++    obj.ts = obj.ts || Date.now();
++    try {
++      this.ws.send(JSON.stringify(obj));
++      return true;
++    } catch {
++      return false;
++    }
++  }
++
++  /** Chat from desktop -> phone. to='*' broadcasts to all other devices. */
++  sendChat(text, { role = 'assistant', to = '*', conversationId } = {}) {
++    return this._send({
++      v: 1,
++      type: 'chat',
++      id: randomUUID(),
++      to,
++      payload: { role, text, conversationId },
++    });
++  }
++
++  /** Push a notification to the phone (e.g. scheduled-task result). */
++  sendNotification(title, body, { to = '*' } = {}) {
++    return this._send({
++      v: 1,
++      type: 'notification',
++      id: randomUUID(),
++      to,
++      payload: { title, body },
++    });
++  }
++
++  /** Upload a local file and share its meta with the phone(s). */
++  async sendFile(filePath, { to = '*', name } = {}) {
++    const base = this._httpBase();
++    const fname = name || filePath.split(/[\\/]/).pop();
++    const buf = await readFile(filePath);
++    const res = await httpRequest(
++      `${base}/upload?token=${encodeURIComponent(this.token)}&name=${encodeURIComponent(fname)}`,
++      buf,
++    );
++    const json = JSON.parse(res);
++    if (!json.ok) throw new Error('upload failed: ' + res);
++    this._send({
++      v: 1,
++      type: 'file_share',
++      id: randomUUID(),
++      to,
++      payload: { file: json.file },
++    });
++    return json.file;
++  }
++
++  /** Download a relayed file to a local path. */
++  async downloadFile(fileId, savePath) {
++    const base = this._httpBase();
++    const buf = await httpGet(`${base}/file/${fileId}?token=${encodeURIComponent(this.token)}`);
++    const { writeFile } = await import('node:fs/promises');
++    await writeFile(savePath, buf);
++    return savePath;
++  }
++
++  _httpBase() {
++    let u = this.serverUrl;
++    if (u.startsWith('wss://')) u = u.replace('wss://', 'https://');
++    else if (u.startsWith('ws://')) u = u.replace('ws://', 'http://');
++    const i = u.indexOf('/ws');
++    return i >= 0 ? u.slice(0, i) : u;
++  }
++
++  _resolvePending(id, payload) {
++    const p = this._pending.get(id);
++    if (p) {
++      p.resolve(payload);
++      this._pending.delete(id);
++    }
++  }
++
++  _rejectPending(id, payload) {
++    const p = this._pending.get(id);
++    if (p) {
++      p.reject(new Error(payload?.message || 'error'));
++      this._pending.delete(id);
++    }
++  }
++}
++
++// ---- tiny http helpers (no extra deps) ----
++function httpRequest(url, body) {
++  return new Promise((resolve, reject) => {
++    const req = http.request(
++      url,
++      { method: 'POST', headers: { 'content-type': 'application/octet-stream' } },
++      (res) => {
++        let data = '';
++        res.on('data', (c) => (data += c));
++        res.on('end', () => resolve(data));
++      },
++    );
++    req.on('error', reject);
++    req.end(body);
++  });
++}
++
++function httpGet(url) {
++  return new Promise((resolve, reject) => {
++    http
++      .get(url, (res) => {
++        const chunks = [];
++        res.on('data', (c) => chunks.push(c));
++        res.on('end', () => resolve(Buffer.concat(chunks)));
++      })
++      .on('error', reject);
++  });
++}
+diff --git a/package.json b/package.json
+index f3a088c..3378791 100644
+--- a/package.json
++++ b/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "anywhere-desktop",
++  "name": "anywhere-desktop-relay",
+   "version": "1.2.6",
+   "description": "AI Anywhere Desktop",
+   "main": "./out/main/index.js",
+@@ -53,6 +53,7 @@
+     "openai": "6.18.0",
+     "pinyin-pro": "^3.28.0",
+     "webdav": "^5.9.0",
++    "ws": "^8.18.0",
+     "xlsx": "^0.18.5"
+   },
+   "devDependencies": {
+diff --git a/preload/main_preload.js b/preload/main_preload.js
+index 3d476ea..f9f75db 100644
+--- a/preload/main_preload.js
++++ b/preload/main_preload.js
+@@ -75,6 +75,14 @@ const api = {
+   installAppUpdate: () => electronAPI.ipcRenderer.invoke('app:update:install'),
+   clearAppUpdateCache: () => electronAPI.ipcRenderer.invoke('app:update:clearCache'),
+ 
++  // ===== [anywhere-mobile] 手机互通中继 =====
++  getRelayConfig: () => electronAPI.ipcRenderer.invoke('relay:getConfig'),
++  setRelayConfig: (input = {}) => electronAPI.ipcRenderer.invoke('relay:setConfig', input),
++  getRelayStatus: () => electronAPI.ipcRenderer.invoke('relay:status'),
++  sendRelayChat: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendChat', payload),
++  sendRelayNotification: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendNotification', payload),
++  sendRelayFile: (payload = {}) => electronAPI.ipcRenderer.invoke('relay:sendFile', payload),
++
+ 
+ getDroppedFilePath: (file) => {
+     try {
+diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
+index 2ad1391..c187f5f 100644
+--- a/render/main/components/Setting.vue
++++ b/render/main/components/Setting.vue
+@@ -94,7 +94,8 @@ const collapsedCards = ref({
+   networkProxy: false,
+   voice: false,
+   data: false,
+-  webdav: false
++  webdav: false,
++  relay: false
+ });
+ 
+ const cardDefinitions = {
+@@ -103,10 +104,70 @@ const cardDefinitions = {
+   networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
+   voice: { id: 'voice', titleKey: 'setting.voice.title' },
+   data: { id: 'data', titleKey: 'setting.dataManagement.title' },
+-  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' }
++  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' },
++  relay: { id: 'relay', titleKey: null, staticTitle: '手机互通' }
+ };
+ 
+ const settingsCards = ref([]);
++
++// ===== [anywhere-mobile] 手机互通（中继）=====
++const relayForm = reactive({
++  serverUrl: '',
++  token: '',
++  userId: 'default-user',
++  deviceName: ''
++})
++const relayStatus = ref({ connected: false, deviceId: null, peers: [] })
++const relaySaving = ref(false)
++
++async function loadRelayConfig() {
++  try {
++    const res = await window.api?.getRelayConfig?.()
++    if (res && res.ok && res.config) {
++      relayForm.serverUrl = res.config.serverUrl || ''
++      relayForm.token = res.config.token || ''
++      relayForm.userId = res.config.userId || 'default-user'
++      relayForm.deviceName = res.config.deviceName || ''
++    }
++  } catch (e) { /* ignore */ }
++  await refreshRelayStatus()
++}
++
++async function refreshRelayStatus() {
++  try {
++    const res = await window.api?.getRelayStatus?.()
++    if (res && res.ok) {
++      relayStatus.value = {
++        connected: !!res.connected,
++        deviceId: res.deviceId || null,
++        peers: res.peers || []
++      }
++    }
++  } catch (e) { /* ignore */ }
++}
++
++async function saveRelayConfig() {
++  if (!relayForm.serverUrl || !relayForm.token || !relayForm.userId) {
++    ElMessage.error('请填写：中继服务器地址、Token、用户ID')
++    return
++  }
++  relaySaving.value = true
++  try {
++    const res = await window.api?.setRelayConfig?.({ ...relayForm })
++    if (res && res.ok) {
++      ElMessage.success('已保存，正在重新连接…')
++      setTimeout(refreshRelayStatus, 1500)
++    } else {
++      ElMessage.error(res?.error?.message || '保存失败')
++    }
++  } catch (e) {
++    ElMessage.error('保存失败：' + (e?.message || e))
++  } finally {
++    relaySaving.value = false
++  }
++}
++// ===== [/anywhere-mobile] =====
++
+ const shortcutRecorder = ref({
+   target: '',
+   index: -1,
+@@ -315,7 +376,8 @@ function initCardOrder() {
+       cardDefinitions.networkProxy,
+       cardDefinitions.voice,
+       cardDefinitions.data,
+-      cardDefinitions.webdav
++      cardDefinitions.webdav,
++      cardDefinitions.relay
+     ];
+   }
+   
+@@ -335,7 +397,12 @@ const onOrderChange = async () => {
+ 
+ function toggleCard(cardName) {
+   collapsedCards.value[cardName] = !collapsedCards.value[cardName];
+-  
++
++  // [anywhere-mobile] 展开手机互通卡片时刷新一次状态
++  if (cardName === 'relay' && !collapsedCards.value['relay']) {
++    refreshRelayStatus();
++  }
++
+   if (currentConfig.value) {
+     const plainState = JSON.parse(JSON.stringify(collapsedCards.value));
+     
+@@ -431,10 +498,15 @@ onMounted(() => {
+     ensureNetworkProxyConfig();
+     initCardOrder();
+   }
++
++  // [anywhere-mobile] 初始化手机互通配置与状态
++  loadRelayConfig();
+ });
+ 
+ onActivated(() => {
+   window.addEventListener('keydown', handleShortcutRecorderKeydown, true)
++  // [anywhere-mobile] 切回设置页时刷新互通状态
++  refreshRelayStatus();
+ })
+ 
+ onDeactivated(() => {
+@@ -2310,6 +2382,76 @@ async function pullSelectedCloudSkillsToLocal() {
+                     </div>
+                   </div>
+ 
++                  <!-- ===== [anywhere-mobile] 手机互通 ===== -->
++                  <div v-if="element.id === 'relay'" class="card-body">
++                    <div class="setting-option-item">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">连接状态</span>
++                        <span class="setting-option-description">
++                          {{ relayStatus.connected ? '已连接中继' : '未连接' }}
++                          <template v-if="relayStatus.deviceId">，本机 ID：{{ relayStatus.deviceId }}</template>
++                        </span>
++                      </div>
++                      <div style="display: flex; align-items: center; gap: 10px;">
++                        <el-tag :type="relayStatus.connected ? 'success' : 'info'" size="small">
++                          {{ relayStatus.connected ? '在线' : '离线' }}
++                        </el-tag>
++                        <el-button size="small" plain @click="refreshRelayStatus">刷新</el-button>
++                      </div>
++                    </div>
++
++                    <div class="setting-option-item">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">中继服务器地址</span>
++                        <span class="setting-option-description">例如 wss://your-domain/ws</span>
++                      </div>
++                      <el-input v-model="relayForm.serverUrl" placeholder="wss://…/ws" style="width: 340px;" />
++                    </div>
++
++                    <div class="setting-option-item">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">Token</span>
++                        <span class="setting-option-description">手机与电脑必须填相同的 Token</span>
++                      </div>
++                      <el-input v-model="relayForm.token" type="password" show-password placeholder="中继令牌"
++                        style="width: 340px;" />
++                    </div>
++
++                    <div class="setting-option-item">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">用户 ID</span>
++                        <span class="setting-option-description">手机与电脑必须填相同的用户 ID</span>
++                      </div>
++                      <el-input v-model="relayForm.userId" placeholder="default-user" style="width: 340px;" />
++                    </div>
++
++                    <div class="setting-option-item no-border">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">设备名称</span>
++                        <span class="setting-option-description">显示在手机上的这台电脑的名字</span>
++                      </div>
++                      <el-input v-model="relayForm.deviceName" placeholder="My PC" style="width: 340px;" />
++                    </div>
++
++                    <div class="setting-option-item no-border">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">保存并连接</span>
++                        <span class="setting-option-description">保存后会自动重新连接中继服务器</span>
++                      </div>
++                      <el-button type="primary" :loading="relaySaving" @click="saveRelayConfig">保存</el-button>
++                    </div>
++
++                    <div v-if="relayStatus.peers && relayStatus.peers.length" class="setting-option-item no-border">
++                      <div class="setting-text-content">
++                        <span class="setting-option-label">在线设备</span>
++                        <span class="setting-option-description">
++                          {{ relayStatus.peers.map(p => p.deviceName || p.deviceId).join('、') }}
++                        </span>
++                      </div>
++                    </div>
++                  </div>
++                  <!-- ===== [/anywhere-mobile] ===== -->
++
+                 </div>
+               </el-collapse-transition>
+             </div>
+diff --git a/scripts/apply-relay-patch.mjs b/scripts/apply-relay-patch.mjs
+new file mode 100644
+index 0000000..1ceb519
+--- /dev/null
++++ b/scripts/apply-relay-patch.mjs
+@@ -0,0 +1,65 @@
++#!/usr/bin/env node
++/**
++ * [anywhere-mobile] Re-apply the relay patch to main/index.js
++ * -----------------------------------------------------------
++ * 从源码更新（git pull）后运行本脚本，即可把中继接入的 2 行改动重新注入。
++ * 幂等：已注入则跳过。新增文件（main/relay/*）不受 git pull 影响。
++ *
++ * 用法：
++ *   node scripts/apply-relay-patch.mjs
++ */
++import { readFileSync, writeFileSync, existsSync } from 'node:fs'
++import { fileURLToPath } from 'node:url'
++import { dirname, join } from 'node:path'
++
++const root = join(dirname(fileURLToPath(import.meta.url)), '..')
++const INDEX = join(root, 'main', 'index.js')
++
++const IMPORT_ANCHOR = "import { startTaskScheduler } from './core/task_scheduler.js'"
++const IMPORT_LINE = "// [anywhere-mobile] 手机互通中继桥\nimport { startRelay } from './relay/index.js'"
++
++const CALL_ANCHOR = "await openWindow('main')"
++const CALL_LINE = "\n  // [anywhere-mobile] 启动与手机 App 的中继连接\n  startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })"
++
++if (!existsSync(INDEX)) {
++  console.error('[apply-relay-patch] main/index.js not found:', INDEX)
++  process.exit(1)
++}
++
++let src = readFileSync(INDEX, 'utf8')
++let changed = false
++
++// 1) import
++if (!src.includes('[anywhere-mobile] 手机互通中继桥')) {
++  if (!src.includes(IMPORT_ANCHOR)) {
++    console.error('[apply-relay-patch] anchor (startTaskScheduler import) not found; aborting.')
++    process.exit(1)
++  }
++  src = src.replace(IMPORT_ANCHOR, `${IMPORT_ANCHOR}\n${IMPORT_LINE}`)
++  changed = true
++  console.log('[apply-relay-patch] inserted relay import')
++} else {
++  console.log('[apply-relay-patch] import already present')
++}
++
++// 2) startRelay call (only the FIRST occurrence of await openWindow('main'))
++if (!src.includes('startRelay({ getWindowByRef, listWindows, dispatchWindowEvent })')) {
++  const idx = src.indexOf(CALL_ANCHOR)
++  if (idx === -1) {
++    console.error("[apply-relay-patch] anchor (await openWindow('main')) not found; aborting.")
++    process.exit(1)
++  }
++  const at = idx + CALL_ANCHOR.length
++  src = src.slice(0, at) + CALL_LINE + src.slice(at)
++  changed = true
++  console.log('[apply-relay-patch] inserted startRelay() call')
++} else {
++  console.log('[apply-relay-patch] startRelay() call already present')
++}
++
++if (changed) {
++  writeFileSync(INDEX, src, 'utf8')
++  console.log('[apply-relay-patch] done. main/index.js updated.')
++} else {
++  console.log('[apply-relay-patch] nothing to do.')
++}

@@ -80,7 +80,12 @@ function emitToWindows(event, payload) {
   }
 }
 
+let ipcRegistered = false
+
 function registerIpc() {
+  if (ipcRegistered) return
+  ipcRegistered = true
+
   const guard = (fn) => async (...args) => {
     try {
       return await fn(...args)
@@ -97,14 +102,9 @@ function registerIpc() {
   })))
 
   ipcMain.handle('relay:getConfig', guard(async () => {
-    const cfg = readConfig()
-    // never leak the token to the renderer in full
-    return {
-      ok: true,
-      config: cfg
-        ? { ...cfg, token: cfg.token ? '***' : '' }
-        : null
-    }
+    // Return the full config (this is the user's own desktop app; the token
+    // already lives in plaintext under userData/relay.json).
+    return { ok: true, config: readConfig() || null }
   }))
 
   ipcMain.handle('relay:setConfig', guard(async (_e, input = {}) => {
@@ -115,7 +115,7 @@ function registerIpc() {
     writeFileSync(CONFIG_PATH(), JSON.stringify(cfg, null, 2), 'utf8')
     // reconnect with new config
     startRelay(ctx, cfg, { force: true })
-    return { ok: true, config: { ...cfg, token: '***' } }
+    return { ok: true, config: cfg }
   }))
 
   ipcMain.handle('relay:sendChat', guard(async (_e, { text, to } = {}) => {
