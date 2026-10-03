@@ -1,0 +1,42 @@
+name: anywhere_mobile
+description: Anywhere Mobile - Android companion app for Anywhere Desktop (chat / file / notification interop via public relay).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # state + storage
+  provider: ^6.1.2
+  shared_preferences: ^2.3.2
+
+  # networking
+  web_socket_channel: ^3.0.1
+  http: ^1.2.2
+
+  # utils
+  uuid: ^4.5.1
+  intl: ^0.19.0
+
+  # notifications (local, shown when a push arrives over the relay)
+  flutter_local_notifications: ^17.2.3
+
+  # file picking & sharing
+  file_picker: ^8.1.2
+  share_plus: ^10.0.2
+  path_provider: ^2.1.4
+  open_filex: ^4.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

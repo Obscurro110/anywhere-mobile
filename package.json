@@ -1,0 +1,12 @@
+{
+  "name": "anywhere-mobile-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Workspace root for Anywhere Mobile interop suite (relay server + desktop bridge + Flutter app).",
+  "scripts": {
+    "server": "npm --prefix server start",
+    "server:test": "node server/test-e2e.mjs",
+    "bridge:demo": "node relay-bridge/demo.js",
+    "install:all": "npm --prefix server install && npm --prefix relay-bridge install"
+  }
+}

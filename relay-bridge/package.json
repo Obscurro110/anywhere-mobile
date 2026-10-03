@@ -1,0 +1,13 @@
+{
+  "name": "anywhere-relay-bridge",
+  "version": "1.0.0",
+  "description": "Desktop-side bridge that connects Anywhere Desktop (Electron) to the relay server so it can talk to the Android app.",
+  "type": "module",
+  "main": "relay-client.js",
+  "scripts": {
+    "demo": "node demo.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
