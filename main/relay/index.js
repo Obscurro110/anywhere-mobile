@@ -53,6 +53,13 @@ import { join } from 'node:path'
 import { RelayClient } from './relay-client.js'
 import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
 import { listLocalConversations, openConversation } from '../core/conversationStore.js'
+import {
+  renameConversation as storeRenameConversation,
+  deleteConversation as storeDeleteConversation,
+  getConversationRequestMessages as storeGetMessages,
+  deleteMessages as storeDeleteMessages
+} from '../core/conversationStore.js'
+import { readLocalProjects } from '../core/projects.js'
 
 // ---------------------------------------------------------------------------
 // 日志落盘
@@ -397,18 +404,130 @@ function toPhoneConversation(item) {
 
 /**
  * 列出电脑端的本地会话（手机「电脑端对话」列表）。
+ * 同时算出每条会话属于哪个项目（电脑端用 projects.yml 组织：
+ *   projects: [{ id, name, files:[basename], conversationIds:[id] }]）
  */
 async function listPhoneConversations() {
   const dirPath = await readChatDirPath()
   if (!dirPath) {
-    return { ok: false, reason: 'chat_dir_not_configured', conversations: [] }
+    return { ok: false, reason: 'chat_dir_not_configured', conversations: [], projects: [] }
   }
   const all = await listLocalConversations(dirPath)
+
+  // conversationId -> { projectId, projectName }
+  const projectOf = new Map()
+  let projects = []
+  try {
+    const data = await readLocalProjects(dirPath)
+    const rawProjects = Array.isArray(data?.projects) ? data.projects : []
+    projects = rawProjects
+      .filter((p) => p && typeof p === 'object')
+      .map((p) => ({ id: String(p.id || ''), name: String(p.name || p.id || '') }))
+      .filter((p) => p.id)
+    for (const p of rawProjects) {
+      const pid = String(p?.id || '')
+      const pname = String(p?.name || pid)
+      if (!pid) continue
+      for (const cid of Array.isArray(p?.conversationIds) ? p.conversationIds : []) {
+        if (cid) projectOf.set(String(cid), { projectId: pid, projectName: pname })
+      }
+    }
+  } catch (err) {
+    rwarn('[relay] read projects failed:', err?.message || err)
+  }
+
   const list = (Array.isArray(all) ? all : [])
-    .map(toPhoneConversation)
+    .map((item) => {
+      const c = toPhoneConversation(item)
+      const hit = projectOf.get(c.id)
+      return {
+        ...c,
+        projectId: hit?.projectId || '',
+        projectName: hit?.projectName || ''
+      }
+    })
     .filter((c) => c.id)
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-  return { ok: true, dirPath, conversations: list }
+
+  return { ok: true, dirPath, conversations: list, projects }
+}
+
+/**
+ * 读取某个会话的消息列表（手机看会话内容用）。
+ * 只取 role/content，去掉向量、工具调用等大字段。
+ */
+async function readPhoneConversationMessages(conversationId) {
+  const dirPath = await readChatDirPath()
+  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured', messages: [] }
+  const res = await storeGetMessages({ dirPath, conversationId })
+  const raw = Array.isArray(res?.messages) ? res.messages : []
+  const messages = raw
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'system'))
+    .map((m) => ({
+      id: String(m.storageId ?? m.id ?? ''),
+      role: String(m.role || ''),
+      text: extractMessageText(m.content),
+      time: m.completedTimestamp || m.timestamp || ''
+    }))
+    .filter((m) => m.text)
+  return { ok: true, messages, count: messages.length }
+}
+
+/** 从 content（字符串 / [{type:'text',text}]）里抽纯文本 */
+function extractMessageText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p && p.type === 'text')
+      .map((p) => p.text || '')
+      .join('')
+  }
+  return ''
+}
+
+/** 删除整个会话 */
+async function deletePhoneConversation(conversationId) {
+  const dirPath = await readChatDirPath()
+  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
+  const ref = String(conversationId || '').trim()
+  if (!ref) return { ok: false, reason: 'conversationId_required' }
+
+  // 如果这个会话正在手机窗口里开着，先关掉窗口并解绑
+  if (phoneWindowId && phoneWindowKey === `conv:${ref}` && isWindowAlive(phoneWindowId)) {
+    try {
+      ctx.getWindowByRef(phoneWindowId)?.destroy?.()
+    } catch (err) {
+      rwarn('[relay] destroy window before delete failed:', err?.message || err)
+    }
+    phoneWindowId = null
+    phoneWindowKey = 'phone'
+  }
+
+  const res = await storeDeleteConversation({ dirPath, conversationId: ref })
+  rlog('[relay] deleted conversation', ref, 'removed =', res?.removed)
+  return { ok: res?.ok !== false, removed: !!res?.removed }
+}
+
+/** 重命名会话 */
+async function renamePhoneConversation(conversationId, title) {
+  const dirPath = await readChatDirPath()
+  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
+  const ref = String(conversationId || '').trim()
+  const next = String(title || '').trim()
+  if (!ref) return { ok: false, reason: 'conversationId_required' }
+  if (!next) return { ok: false, reason: 'title_required' }
+  await storeRenameConversation({ dirPath, conversationId: ref, title: next })
+  return { ok: true, title: next }
+}
+
+/** 删除会话里的若干条消息 */
+async function deletePhoneMessages(conversationId, storageIds) {
+  const dirPath = await readChatDirPath()
+  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
+  const ids = (Array.isArray(storageIds) ? storageIds : []).map((x) => String(x)).filter(Boolean)
+  if (!ids.length) return { ok: false, reason: 'storageIds_required' }
+  await storeDeleteMessages({ dirPath, conversationId, storageIds: ids })
+  return { ok: true, deleted: ids.length }
 }
 
 /**
@@ -576,6 +695,117 @@ async function routePhoneChat(msg) {
         { role: 'conversation-open-result', to }
       )
     }
+    return
+  }
+
+  // 手机读取某个会话的消息内容
+  if (role === 'conversation-messages-request') {
+    const conversationId = String(msg?.conversationId ?? '').trim()
+    try {
+      const res = await readPhoneConversationMessages(conversationId)
+      relay?.sendChat(
+        JSON.stringify({
+          __relayConversationMessages: {
+            conversationId,
+            ok: res.ok !== false,
+            reason: res.reason || '',
+            count: res.count || 0,
+            messages: res.messages || []
+          }
+        }),
+        { role: 'conversation-messages', to }
+      )
+    } catch (err) {
+      rwarn('[relay] conversation messages failed:', err?.message || err)
+      relay?.sendChat(
+        JSON.stringify({
+          __relayConversationMessages: {
+            conversationId,
+            ok: false,
+            reason: String(err?.message || err),
+            messages: []
+          }
+        }),
+        { role: 'conversation-messages', to }
+      )
+    }
+    return
+  }
+
+  // 手机删除某个会话
+  if (role === 'conversation-delete') {
+    const conversationId = String(msg?.conversationId ?? '').trim()
+    let res
+    try {
+      res = await deletePhoneConversation(conversationId)
+    } catch (err) {
+      rwarn('[relay] conversation delete failed:', err?.message || err)
+      res = { ok: false, reason: String(err?.message || err) }
+    }
+    relay?.sendChat(
+      JSON.stringify({
+        __relayConversationActionResult: {
+          action: 'delete',
+          conversationId,
+          ok: res.ok !== false,
+          removed: !!res.removed,
+          reason: res.reason || ''
+        }
+      }),
+      { role: 'conversation-action-result', to }
+    )
+    return
+  }
+
+  // 手机重命名某个会话
+  if (role === 'conversation-rename') {
+    const conversationId = String(msg?.conversationId ?? '').trim()
+    const title = String(msg?.title ?? '').trim()
+    let res
+    try {
+      res = await renamePhoneConversation(conversationId, title)
+    } catch (err) {
+      rwarn('[relay] conversation rename failed:', err?.message || err)
+      res = { ok: false, reason: String(err?.message || err) }
+    }
+    relay?.sendChat(
+      JSON.stringify({
+        __relayConversationActionResult: {
+          action: 'rename',
+          conversationId,
+          title: res.title || title,
+          ok: res.ok !== false,
+          reason: res.reason || ''
+        }
+      }),
+      { role: 'conversation-action-result', to }
+    )
+    return
+  }
+
+  // 手机删除会话里的若干条消息
+  if (role === 'conversation-messages-delete') {
+    const conversationId = String(msg?.conversationId ?? '').trim()
+    const storageIds = Array.isArray(msg?.storageIds) ? msg.storageIds : []
+    let res
+    try {
+      res = await deletePhoneMessages(conversationId, storageIds)
+    } catch (err) {
+      rwarn('[relay] conversation messages delete failed:', err?.message || err)
+      res = { ok: false, reason: String(err?.message || err) }
+    }
+    relay?.sendChat(
+      JSON.stringify({
+        __relayConversationActionResult: {
+          action: 'deleteMessages',
+          conversationId,
+          deleted: res.deleted || 0,
+          ok: res.ok !== false,
+          reason: res.reason || ''
+        }
+      }),
+      { role: 'conversation-action-result', to }
+    )
     return
   }
 
