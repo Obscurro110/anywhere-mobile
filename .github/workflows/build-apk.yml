@@ -40,6 +40,10 @@ jobs:
           # 生成缺失的 android/ 平台脚手架；不覆盖已有 lib/ 与配置
           flutter create . --org com.anywhere --project-name anywhere_mobile
 
+      - name: Patch Android gradle (core library desugaring)
+        working-directory: app
+        run: python3 tools/patch_android.py
+
       - name: Install dependencies
         working-directory: app
         run: flutter pub get
