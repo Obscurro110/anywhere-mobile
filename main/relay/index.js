@@ -627,7 +627,12 @@ async function readPhoneConversationMessages(conversationId) {
     if (!text) return
     messages.push({
       index,
-      id: String(m.id ?? ''), // assistant 气泡 id，「重新回答」用
+      id: String(m.id ?? ''), // chat_show 展示 id（窗口内删除/重新回答用）
+      // storageId = messages.message_uuid：批量删除时电脑端用这个删。
+      // 注意：不能拿 id 当 storageId —— id 是展示层的，删不中会静默失败
+      //（这正是"手机删了、电脑端没反应"的根因之一）。
+      storageId: String(m.storageId || m.message_uuid || ''),
+      uiStorageId: String(m.uiStorageId || ''),
       role,
       text,
       time: m.completedTimestamp || m.timestamp || ''
