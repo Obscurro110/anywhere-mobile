@@ -583,7 +583,14 @@ async function readPhoneConversationMessages(conversationId) {
   const dirPath = await readChatDirPath()
   if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured', messages: [] }
 
-  const opened = await openConversation({ dirPath, reference: conversationId })
+  // 长会话要能看全：openConversation 默认只取尾部一条窗口（约 200 条），
+  // 会话一长前面的消息就「显示不完整」。这里把页面上限调大。
+  const opened = await openConversation({
+    dirPath,
+    reference: conversationId,
+    activeOnly: true,
+    pageSize: 5000
+  })
   if (!opened?.ok || !opened.sessionData) {
     return { ok: false, reason: 'conversation_not_found', messages: [] }
   }
