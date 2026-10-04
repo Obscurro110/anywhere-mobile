@@ -1042,6 +1042,8 @@ class AppState extends ChangeNotifier {
               _lastDeletedCount = n;
               break;
           }
+          // 会话/消息被改过，顺手重新拉一遍电脑端列表，保证手机端跟电脑端一致
+          unawaited(requestConversations());
         }
         notifyListeners();
       } catch (e) {
@@ -1174,14 +1176,22 @@ class AppState extends ChangeNotifier {
         // 统一走 _setActiveConversation：它会落盘旧会话的记录、
         // 再加载新会话的记录。直接改 _activeConversationId 会让
         // messages 留在上一个会话，造成「多个对话内容重合」。
+        final openPromptKey = r['promptKey']?.toString() ?? '';
         _setActiveConversation(
           ok ? r['conversationId']?.toString() : null,
           ok ? (r['title']?.toString() ?? '') : '',
         );
+        // 会话和助手对应：电脑端会话里的 promptKey 同步成手机当前助手。
+        // 这样在手机里继续对话时，用的还是这个会话原来的助手预设。
+        if (ok && openPromptKey.isNotEmpty) {
+          applyPrompt(openPromptKey);
+        }
         lastConversationOpen = {
           'ok': ok,
           'conversationId': r['conversationId']?.toString() ?? '',
           'title': r['title']?.toString() ?? '',
+          'promptKey': openPromptKey,
+          'assistantName': r['assistantName']?.toString() ?? '',
           'reason': r['reason']?.toString() ?? '',
         };
         notifications.show(

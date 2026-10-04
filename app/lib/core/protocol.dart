@@ -728,6 +728,10 @@ class ConversationOption {
   /// 所属项目（电脑端用 projects.yml 组织会话；未归类时为空）
   final String projectId;
   final String projectName;
+  /// 这个会话用的电脑端助手（prompt key）
+  final String promptKey;
+  /// 这个会话用的助手显示名（config.prompts 的 name/title）
+  final String assistantName;
 
   ConversationOption({
     required this.id,
@@ -738,6 +742,8 @@ class ConversationOption {
     this.format = 'sqlite',
     this.projectId = '',
     this.projectName = '',
+    this.promptKey = '',
+    this.assistantName = '',
   });
 
   /// 相对时间，例如「3 分钟前」「昨天」
@@ -765,9 +771,17 @@ class ConversationOption {
         format: j['format'] as String? ?? 'sqlite',
         projectId: j['projectId'] as String? ?? '',
         projectName: j['projectName'] as String? ?? '',
+        promptKey: j['promptKey'] as String? ?? '',
+        assistantName: j['assistantName'] as String? ?? '',
       );
 
-  ConversationOption copyWith({String? title, String? projectId, String? projectName}) =>
+  ConversationOption copyWith({
+    String? title,
+    String? projectId,
+    String? projectName,
+    String? promptKey,
+    String? assistantName,
+  }) =>
       ConversationOption(
         id: id,
         title: title ?? this.title,
@@ -777,6 +791,8 @@ class ConversationOption {
         format: format,
         projectId: projectId ?? this.projectId,
         projectName: projectName ?? this.projectName,
+        promptKey: promptKey ?? this.promptKey,
+        assistantName: assistantName ?? this.assistantName,
       );
 }
 

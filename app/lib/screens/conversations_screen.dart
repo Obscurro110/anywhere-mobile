@@ -223,13 +223,43 @@ class _ConversationsPageState extends State<ConversationsPage> {
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 14.5),
         ),
-        subtitle: Row(
+        subtitle: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             if (c.updatedLabel.isNotEmpty)
               Text(c.updatedLabel,
                   style: const TextStyle(fontSize: 11, color: Colors.white38)),
+            if (c.assistantName.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF262C3D),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  c.assistantName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.amberAccent),
+                ),
+              )
+            else if (c.promptKey.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF262C3D),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  c.promptKey,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.white54),
+                ),
+              ),
             if (isActive) ...[
-              const SizedBox(width: 8),
               const Text('对话中',
                   style: TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
             ],

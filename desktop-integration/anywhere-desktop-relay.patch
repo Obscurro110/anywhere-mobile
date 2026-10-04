@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..c31f213
+index 0000000..57d0ee1
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,1987 @@
+@@ -0,0 +1,2092 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -625,6 +625,16 @@ index 0000000..c31f213
 +  }
 +  const all = await listLocalConversations(dirPath)
 +
++    // 助手名需要 config.prompts 来映射
++    let promptsCfg = null
++    try {
++      const cRes = await ctx?.dataApi?.getConfig?.()
++      promptsCfg = cRes?.config?.prompts && typeof cRes.config.prompts === 'object'
++        ? cRes.config.prompts
++        : null
++    } catch (_) {}
++
++
 +  // conversationId -> { projectId, projectName }
 +  const projectOf = new Map()
 +  let projects = []
@@ -647,21 +657,33 @@ index 0000000..c31f213
 +    rwarn('[relay] read projects failed:', err?.message || err)
 +  }
 +
-+  const list = (Array.isArray(all) ? all : [])
-+    .map((item) => {
++  const list = []
++    // 逐个补 promptKey / assistantName：openConversation 读 sessionData 里的
++    // promptKey（同一文件，开销可控）；读不到就留空，手机端继续用默认助手。
++    for (const item of Array.isArray(all) ? all : []) {
 +      const c = toPhoneConversation(item)
++      if (!c.id) continue
 +      const hit = projectOf.get(c.id)
-+      return {
++      let promptKey = ''
++      try {
++        const opened = await openConversation({ dirPath, reference: c.id, activeOnly: true, pageSize: 1 })
++        promptKey =
++          opened?.sessionData?.promptKey ||
++          opened?.sessionData?.sessionMetadata?.promptKey ||
++          ''
++      } catch (_) {}
++      const p = promptsCfg && promptKey ? promptsCfg[promptKey] : null
++      list.push({
 +        ...c,
++        promptKey,
++        assistantName: (p && (p.name || p.title)) ? (p.name || p.title) : '',
 +        projectId: hit?.projectId || '',
 +        projectName: hit?.projectName || ''
-+      }
-+    })
-+    .filter((c) => c.id)
-+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
++      })
++    }
++    list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
 +
-+  return { ok: true, dirPath, conversations: list, projects }
-+}
++    return { ok: true, dirPath, conversations: list, projects }}
 +
 +/**
 + * 读取某个会话的消息列表（手机看会话内容用）。
@@ -703,7 +725,24 @@ index 0000000..c31f213
 +      time: m.completedTimestamp || m.timestamp || ''
 +    })
 +  })
-+  return { ok: true, messages, count: messages.length }
++  const promptKey =
++      opened.sessionData?.promptKey ||
++      opened.sessionData?.sessionMetadata?.promptKey ||
++      ''
++    let assistantName = ''
++    try {
++      const cRes = await ctx?.dataApi?.getConfig?.()
++      const pc = cRes?.config?.prompts
++      const p = pc && typeof pc === 'object' && promptKey ? pc[promptKey] : null
++      assistantName = (p && (p.name || p.title)) ? (p.name || p.title) : ''
++    } catch (_) {}
++    return {
++      ok: true,
++      messages,
++      count: messages.length,
++      promptKey,
++      assistantName
++    }
 +}
 +
 +/** 从 content（字符串 / [{type:'text',text}]）里抽纯文本 */
@@ -767,6 +806,47 @@ index 0000000..c31f213
 + * 手机点开某个电脑端会话：
 + * 把该会话在本机窗口里打开，并把回复回传目标绑到那个窗口。
 + */
++
++  /**
++   * 手机端改了会话内容 / 标题 / 会话本身后，广播给所有可能打开这个会话的窗口。
++   * 窗口收到后自己判断 conversationId 是否匹配再刷新，避免误刷其它会话。
++   */
++  function notifyConversationChanged(conversationId, action, extra = {}) {
++    if (!conversationId) return
++    const refs = new Set()
++    if (phoneWindowId) refs.add(phoneWindowId)
++    for (const ref of convWindows.values()) refs.add(ref)
++    try {
++      const all = ctx?.listWindows?.()
++      if (Array.isArray(all)) {
++        for (const w of all) {
++          const ref = w?.ref || w?.id || w?.windowId
++          if (ref) refs.add(ref)
++        }
++      }
++    } catch (_) {}
++    for (const ref of refs) {
++      if (!ref || !isWindowAlive(ref)) continue
++      try {
++        ctx.dispatchWindowEvent(
++          {
++            event: 'relay:command',
++            payload: {
++              action,
++              reqId: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
++              conversationId,
++              ...extra
++            },
++            target: ref
++          },
++          { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
++        )
++      } catch (err) {
++        rwarn('[relay] notify conversation window failed:', action, err?.message || err)
++      }
++    }
++  }
++
 +async function openPhoneConversation(conversationId, relayTo) {
 +  const dirPath = await readChatDirPath()
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
@@ -818,7 +898,20 @@ index 0000000..c31f213
 +    phoneWindowKey = reuseKey
 +    convWindows.set(opened.descriptor.conversationId, res.id)
 +    rlog('[relay] opened conversation window:', res.id, 'conv =', opened.descriptor.conversationId)
-+    return { ok: true, windowId: res.id, title: opened.descriptor.title }
++        let assistantName = ''
++    try {
++      const cRes = await ctx?.dataApi?.getConfig?.()
++      const pc = cRes?.config?.prompts
++      const p = pc && typeof pc === 'object' && promptKey ? pc[promptKey] : null
++      assistantName = (p && (p.name || p.title)) ? (p.name || p.title) : ''
++    } catch (_) {}
++    return {
++      ok: true,
++      windowId: res.id,
++      title: opened.descriptor.title,
++      promptKey,
++      assistantName
++    }
 +  }
 +  rwarn('[relay] openWindow for conversation returned:', res)
 +  return { ok: false, reason: 'open_window_failed' }
@@ -1223,6 +1316,10 @@ index 0000000..c31f213
 +      rwarn('[relay] conversation delete failed:', err?.message || err)
 +      res = { ok: false, reason: String(err?.message || err) }
 +    }
++    if (res?.ok !== false) {
++      // 删会话后也广播：打开的窗口若还显示这个会话就重载（会提示不存在）
++      notifyConversationChanged(conversationId, 'syncMessages')
++    }
 +    relay?.sendChat(
 +      JSON.stringify({
 +        __relayConversationActionResult: {
@@ -1249,6 +1346,9 @@ index 0000000..c31f213
 +      rwarn('[relay] conversation rename failed:', err?.message || err)
 +      res = { ok: false, reason: String(err?.message || err) }
 +    }
++    if (res?.ok !== false) {
++      notifyConversationChanged(conversationId, 'syncTitle', { title: res.title || title })
++    }
 +    relay?.sendChat(
 +      JSON.stringify({
 +        __relayConversationActionResult: {
@@ -1274,6 +1374,11 @@ index 0000000..c31f213
 +    } catch (err) {
 +      rwarn('[relay] conversation messages delete failed:', err?.message || err)
 +      res = { ok: false, reason: String(err?.message || err) }
++    }
++    if (res?.ok !== false) {
++      // 让电脑端已经打开这个会话的窗口按磁盘最新数据刷新，
++      // 否则手机删了，电脑端界面还留着旧消息。
++      notifyConversationChanged(conversationId, 'syncMessages')
 +    }
 +    relay?.sendChat(
 +      JSON.stringify({
@@ -2357,7 +2462,7 @@ index 0000000..1e9ef37
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..12cab0f
+index 0000000..a829265
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2369,8 +2474,8 @@ index 0000000..12cab0f
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.6.1';
-+export const RELAY_VERSION_CODE = 11;
++export const RELAY_VERSION = '1.7.0';
++export const RELAY_VERSION_CODE = 20;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -2770,10 +2875,10 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..f513c7e 100644
+index 6bb1113..4c4ac1f 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -741,9 +741,148 @@ const normalizeWindowEventPayload = (input) => {
+@@ -741,9 +741,173 @@ const normalizeWindowEventPayload = (input) => {
      return input.payload;
    }
  
@@ -2912,6 +3017,31 @@ index 6bb1113..f513c7e 100644
 +      return;
 +    }
 +
++    if (action === 'syncMessages') {
++      // 手机端批量删除/外部改库后，让本窗口按磁盘最新数据重载。
++      // 只处理当前这个会话；不匹配就不动，避免把其它窗口误刷新。
++      const wantId = String(cmd.conversationId || '');
++      if (wantId && String(currentConversationStorage.value?.conversationId || '') !== wantId) {
++        reply(false, { reason: 'conversation_mismatch' });
++        return;
++      }
++      const okReload = await reloadConversationWindowFromStore({ activeOnly: true, pageSize: 5000 });
++      reply(!!okReload, { reason: okReload ? '' : 'reload_failed' });
++      return;
++    }
++
++    if (action === 'syncTitle') {
++      const title = String(cmd.title || '');
++      if (currentConversationStorage.value) {
++        currentConversationStorage.value = {
++          ...currentConversationStorage.value,
++          title: title || currentConversationStorage.value.title
++        };
++      }
++      reply(true);
++      return;
++    }
++
 +    reply(false, { reason: 'unknown_action' });
 +  } catch (err) {
 +    relayWarn('[relay] command failed:', action, err);
@@ -2922,7 +3052,7 @@ index 6bb1113..f513c7e 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -759,6 +898,35 @@ const flushPendingWindowPayloadQueue = async () => {
+@@ -759,6 +923,35 @@ const flushPendingWindowPayloadQueue = async () => {
  };
  
  
@@ -2958,7 +3088,7 @@ index 6bb1113..f513c7e 100644
  const handleAppendMessageEvent = async (data, options = {}) => {
    if (!data || !ensureConversationWriteAccess(true)) return;
  
-@@ -769,6 +937,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -769,6 +962,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -2982,7 +3112,7 @@ index 6bb1113..f513c7e 100644
      return;
    }
  
-@@ -790,7 +975,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -790,7 +1000,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: multilineText });
@@ -2993,7 +3123,7 @@ index 6bb1113..f513c7e 100644
      }
    } else if (data.type === "over" && data.payload) {
      const overText = String(data.payload);
-@@ -799,7 +986,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -799,7 +1011,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: overText });
@@ -3004,7 +3134,7 @@ index 6bb1113..f513c7e 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3046,7 +3235,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3046,7 +3260,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -3021,7 +3151,7 @@ index 6bb1113..f513c7e 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5687,7 +5884,18 @@ onMounted(async () => {
+@@ -5687,7 +5909,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -3041,7 +3171,7 @@ index 6bb1113..f513c7e 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10564,194 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10589,194 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };

@@ -52,10 +52,24 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          widget.conversation.title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              widget.conversation.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 16),
+            ),
+            if (widget.conversation.assistantName.isNotEmpty)
+              Text(
+                '助手：${widget.conversation.assistantName}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Colors.white54),
+              ),
+          ],
         ),
         leading: _selecting
             ? IconButton(
