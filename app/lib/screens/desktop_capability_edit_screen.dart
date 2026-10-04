@@ -32,6 +32,14 @@ List<_ProviderView> _groupProviders(Capabilities caps) {
   ];
 }
 
+
+String _kindTitle(CapabilityKind k) => switch (k) {
+      CapabilityKind.prompts => '助手',
+      CapabilityKind.models => '模型',
+      CapabilityKind.mcp => 'MCP 工具',
+      CapabilityKind.skills => 'Skill 技能',
+    };
+
 /// 电脑端能力的**编辑**页。
 ///
 /// 以前手机上这四类只能看，想改必须到电脑上。现在对齐电脑端设置页：
@@ -101,8 +109,8 @@ class _DesktopCapabilityEditPageState extends State<DesktopCapabilityEditPage> {
         final p = id == null ? null : caps.prompts.where((e) => e.key == id).firstOrNull;
         _name.text = p?.label ?? '';
         _prompt.text = '';
-        _model = p?.model.isNotEmpty == true ? p.model : null;
-        _effort = p?.reasoningEffort.isNotEmpty == true ? p.reasoningEffort : 'default';
+        _model = (p?.model.isNotEmpty ?? false) ? p!.model : null;
+        _effort = (p?.reasoningEffort.isNotEmpty ?? false) ? p!.reasoningEffort : 'default';
         _mcp = p?.mcp.toSet() ?? {};
         _skills = p?.skills.toSet() ?? {};
         _enable = true;
@@ -121,7 +129,7 @@ class _DesktopCapabilityEditPageState extends State<DesktopCapabilityEditPage> {
         _command.text = m?.command ?? '';
         _url.text = m?.url ?? '';
         _mcpType = (m?.type.isNotEmpty ?? false) ? m!.type : 'stdio';
-        _argsText.text = (m?.args ?? []).join(' ');
+        _argsText.text = '';
         _enable = m?.enabled ?? true;
         break;
       case CapabilityKind.skills:
@@ -138,7 +146,7 @@ class _DesktopCapabilityEditPageState extends State<DesktopCapabilityEditPage> {
     final state = context.watch<AppState>();
     _fillOnce(state);
     final editing = widget.editId != null;
-    final title = '${editing ? "编辑" : "新建"}${widget.kind.title}';
+    final title = '${editing ? "编辑" : "新建"}${_kindTitle(widget.kind)}';
 
     return Scaffold(
       appBar: AppBar(

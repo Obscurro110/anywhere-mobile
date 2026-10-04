@@ -171,7 +171,7 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
           for (final pid in order)
             _Row(
               title: pid,
-              subtitle: (map[pid] ?? []).join('、'),
+              subtitle: (groups[pid] ?? const []).join('、'),
               icon: Icons.cloud_outlined,
               editId: pid,
             ),
