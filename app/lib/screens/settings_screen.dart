@@ -5,6 +5,7 @@ import '../services/app_state.dart';
 import '../widgets/setting_tiles.dart';
 import '../widgets/update_card.dart';
 import 'conversations_screen.dart';
+import 'desktop_capabilities_screen.dart';
 import 'devices_screen.dart';
 import 'relay_settings_screen.dart';
 
@@ -61,6 +62,26 @@ class SettingsPage extends StatelessWidget {
                   : state.peers.map((d) => d.deviceName).join('、'),
               onTap: () => _push(context, const DevicesPage()),
             ),
+            // 电脑端能力的四类，各自一个入口（点进去只显示这一类）
+            ...CapabilityKind.values.map((k) {
+              final caps = state.capabilities;
+              final n = switch (k) {
+                CapabilityKind.prompts => caps.prompts.length,
+                CapabilityKind.models => caps.models.length,
+                CapabilityKind.mcp => caps.mcp.length,
+                CapabilityKind.skills => caps.skills.length,
+              };
+              return SettingTile(
+                icon: k.icon,
+                iconColor: caps.isEmpty
+                    ? Colors.white38
+                    : (n > 0 ? Colors.greenAccent : Colors.white38),
+                title: k.title,
+                value: caps.isEmpty ? '未获取' : k.countText(caps),
+                subtitle: caps.isEmpty ? '点此从电脑端拉取' : k.summary(caps),
+                onTap: () => _push(context, DesktopCapabilityPage(kind: k)),
+              );
+            }),
           ]),
 
           // ---------- 连接 ----------

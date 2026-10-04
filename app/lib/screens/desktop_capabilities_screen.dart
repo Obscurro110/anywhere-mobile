@@ -4,23 +4,73 @@ import 'package:provider/provider.dart';
 import '../core/protocol.dart';
 import '../services/app_state.dart';
 
-/// 「电脑端能力」详情页。
-///
-/// 以前设置页那一行只写「助手 3 · 模型 5 / MCP 2 · Skill 4」——既看不出
-/// 到底有哪些，点一下也只是重新拉一次，没地方看细节。
-/// 这页把电脑端上报的能力**分组展开**，点每一项还能看说明。
-class DesktopCapabilitiesPage extends StatefulWidget {
-  const DesktopCapabilitiesPage({super.key});
-
-  @override
-  State<DesktopCapabilitiesPage> createState() => _DesktopCapabilitiesPageState();
+/// 电脑端能力的**分类**。设置页里每一类一个入口，点进去只看这一类。
+enum CapabilityKind {
+  prompts, // 助手
+  models, // 模型
+  mcp, // MCP 工具
+  skills, // Skill 技能
 }
 
-class _DesktopCapabilitiesPageState extends State<DesktopCapabilitiesPage> {
+extension CapabilityKindInfo on CapabilityKind {
+  String get title => switch (this) {
+        CapabilityKind.prompts => '助手',
+        CapabilityKind.models => '模型',
+        CapabilityKind.mcp => 'MCP 工具',
+        CapabilityKind.skills => 'Skill 技能',
+      };
+
+  IconData get icon => switch (this) {
+        CapabilityKind.prompts => Icons.auto_awesome,
+        CapabilityKind.models => Icons.memory,
+        CapabilityKind.mcp => Icons.extension,
+        CapabilityKind.skills => Icons.psychology,
+      };
+
+  /// 设置页那一行右边的简短计数
+  String countText(Capabilities caps) => switch (this) {
+        CapabilityKind.prompts => '${caps.prompts.length} 个',
+        CapabilityKind.models => '${caps.models.length} 个',
+        CapabilityKind.mcp => '${caps.mcp.length} 个',
+        CapabilityKind.skills => '${caps.skills.length} 个',
+      };
+
+  /// 设置页那一行的副标题（列几个名字，一目了然）
+  String summary(Capabilities caps) {
+    switch (this) {
+      case CapabilityKind.prompts:
+        final names = caps.prompts.map((p) => p.label.isEmpty ? p.key : p.label).take(3).toList();
+        return names.isEmpty ? '电脑端没有配置助手' : names.join('、');
+      case CapabilityKind.models:
+        final names = caps.models.map((m) => m.displayName).take(2).toList();
+        return names.isEmpty ? '电脑端没有配置模型' : names.join('、');
+      case CapabilityKind.mcp:
+        final names = caps.mcp.map((s) => s.label.isEmpty ? s.id : s.label).take(3).toList();
+        return names.isEmpty ? '电脑端没有配置 MCP' : names.join('、');
+      case CapabilityKind.skills:
+        final names = caps.skills.map((k) => k.label.isEmpty ? k.id : k.label).take(3).toList();
+        return names.isEmpty ? '电脑端没有安装 Skill' : names.join('、');
+    }
+  }
+}
+
+/// 电脑端某一类能力的详情页。
+///
+/// 以前是一个页面把所有东西堆在一起，还带个「定时任务」（和 ⋮ 菜单重复）。
+/// 现在按类别拆开，从设置页分别进入；定时任务不在这里，它有自己的页面。
+class DesktopCapabilityPage extends StatefulWidget {
+  final CapabilityKind kind;
+  const DesktopCapabilityPage({super.key, required this.kind});
+
+  @override
+  State<DesktopCapabilityPage> createState() => _DesktopCapabilityPageState();
+}
+
+class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
   @override
   void initState() {
     super.initState();
-    // 进页面就刷新一次，保证看到的是最新的
+    // 进页面刷新一次，保证数据是最新的（能力清单是电脑端主动上报的）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) context.read<AppState>().requestCapabilities();
     });
@@ -30,10 +80,13 @@ class _DesktopCapabilitiesPageState extends State<DesktopCapabilitiesPage> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final caps = state.capabilities;
+    final kind = widget.kind;
+
+    final items = _buildItems(caps, kind);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('电脑端能力'),
+        title: Text(kind.title),
         actions: [
           IconButton(
             tooltip: '重新拉取',
@@ -53,216 +106,133 @@ class _DesktopCapabilitiesPageState extends State<DesktopCapabilitiesPage> {
       body: caps.isEmpty
           ? _EmptyState(onRefresh: state.requestCapabilities)
           : ListView(
-              padding: const EdgeInsets.only(bottom: 28),
+              padding: const EdgeInsets.only(top: 6, bottom: 28),
               children: [
-                _VersionCard(caps: caps),
-                _Section(
-                  icon: Icons.auto_awesome,
-                  title: '助手',
-                  hint: '电脑端「快捷助手」；手机上选哪个就用哪套配置',
-                  count: caps.prompts.length,
-                  children: caps.prompts
-                      .map((p) => _Row(
-                            title: p.label.isEmpty ? p.key : p.label,
-                            subtitle: _promptSummary(p),
-                            icon: Icons.auto_awesome_outlined,
-                          ))
-                      .toList(),
-                ),
-                _Section(
-                  icon: Icons.memory,
-                  title: '模型',
-                  hint: '显示为「服务商|模型名」',
-                  count: caps.models.length,
-                  children: caps.models
-                      .map((m) => _Row(
-                            title: m.displayName,
-                            subtitle: m.value,
-                            icon: Icons.smart_toy_outlined,
-                          ))
-                      .toList(),
-                ),
-                _Section(
-                  icon: Icons.extension,
-                  title: 'MCP 工具',
-                  hint: '电脑端已配置的 MCP 服务',
-                  count: caps.mcp.length,
-                  children: caps.mcp
-                      .map((s) => _Row(
-                            title: s.label.isEmpty ? s.id : s.label,
-                            subtitle: s.summary,
-                            icon: Icons.extension_outlined,
-                            // 每项都能点开看完整说明
-                            details: _mcpDetails(s),
-                          ))
-                      .toList(),
-                ),
-                _Section(
-                  icon: Icons.psychology,
-                  title: 'Skill 技能',
-                  hint: '电脑端 skills 目录里的技能',
-                  count: caps.skills.length,
-                  children: caps.skills
-                      .map((k) => _Row(
-                            title: k.label.isEmpty ? k.id : k.label,
-                            subtitle: k.summary,
-                            icon: Icons.psychology_outlined,
-                            details: _skillDetails(k),
-                          ))
-                      .toList(),
-                ),
-                _Section(
-                  icon: Icons.schedule,
-                  title: '定时任务',
-                  hint: '在「定时任务」页里可以管理',
-                  count: caps.tasks.length,
-                  children: caps.tasks
-                      .map((t) => _Row(
-                            title: t.label.isEmpty ? t.id : t.label,
-                            subtitle: t.enabled ? '已启用' : '已停用',
-                            icon: Icons.schedule_outlined,
-                          ))
-                      .toList(),
-                ),
+                _HintBar(text: _hintFor(kind)),
+                if (items.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(30),
+                    child: Center(
+                      child: Text('这一类电脑端还没上报内容',
+                          style: TextStyle(fontSize: 12.5, color: Colors.white38)),
+                    ),
+                  )
+                else
+                  ...items,
               ],
             ),
     );
   }
 
+  static String _hintFor(CapabilityKind k) => switch (k) {
+        CapabilityKind.prompts => '电脑端「快捷助手」；手机上选哪个就用哪套配置',
+        CapabilityKind.models => '显示为「服务商|模型名」',
+        CapabilityKind.mcp => '电脑端已配置的 MCP 服务，点开看连接方式与工具',
+        CapabilityKind.skills => '电脑端 skills 目录里的技能，点开看说明与可用工具',
+      };
+
+  static List<Widget> _buildItems(Capabilities caps, CapabilityKind kind) {
+    switch (kind) {
+      case CapabilityKind.prompts:
+        return caps.prompts
+            .map((p) => _Row(
+                  title: p.label.isEmpty ? p.key : p.label,
+                  subtitle: _promptSummary(p),
+                  icon: Icons.auto_awesome_outlined,
+                  details: _promptDetails(p),
+                ))
+            .toList();
+
+      case CapabilityKind.models:
+        return caps.models
+            .map((m) => _Row(
+                  title: m.displayName,
+                  subtitle: m.value,
+                  icon: Icons.smart_toy_outlined,
+                ))
+            .toList();
+
+      case CapabilityKind.mcp:
+        return caps.mcp
+            .map((s) => _Row(
+                  title: s.label.isEmpty ? s.id : s.label,
+                  subtitle: s.summary,
+                  icon: Icons.extension_outlined,
+                  details: _mcpDetails(s),
+                ))
+            .toList();
+
+      case CapabilityKind.skills:
+        return caps.skills
+            .map((k) => _Row(
+                  title: k.label.isEmpty ? k.id : k.label,
+                  subtitle: k.summary,
+                  icon: Icons.psychology_outlined,
+                  details: _skillDetails(k),
+                ))
+            .toList();
+    }
+  }
+
   static String _promptSummary(PromptOption p) {
     final bits = <String>[];
-    if (p.model.isNotEmpty) bits.add(_shortModel(p.model));
+    if (p.model.isNotEmpty) {
+      final parts = p.model.split('|');
+      bits.add(parts.length > 1 ? parts[1] : p.model);
+    }
     if (p.mcp.isNotEmpty) bits.add('MCP ${p.mcp.length}');
     if (p.skills.isNotEmpty) bits.add('Skill ${p.skills.length}');
     return bits.isEmpty ? '未限定模型与工具' : bits.join(' · ');
   }
 
-  static String _shortModel(String v) {
-    final parts = v.split('|');
-    return parts.length > 1 ? parts[1] : v;
+  static List<MapEntry<String, String>> _promptDetails(PromptOption p) {
+    return [
+      MapEntry('标识', p.key),
+      if (p.model.isNotEmpty) MapEntry('默认模型', p.model),
+      if (p.reasoningEffort.isNotEmpty) MapEntry('思考预算', p.reasoningEffort),
+      if (p.type.isNotEmpty) MapEntry('类型', p.type),
+      MapEntry('MCP 工具', p.mcp.isEmpty ? '（不限）' : p.mcp.join('、')),
+      MapEntry('Skill 技能', p.skills.isEmpty ? '（不限）' : p.skills.join('、')),
+    ];
   }
 
   static List<MapEntry<String, String>> _mcpDetails(McpOption s) {
     return [
+      MapEntry('标识', s.id),
       if (s.type.isNotEmpty) MapEntry('连接方式', s.type),
       if (s.command.isNotEmpty) MapEntry('命令', s.command),
       if (s.url.isNotEmpty) MapEntry('地址', s.url),
       if (s.argsCount > 0) MapEntry('参数个数', '${s.argsCount}'),
       if (s.toolCount > 0) MapEntry('工具个数', '${s.toolCount}'),
       MapEntry('是否内置', s.builtin ? '是' : '否'),
-      MapEntry('标识', s.id),
+      MapEntry('当前状态', s.enabled ? '已启用' : '已停用'),
       if (s.description.isNotEmpty) MapEntry('说明', s.description),
     ];
   }
 
   static List<MapEntry<String, String>> _skillDetails(SkillOption k) {
     return [
+      MapEntry('标识', k.id),
       if (k.description.isNotEmpty) MapEntry('说明', k.description),
       if (k.context.isNotEmpty) MapEntry('上下文', k.context),
-      if (k.allowedTools.isNotEmpty) MapEntry('可用工具', k.allowedTools.join('、')),
+      MapEntry('可用工具',
+          k.allowedTools.isEmpty ? '（不限）' : k.allowedTools.join('、')),
       MapEntry('可手动调用', k.userInvocable ? '是' : '否'),
-      MapEntry('状态', k.disabled ? '已停用' : '已启用'),
-      MapEntry('标识', k.id),
+      MapEntry('当前状态', k.disabled ? '已停用' : '已启用'),
     ];
   }
 }
 
-class _VersionCard extends StatelessWidget {
-  final Capabilities caps;
-  const _VersionCard({required this.caps});
+class _HintBar extends StatelessWidget {
+  final String text;
+  const _HintBar({required this.text});
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          children: [
-            const Icon(Icons.desktop_windows_outlined, color: Colors.lightBlueAccent),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('电脑端已连接',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 3),
-                  Text(
-                    '互通版本 ${caps.desktopVersion.isEmpty ? "未知" : caps.desktopVersion}'
-                    '${caps.upstreamVersion.isEmpty ? "" : "  ·  主程序 ${caps.upstreamVersion}"}',
-                    style: const TextStyle(fontSize: 12, color: Colors.white54),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Section extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String hint;
-  final int count;
-  final List<Widget> children;
-
-  const _Section({
-    required this.icon,
-    required this.title,
-    required this.hint,
-    required this.count,
-    required this.children,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 6),
-            child: Row(
-              children: [
-                Icon(icon, size: 17, color: Colors.lightBlueAccent),
-                const SizedBox(width: 8),
-                Text(title,
-                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: Colors.white10,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text('$count',
-                      style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                ),
-                const Spacer(),
-                Flexible(
-                  child: Text(hint,
-                      textAlign: TextAlign.right,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 10.5, color: Colors.white30)),
-                ),
-              ],
-            ),
-          ),
-          if (children.isEmpty)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(14, 0, 14, 14),
-              child: Text('（空）', style: TextStyle(fontSize: 12, color: Colors.white30)),
-            )
-          else
-            ...children,
-        ],
-      ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+      child: Text(text,
+          style: const TextStyle(fontSize: 11.5, color: Colors.white38, height: 1.4)),
     );
   }
 }
@@ -285,16 +255,17 @@ class _Row extends StatelessWidget {
     final hasDetails = details != null && details!.isNotEmpty;
     return ListTile(
       dense: true,
-      leading: Icon(icon, size: 17, color: Colors.white38),
+      leading: Icon(icon, size: 18, color: Colors.white38),
       title: Text(title, style: const TextStyle(fontSize: 13.5)),
       subtitle: subtitle.isEmpty
           ? null
           : Text(subtitle,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11.5, color: Colors.white54)),
       trailing: hasDetails
-          ? const Icon(Icons.chevron_right, size: 17, color: Colors.white24)
+          ? const Icon(Icons.chevron_right, size: 18, color: Colors.white24)
           : null,
-      // 有详情才能点进去 —— 点开是一个纯展示的弹层
       onTap: hasDetails ? () => _showDetails(context, title, details!) : null,
     );
   }
@@ -317,8 +288,7 @@ class _Row extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                 child: Text(title,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 15)),
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
               ),
               Flexible(
                 child: ListView(
