@@ -1818,20 +1818,27 @@ async function routePhoneChat(msg) {
   if (!text) return
   const relayTo = to
   const opts = msg?.options && typeof msg.options === 'object' ? msg.options : null
+  // 手机明确说了「我在哪个会话里」—— 必须投递到那个会话，不能自作主张
+  const wantConvId = String(msg?.conversationId ?? '').trim()
 
   // 手机切换了「快捷助手」→ 换一个 promptKey 承载这个会话
+  //
+  // 注意：只有**通用手机窗口**（key='phone'）才需要销毁重建。
+  // 已经绑定在某个电脑端会话上的窗口绝不能销毁 —— 那个会话有自己的助手，
+  // 销毁它等于把用户正在聊的会话窗口关掉，表现就是「对话和助手没有对应」。
   if (opts?.promptKey && opts.promptKey !== phonePromptKey) {
     phonePromptKey = opts.promptKey
-    // 关掉旧的手机窗口，让新助手用新的配置开一个新会话
-    if (isWindowAlive(phoneWindowId)) {
-      try {
-        const w = ctx.getWindowByRef(phoneWindowId)
-        w?.destroy?.()
-      } catch (err) {
-        rwarn('[relay] destroy old phone window failed:', err?.message || err)
+    if (phoneWindowKey === 'phone') {
+      if (isWindowAlive(phoneWindowId)) {
+        try {
+          const w = ctx.getWindowByRef(phoneWindowId)
+          w?.destroy?.()
+        } catch (err) {
+          rwarn('[relay] destroy old phone window failed:', err?.message || err)
+        }
       }
+      phoneWindowId = null
     }
-    phoneWindowId = null
   }
 
   const relayFields = {
@@ -1840,6 +1847,85 @@ async function routePhoneChat(msg) {
     // 手机就能精确把「电脑端位置」挂到对应气泡上（自己发的消息也能删）。
     __relayClientMsgId: msg?.__relayClientMsgId || '',
     ...(opts ? { __relayOptions: opts } : {})
+  }
+
+  // 0) 手机指定了会话 → 必须让那个会话的窗口来处理这条消息。
+  //
+  // 以前这里完全忽略 msg.conversationId，只按「当前手机窗口」派发：
+  // 手机以为自己在会话 X 里聊，电脑端却把消息塞进了通用「手机」会话，
+  // 回复也落在别处 —— 两边对不上，就是用户说的「对话和助手没有对应」。
+  if (wantConvId) {
+    const alreadyBound =
+      isWindowAlive(phoneWindowId) && phoneWindowKey === `conv:${wantConvId}`
+
+    if (!alreadyBound) {
+      // 当前窗口不是目标会话：先关掉/解绑，再打开目标会话
+      if (isWindowAlive(phoneWindowId)) {
+        try {
+          ctx.getWindowByRef(phoneWindowId)?.destroy?.()
+        } catch (err) {
+          rwarn('[relay] destroy window before switching conversation failed:', err?.message || err)
+        }
+        if (typeof phoneWindowKey === 'string' && phoneWindowKey.startsWith('conv:')) {
+          convWindows.delete(phoneWindowKey.slice(5))
+        }
+      }
+      phoneWindowId = null
+      phoneWindowKey = 'phone'
+
+      let opened = null
+      try {
+        opened = await openPhoneConversation(wantConvId, relayTo)
+      } catch (err) {
+        rwarn('[relay] open conversation for phone message failed:', err?.message || err)
+      }
+      if (!opened?.ok) {
+        // 明确回一条失败，别让手机一直等（手机会提示"电脑端找不到这个会话"）
+        relay?.sendChat(
+          JSON.stringify({
+            __relayConversationOpen: {
+              ok: false,
+              conversationId: wantConvId,
+              reason: opened?.reason || 'open_failed'
+            }
+          }),
+          { role: 'conversation-open-result', to: relayTo }
+        )
+        return
+      }
+    }
+
+    const targetWin = convWindows.get(wantConvId) || phoneWindowId
+    if (!targetWin || !isWindowAlive(targetWin)) {
+      rwarn('[relay] conversation window missing after open; conv =', wantConvId)
+      relay?.sendChat(
+        JSON.stringify({
+          __relayConversationOpen: {
+            ok: false,
+            conversationId: wantConvId,
+            reason: 'open_window_failed'
+          }
+        }),
+        { role: 'conversation-open-result', to: relayTo }
+      )
+      return
+    }
+
+    try {
+      // 窗口刚建好时 payload 会被排队，bootstrap 完成后自动冲刷，不会丢
+      ctx.dispatchWindowEvent(
+        {
+          event: 'relay:incoming',
+          payload: { type: 'multiline-text', payload: text, ...relayFields },
+          target: targetWin
+        },
+        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
+      )
+      rlog('[relay] routed phone message into conversation', wantConvId, 'window', targetWin)
+      return
+    } catch (err) {
+      rwarn('[relay] dispatch to conversation window failed:', err?.message || err)
+    }
   }
 
   // 1) 已有专门的手机窗口 → 定向派发一条窗口事件
@@ -1963,6 +2049,26 @@ function registerIpc() {
 
   ipcMain.handle('relay:sendChat', guard(async (_e, { text, to, role, extra } = {}) => {
     rlog('[relay] <- relay:sendChat  to =', to, ' len =', String(text || '').length)
+
+    // 窗口回传「这条消息落在哪个会话里」时，顺手把手机窗口绑定到那个会话。
+    //
+    // 通用「手机」窗口是新建会话的：开窗时我们还不知道会话 id，
+    // 所以 phoneWindowKey 一直是 'phone'。等窗口把真实 conversationId 报回来，
+    // 就地绑定 —— 否则手机下一条消息（已经带上 conversationId）会被判定成
+    // 「窗口不匹配」，导致销毁再重开窗口，白白闪一下。
+    if (role === 'user-message-meta' && typeof text === 'string' && text) {
+      try {
+        const parsed = JSON.parse(text)
+        const meta = parsed?.__relayUserMessageMeta
+        const cid = String(meta?.conversationId || '').trim()
+        if (cid && phoneWindowId && isWindowAlive(phoneWindowId) && phoneWindowKey === 'phone') {
+          phoneWindowKey = `conv:${cid}`
+          convWindows.set(cid, phoneWindowId)
+          rlog('[relay] bound phone window to conversation from meta:', cid)
+        }
+      } catch (_) {}
+    }
+
     if (!relay?.connected) {
       rwarn('[relay] relay:sendChat rejected: not connected')
       return { ok: false, error: { message: 'relay_not_connected' } }
