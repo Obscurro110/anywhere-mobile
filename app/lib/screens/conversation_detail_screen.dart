@@ -520,9 +520,29 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
     );
     if (ok != true || !mounted) return;
     final state = context.read<AppState>();
+    // 勾选的是 ConvMessage.id（展示 id），但电脑端批量删除要的是
+    // storageId（数据库里的 message_uuid）。用错了会「删了没反应」。
+    final targets = state
+        .messagesOf(widget.conversation.id)
+        .where((m) => _selected.contains(m.id))
+        .map((m) => m.storageId)
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (targets.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('这些消息没有可删除的存储 id（系统消息不能删）')),
+        );
+      }
+      setState(() {
+        _selecting = false;
+        _selected.clear();
+      });
+      return;
+    }
     final sent = state.deleteConversationMessages(
       widget.conversation.id,
-      _selected.toList(),
+      targets,
     );
     if (!mounted) return;
     setState(() {

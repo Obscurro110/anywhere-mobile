@@ -801,6 +801,9 @@ class ConvMessage {
   final String id;
   /// 在电脑端 chat_show 里的下标 —— 「删除这条」要回传它
   final int index;
+  /// 电脑端数据库里的物理消息 id（messages.message_uuid）。
+  /// **批量删除必须用它** —— 用 id 是删不中的（id 只是展示层的）。
+  final String storageId;
   final String role;
   final String text;
   final String time;
@@ -808,6 +811,7 @@ class ConvMessage {
   ConvMessage({
     required this.id,
     this.index = -1,
+    this.storageId = '',
     required this.role,
     required this.text,
     this.time = '',
@@ -823,6 +827,7 @@ class ConvMessage {
   factory ConvMessage.fromJson(Map<String, dynamic> j) => ConvMessage(
         id: j['id'] as String? ?? '',
         index: (j['index'] as num?)?.toInt() ?? -1,
+        storageId: j['storageId'] as String? ?? '',
         role: j['role'] as String? ?? '',
         text: j['text'] as String? ?? '',
         time: j['time'] as String? ?? '',

@@ -304,6 +304,11 @@ class AppState extends ChangeNotifier {
   /// 手动选过之后，就不再被电脑端上报的默认助手覆盖。
   bool _promptTouchedByUser = false;
 
+  /// 用户是不是**主动退出**了电脑端会话。
+  /// 退出之后就不该再被电脑端回传的 conversationId 自动绑回去 ——
+  /// 否则界面会在「退出」和「已绑定」之间来回跳。
+  bool _leftConversationManually = false;
+
   void applyPrompt(String? key, {bool fromUser = true}) {
     if (fromUser) _promptTouchedByUser = true;
     if (key == null || key.isEmpty) {
@@ -357,6 +362,8 @@ class AppState extends ChangeNotifier {
   /// 这里只改绑定，不切历史（当前这些消息本来就属于那个会话）。
   void _bindActiveConversationSilently(String convId, {String title = ''}) {
     if (convId.isEmpty) return;
+    // 用户主动退出过 → 尊重这个选择，不要再自动绑回去
+    if (_leftConversationManually) return;
     if (_activeConversationId == convId) return;
     if (_activeConversationId != null) return; // 已绑定别的会话，不要抢
     _activeConversationId = convId;
@@ -429,6 +436,8 @@ class AppState extends ChangeNotifier {
   /// 回到「手机自建会话」（不再对接着电脑端的某个会话）。
   void leaveDesktopConversation() {
     lastConversationOpen = null;
+    // 记住"是我主动退出的"：之后电脑端回传 conversationId 也不会自动绑回去
+    _leftConversationManually = true;
     _setActiveConversation(null, '');
   }
 
@@ -1214,6 +1223,7 @@ class AppState extends ChangeNotifier {
         // 再加载新会话的记录。直接改 _activeConversationId 会让
         // messages 留在上一个会话，造成「多个对话内容重合」。
         final openPromptKey = r['promptKey']?.toString() ?? '';
+        if (ok) _leftConversationManually = false;
         _setActiveConversation(
           ok ? r['conversationId']?.toString() : null,
           ok ? (r['title']?.toString() ?? '') : '',

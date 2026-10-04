@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..8fee5bd
+index 0000000..3d55289
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2198 @@
+@@ -0,0 +1,2203 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -719,7 +719,12 @@ index 0000000..8fee5bd
 +    if (!text) return
 +    messages.push({
 +      index,
-+      id: String(m.id ?? ''), // assistant 气泡 id，「重新回答」用
++      id: String(m.id ?? ''), // chat_show 展示 id（窗口内删除/重新回答用）
++      // storageId = messages.message_uuid：批量删除时电脑端用这个删。
++      // 注意：不能拿 id 当 storageId —— id 是展示层的，删不中会静默失败
++      //（这正是"手机删了、电脑端没反应"的根因之一）。
++      storageId: String(m.storageId || m.message_uuid || ''),
++      uiStorageId: String(m.uiStorageId || ''),
 +      role,
 +      text,
 +      time: m.completedTimestamp || m.timestamp || ''
@@ -2568,7 +2573,7 @@ index 0000000..1e9ef37
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..1ca0c3b
+index 0000000..02329cb
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2580,8 +2585,8 @@ index 0000000..1ca0c3b
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.1';
-+export const RELAY_VERSION_CODE = 21;
++export const RELAY_VERSION = '1.7.2';
++export const RELAY_VERSION_CODE = 22;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
