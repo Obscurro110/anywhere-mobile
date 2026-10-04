@@ -3,6 +3,7 @@ import crypto from 'node:crypto'
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { serializeError, serializeIpcPayload } from './dataConverter.js'
 import { runTaskById } from './core/task_runner.js'
+import { notifyPhoneConversationsChanged } from './relay/index.js'
 
 const GITHUB_PACKAGE_JSON_URL = 'https://raw.githubusercontent.com/Komorebi-yaodong/anywheredesktop/main/package.json'
 const GITEE_PACKAGE_JSON_URL = 'https://gitee.com/Komorebi-yaodong/anywheredesktop/raw/main/package.json'
@@ -1284,11 +1285,17 @@ handleInvoke('file:isFileTypeSupported', async (_event, fileName = '') => {
 
 
   handleInvoke('conversation:rename', async (_event, input = {}) => {
-    return conversationApi.renameConversation(input)
+    const res = await conversationApi.renameConversation(input)
+    // 电脑端改了会话名 → 主动推手机刷新列表（否则手机一直显示旧标题）
+    try { notifyPhoneConversationsChanged({ renamedId: String(input?.conversationId || '') }) } catch (_) {}
+    return res
   })
 
   handleInvoke('conversation:delete', async (_event, input = {}) => {
-    return conversationApi.deleteConversation(input)
+    const res = await conversationApi.deleteConversation(input)
+    // 电脑端删了会话 → 主动推手机刷新列表（否则手机一直显示已删会话）
+    try { notifyPhoneConversationsChanged({ deletedId: String(input?.conversationId || '') }) } catch (_) {}
+    return res
   })
 
   handleInvoke('conversation:acquireLease', async (_event, input = {}) => {

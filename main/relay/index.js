@@ -2324,3 +2324,37 @@ export function replyToPhone(text, { to = '*' } = {}) {
   if (!relay?.connected) return false
   return relay.sendChat(text, { role: 'assistant', to })
 }
+
+/**
+ * 电脑端会话列表发生变化（增/删/改名）时通知手机刷新列表。
+ *
+ * 之前只有「手机发起的改动」会回推 conversation-action-result，
+ * 电脑端自己删/改会话时手机完全不知道，列表一直显示旧数据（「不同步」）。
+ */
+export function notifyPhoneConversationsChanged(extra = {}) {
+  if (!relay?.connected) return false
+  try {
+    return relay.sendChat(
+      JSON.stringify({ __relayConversationsChanged: { at: Date.now(), ...extra } }),
+      { role: 'conversations-changed', to: '*' }
+    )
+  } catch (err) {
+    rwarn('[relay] notifyPhoneConversationsChanged failed:', err?.message || err)
+    return false
+  }
+}
+
+/** 某个会话里的消息被电脑端删除时，通知手机刷新该会话的消息。 */
+export function notifyPhoneMessagesChanged(conversationId, extra = {}) {
+  const cid = String(conversationId || '').trim()
+  if (!cid || !relay?.connected) return false
+  try {
+    return relay.sendChat(
+      JSON.stringify({ __relayMessagesChanged: { conversationId: cid, at: Date.now(), ...extra } }),
+      { role: 'messages-changed', to: '*' }
+    )
+  } catch (err) {
+    rwarn('[relay] notifyPhoneMessagesChanged failed:', err?.message || err)
+    return false
+  }
+}
