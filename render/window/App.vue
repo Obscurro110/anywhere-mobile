@@ -10628,16 +10628,78 @@ const relayWarn = (...args) => {
 };
 
 /** 从消息对象里抽取纯文本 */
+// 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
+const RELAY_TOOL_TEXT_LIMIT = 800;
+
+/**
+ * 把一条消息转成手机端可读的纯文本。
+ *
+ * ⚠️ 之前只读 content 里的 text —— 工具调用存在独立的 tool_calls 字段里，
+ * 手机端完全看不到（比如 ask_user_choice 的选项卡片、content 为空只有
+ * 工具调用的消息整条消失）。这里把 tool_calls 转成可读文本一并回传。
+ */
+const relayToolCallsText = (m) => {
+  const calls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
+  const parts = [];
+  for (const tc of calls) {
+    if (!tc || typeof tc !== 'object') continue;
+    const name = tc?.function?.name || tc?.name || 'tool';
+    const lines = [`🔧 调用工具 ${name}`];
+    let args = null;
+    const rawArgs = tc?.function?.arguments;
+    if (rawArgs != null) {
+      if (typeof rawArgs === 'string') {
+        try { args = JSON.parse(rawArgs); } catch { args = null; }
+      } else if (typeof rawArgs === 'object') {
+        args = rawArgs;
+      }
+    }
+    if (name === 'ask_user_choice' && args && Array.isArray(args.questions)) {
+      for (const q of args.questions) {
+        if (!q) continue;
+        if (q.question) lines.push(`问题: ${q.question}`);
+        if (Array.isArray(q.options)) {
+          for (const o of q.options) {
+            if (!o) continue;
+            const label = o.label ? String(o.label) : '';
+            const desc = o.description ? ` — ${String(o.description)}` : '';
+            const line = `  • ${label}${desc}`.trimEnd();
+            lines.push(line.length > RELAY_TOOL_TEXT_LIMIT ? line.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : line);
+          }
+        }
+      }
+    } else if (args && typeof args === 'object' && Object.keys(args).length > 0) {
+      let argStr = '';
+      try { argStr = JSON.stringify(args); } catch { argStr = ''; }
+      if (argStr) {
+        lines.push(`参数: ${argStr.length > RELAY_TOOL_TEXT_LIMIT ? argStr.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : argStr}`);
+      }
+    }
+    const result = typeof tc.result === 'string' ? tc.result.trim() : '';
+    if (result) {
+      const r = result.length > RELAY_TOOL_TEXT_LIMIT ? result.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : result;
+      lines.push(`结果: ${r}`);
+    }
+    parts.push(lines.join('\n'));
+  }
+  return parts.join('\n\n');
+};
+
 const relayMessageText = (m) => {
   if (!m) return '';
-  if (typeof m.content === 'string') return m.content;
-  if (Array.isArray(m.content)) {
-    return m.content
+  const parts = [];
+  if (typeof m.content === 'string') {
+    if (m.content.trim()) parts.push(m.content);
+  } else if (Array.isArray(m.content)) {
+    const t = m.content
       .filter((p) => p && p.type === 'text')
       .map((p) => p.text || '')
       .join('');
+    if (t.trim()) parts.push(t);
   }
-  return '';
+  const toolText = relayToolCallsText(m);
+  if (toolText) parts.push(toolText);
+  return parts.join('\n\n');
 };
 
 /** 收到手机消息时，记下"本轮回复要回传给谁" */

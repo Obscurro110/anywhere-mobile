@@ -642,7 +642,8 @@ async function readPhoneConversationMessages(conversationId) {
     if (!m || typeof m !== 'object') return
     const role = String(m.role || '')
     if (role !== 'user' && role !== 'assistant' && role !== 'system') return
-    const text = extractMessageText(m.content)
+    // 用增强版：content + tool_calls 一起转成手机可读文本
+    const text = extractMessagePlainText(m)
     if (!text) return
     messages.push({
       index,
@@ -687,6 +688,78 @@ function extractMessageText(content) {
       .join('')
   }
   return ''
+}
+
+// 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
+const TOOL_TEXT_LIMIT = 800
+
+/**
+ * 把一条消息转成手机端可读的纯文本。
+ *
+ * ⚠️ 之前只读 content 里的 text —— 而工具调用（ask_user_choice / task_write
+ * / MCP 工具等）存在**独立的 tool_calls 字段**里，手机端完全看不到，
+ * 表现就是「APP 显示电脑端的信息不全」：
+ *   · 带 ask_user_choice 卡片的消息，手机上只剩一句话，选项全丢；
+ *   · content 为空、只有工具调用的消息，手机上整条消失。
+ */
+function extractMessagePlainText(m) {
+  if (!m || typeof m !== 'object') return ''
+  const parts = []
+  const contentText = extractMessageText(m.content)
+  if (contentText) parts.push(contentText)
+
+  const calls = Array.isArray(m.tool_calls) ? m.tool_calls : []
+  for (const tc of calls) {
+    if (!tc || typeof tc !== 'object') continue
+    const name = tc?.function?.name || tc?.name || 'tool'
+    const lines = [`🔧 调用工具 ${name}`]
+
+    // 参数：ask_user_choice 渲染成「问题 + 选项」，其它工具给参数摘要
+    let args = null
+    const rawArgs = tc?.function?.arguments
+    if (rawArgs != null) {
+      if (typeof rawArgs === 'string') {
+        try { args = JSON.parse(rawArgs) } catch { args = null }
+      } else if (typeof rawArgs === 'object') {
+        args = rawArgs
+      }
+    }
+    if (name === 'ask_user_choice' && args && Array.isArray(args.questions)) {
+      for (const q of args.questions) {
+        if (!q) continue
+        if (q.question) lines.push(`问题: ${q.question}`)
+        if (Array.isArray(q.options)) {
+          for (const o of q.options) {
+            if (!o) continue
+            const label = o.label ? String(o.label) : ''
+            const desc = o.description ? ` — ${String(o.description)}` : ''
+            const line = `  • ${label}${desc}`.trimEnd()
+            if (line.length > TOOL_TEXT_LIMIT) lines.push(line.slice(0, TOOL_TEXT_LIMIT) + '…')
+            else lines.push(line)
+          }
+        }
+      }
+    } else if (args && typeof args === 'object' && Object.keys(args).length > 0) {
+      let argStr = ''
+      try { argStr = JSON.stringify(args) } catch { argStr = '' }
+      if (argStr) {
+        if (argStr.length > TOOL_TEXT_LIMIT) argStr = argStr.slice(0, TOOL_TEXT_LIMIT) + '…'
+        lines.push(`参数: ${argStr}`)
+      }
+    }
+
+    // 结果（uiToolCall.result 会写回 tool_calls 项上）
+    const result = typeof tc.result === 'string' ? tc.result.trim() : ''
+    if (result) {
+      let r = result
+      if (r.length > TOOL_TEXT_LIMIT) r = r.slice(0, TOOL_TEXT_LIMIT) + '…'
+      lines.push(`结果: ${r}`)
+    }
+
+    parts.push(lines.join('\n'))
+  }
+
+  return parts.join('\n\n')
 }
 
 /** 删除整个会话 */

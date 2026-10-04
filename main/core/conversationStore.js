@@ -1102,9 +1102,25 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
     return withTransaction(db, () => {
       assertConversationWriteLease(db, { holderInstanceId, leaseEpoch })
       const stmt = db.prepare('DELETE FROM messages WHERE message_uuid = ?')
+      // ⚠️ 必须同时删 ui_messages：手机会话详情页读的是 chat_show
+      //（loadUiMessages 直接查 ui_messages 表）。只删 messages 的话，
+      // 重新打开会话时那条消息会“复活”，表现为「删了没反应」。
+      // 电脑端自己删 compaction 时就是两边一起删的，这里保持一致。
+      const uiByMsg = db.prepare('DELETE FROM ui_messages WHERE message_uuid = ?')
+      // 兜底：少数 ui 行没有对应 message_uuid（纯 UI 消息），只能按 ui_uuid 删。
+      // ui_uuid 与 message_uuid 都是 randomUUID，值域不同，不会误伤。
+      const uiByUuid = db.prepare('DELETE FROM ui_messages WHERE ui_uuid = ?')
       let removed = 0
-      for (const id of ids) removed += Number(stmt.run(id).changes) || 0
-      return { ok: true, removed }
+      let uiRemoved = 0
+      for (const id of ids) {
+        removed += Number(stmt.run(id).changes) || 0
+        uiRemoved += Number(uiByMsg.run(id).changes) || 0
+        // 前两步都没命中 → 尝试按 ui_uuid 删（纯 UI 消息）
+        if (removed === 0 && uiRemoved === 0) {
+          uiRemoved += Number(uiByUuid.run(id).changes) || 0
+        }
+      }
+      return { ok: true, removed, uiRemoved }
     })
   } finally { db.close() }
 }
