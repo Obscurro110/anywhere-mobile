@@ -127,11 +127,22 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
       itemBuilder: (context, i) {
         if (i == 0) {
           return Padding(
-            padding: const EdgeInsets.fromLTRB(6, 0, 6, 12),
-            child: Text(
-              '共 ${messages.length} 条消息'
-              '${_selecting ? " · 勾选后可删除" : ""}',
-              style: const TextStyle(fontSize: 12, color: Colors.white38),
+            padding: const EdgeInsets.fromLTRB(6, 2, 6, 12),
+            child: Row(
+              children: [
+                const Icon(Icons.forum_outlined,
+                    size: 13, color: Colors.white38),
+                const SizedBox(width: 6),
+                Text(
+                  '共 ${messages.length} 条消息',
+                  style: const TextStyle(fontSize: 12, color: Colors.white38),
+                ),
+                if (_selecting) ...[
+                  const SizedBox(width: 8),
+                  const Text('· 勾选后可删除',
+                      style: TextStyle(fontSize: 12, color: Colors.lightBlueAccent)),
+                ],
+              ],
             ),
           );
         }
@@ -141,10 +152,114 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
     );
   }
 
+  /// 单条消息：左右气泡 + 头像（只读浏览，尽量接近聊天观感）。
   Widget _messageTile(ConvMessage m) {
     final isUser = m.isUser;
     final isSys = m.isSystem;
     final checked = _selected.contains(m.id);
+
+    // 系统消息：居中一条灰色小字
+    if (isSys) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 340),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: const Color(0xFF232733),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_selecting) ...[
+                  Icon(
+                    checked ? Icons.check_circle : Icons.circle_outlined,
+                    size: 16,
+                    color: checked ? Colors.lightBlueAccent : Colors.white24,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                const Icon(Icons.info_outline, size: 13, color: Colors.white38),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: SelectableText(
+                    m.text,
+                    style: const TextStyle(
+                        fontSize: 12, color: Colors.white54, height: 1.5),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final bubbleColor =
+        isUser ? const Color(0xFF2A3A8F) : const Color(0xFF232838);
+    final borderColor = checked ? Colors.lightBlueAccent : Colors.transparent;
+
+    final avatar = CircleAvatar(
+      radius: 14,
+      backgroundColor:
+          isUser ? Colors.green.shade700 : Colors.indigo.shade400,
+      child: Icon(
+        isUser ? Icons.person : Icons.smart_toy_outlined,
+        size: 16,
+        color: Colors.white,
+      ),
+    );
+
+    final bubble = Container(
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.72,
+      ),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(14),
+          topRight: const Radius.circular(14),
+          bottomLeft: Radius.circular(isUser ? 14 : 4),
+          bottomRight: Radius.circular(isUser ? 4 : 14),
+        ),
+        border: Border.all(color: borderColor, width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                isUser ? '你' : 'AI',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: isUser ? Colors.greenAccent : Colors.lightBlueAccent,
+                ),
+              ),
+              if (m.time.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Text(
+                  m.time.length > 16 ? m.time.substring(0, 16) : m.time,
+                  style: const TextStyle(fontSize: 10, color: Colors.white38),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          // 正文：长会话也完整显示（可选中复制）
+          SelectableText(
+            m.text,
+            style: const TextStyle(
+                fontSize: 14, height: 1.55, color: Colors.white),
+          ),
+        ],
+      ),
+    );
 
     return InkWell(
       onTap: () {
@@ -158,71 +273,70 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
         });
       },
       onLongPress: () => _messageMenu(m),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-        decoration: BoxDecoration(
-          color: isSys
-              ? const Color(0xFF191C24)
-              : (isUser ? const Color(0xFF1E2A22) : const Color(0xFF1B1F2B)),
-          borderRadius: BorderRadius.circular(10),
-          border: checked
-              ? Border.all(color: Colors.lightBlueAccent, width: 1.5)
-              : Border.all(color: Colors.transparent),
-        ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment:
+              isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
           children: [
-            if (_selecting) ...[
-              Icon(
-                checked ? Icons.check_circle : Icons.circle_outlined,
-                size: 18,
-                color: checked ? Colors.lightBlueAccent : Colors.white24,
-              ),
-              const SizedBox(width: 10),
+            if (!isUser) ...[
+              if (_selecting)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6, top: 4),
+                  child: Icon(
+                    checked ? Icons.check_circle : Icons.circle_outlined,
+                    size: 18,
+                    color: checked ? Colors.lightBlueAccent : Colors.white24,
+                  ),
+                ),
+              avatar,
+              const SizedBox(width: 8),
             ],
-            Expanded(
+            Flexible(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: isUser
+                    ? CrossAxisAlignment.end
+                    : CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Text(
-                        isSys ? '系统' : (isUser ? '你' : 'AI'),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: isSys
-                              ? Colors.white38
-                              : (isUser ? Colors.greenAccent : Colors.lightBlueAccent),
+                  bubble,
+                  if (!_selecting)
+                    Align(
+                      alignment: isUser
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
+                      child: TextButton.icon(
+                        style: TextButton.styleFrom(
+                          minimumSize: Size.zero,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 0),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
+                        onPressed: () => _messageMenu(m),
+                        icon: const Icon(Icons.more_horiz,
+                            size: 15, color: Colors.white38),
+                        label: const Text('操作',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.white38)),
                       ),
-                      const Spacer(),
-                      if (m.time.isNotEmpty)
-                        Text(
-                          m.time.length > 16 ? m.time.substring(0, 16) : m.time,
-                          style: const TextStyle(
-                              fontSize: 10, color: Colors.white24),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  SelectableText(
-                    m.text,
-                    style: const TextStyle(
-                        fontSize: 13.5, height: 1.5, color: Colors.white),
-                  ),
+                    ),
                 ],
               ),
             ),
-            // 单条操作入口（选择模式下隐藏，避免误触）
-            if (!_selecting)
-              IconButton(
-                tooltip: '操作',
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.more_vert, size: 18, color: Colors.white38),
-                onPressed: () => _messageMenu(m),
-              ),
+            if (isUser) ...[
+              const SizedBox(width: 8),
+              if (_selecting)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6, top: 4),
+                  child: Icon(
+                    checked ? Icons.check_circle : Icons.circle_outlined,
+                    size: 18,
+                    color: checked ? Colors.lightBlueAccent : Colors.white24,
+                  ),
+                )
+              else
+                avatar,
+            ],
           ],
         ),
       ),

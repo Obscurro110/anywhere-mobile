@@ -252,40 +252,49 @@ class _ConversationsPageState extends State<ConversationsPage> {
                 _delete(context, state, c);
             }
           },
-          // 菜单项只显示图标（不显示汉字），长按有提示
+          // 会话管理菜单：图标 + 汉字（删除仍是红字红图标）
           itemBuilder: (ctx) => [
             if (!isActive)
-              PopupMenuItem(
+              const PopupMenuItem(
                 value: 'open',
-                height: 44,
-                child: Tooltip(
-                  message: '在电脑端打开',
-                  child: const Icon(Icons.open_in_new, size: 20),
+                height: 48,
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.open_in_new, size: 20),
+                  title: Text('在电脑端打开'),
                 ),
               ),
-            PopupMenuItem(
+            const PopupMenuItem(
               value: 'view',
-              height: 44,
-              child: Tooltip(
-                message: '查看对话',
-                child: const Icon(Icons.article_outlined, size: 20),
+              height: 48,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.article_outlined, size: 20),
+                title: Text('查看对话'),
               ),
             ),
-            PopupMenuItem(
+            const PopupMenuItem(
               value: 'rename',
-              height: 44,
-              child: Tooltip(
-                message: '重命名',
-                child: const Icon(Icons.edit_outlined, size: 20),
+              height: 48,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.edit_outlined, size: 20),
+                title: Text('重命名'),
               ),
             ),
-            PopupMenuItem(
+            const PopupMenuItem(
               value: 'delete',
-              height: 44,
-              child: Tooltip(
-                message: '删除会话',
-                child: const Icon(Icons.delete_outline,
+              height: 48,
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.delete_outline,
                     size: 20, color: Colors.redAccent),
+                title: Text('删除会话',
+                    style: TextStyle(color: Colors.redAccent)),
               ),
             ),
           ],

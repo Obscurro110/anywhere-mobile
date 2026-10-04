@@ -135,39 +135,55 @@ class _HomeShellState extends State<HomeShell> {
                   _push(context, const SettingsPage());
               }
             },
-            // 只显示图标（不显示汉字）；「对话中」用小圆点表示，
-            // 定时任务有数量时用角标数字表示。
+            // 右上角菜单：带汉字 + 图标（设置/定时任务这类层级菜单，
+            // 还是汉字更清楚）。「对话中/任务数」用圆点/角标补充。
             itemBuilder: (ctx) => [
               PopupMenuItem(
                 value: 'conv',
                 height: 48,
-                child: Tooltip(
-                  message: '电脑端对话',
-                  child: Badge(
-                    isLabelVisible: state.activeConversationId != null,
-                    smallSize: 7,
-                    child: const Icon(Icons.forum_outlined, size: 22),
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(Icons.forum_outlined, size: 22),
+                      if (state.activeConversationId != null)
+                        const Positioned(
+                          right: -2,
+                          top: -2,
+                          child: CircleAvatar(
+                            radius: 3.5,
+                            backgroundColor: Colors.greenAccent,
+                          ),
+                        ),
+                    ],
                   ),
+                  title: const Text('电脑端对话'),
                 ),
               ),
               PopupMenuItem(
                 value: 'tasks',
                 height: 48,
-                child: Tooltip(
-                  message: '定时任务',
-                  child: Badge(
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Badge(
                     isLabelVisible: state.tasks.isNotEmpty,
                     label: Text('${state.tasks.length}'),
                     child: const Icon(Icons.schedule, size: 22),
                   ),
+                  title: const Text('定时任务'),
                 ),
               ),
               PopupMenuItem(
                 value: 'settings',
                 height: 48,
-                child: Tooltip(
-                  message: '设置',
-                  child: const Icon(Icons.settings_outlined, size: 22),
+                child: const ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.settings_outlined, size: 22),
+                  title: Text('设置'),
                 ),
               ),
             ],

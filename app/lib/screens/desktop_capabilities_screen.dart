@@ -153,7 +153,7 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
                   title: p.label.isEmpty ? p.key : p.label,
                   subtitle: _promptSummary(p),
                   icon: Icons.auto_awesome_outlined,
-                  details: _promptDetails(p),
+                  details: _promptDetails(p, caps),
                   editId: p.key,
                 ))
             .toList();
@@ -166,10 +166,13 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
               .map((p) => _Row(
                     title: p.name.isEmpty ? p.id : p.name,
                     subtitle: [
-                      if (p.modelList.isNotEmpty) '${p.modelList.length} 个模型',
-                      if (p.url.isNotEmpty) p.url,
+                      if (p.modelList.isNotEmpty)
+                        '${p.modelList.length} 个模型 · ${p.modelList.take(2).join('、')}'
+                      else
+                        '暂无模型',
+                      if (p.apiType.isNotEmpty) p.apiType,
                       if (!p.enable) '已停用',
-                      if (p.hasApiKey) '已配置密钥',
+                      if (p.hasApiKey) '密钥已配置',
                     ].join(' · '),
                     icon: Icons.cloud_outlined,
                     editId: p.id,
@@ -217,6 +220,18 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
     }
   }
 
+  /// 把电脑端的「providerId|模型名」显示成「服务商|模型名」；
+  /// 服务商名从模型列表里查（查不到就退回原始值）。
+  static String _modelDisplay(Capabilities caps, String raw) {
+    if (raw.isEmpty) return raw;
+    for (final m in caps.models) {
+      if (m.value == raw) return m.displayName;
+    }
+    final parts = raw.split('|');
+    if (parts.length > 1) return parts[1];
+    return raw;
+  }
+
   static String _promptSummary(PromptOption p) {
     final bits = <String>[];
     if (p.model.isNotEmpty) {
@@ -228,10 +243,12 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
     return bits.isEmpty ? '未限定模型与工具' : bits.join(' · ');
   }
 
-  static List<MapEntry<String, String>> _promptDetails(PromptOption p) {
+  static List<MapEntry<String, String>> _promptDetails(
+      PromptOption p, Capabilities caps) {
     return [
       MapEntry('标识', p.key),
-      if (p.model.isNotEmpty) MapEntry('默认模型', p.model),
+      if (p.model.isNotEmpty)
+        MapEntry('默认模型', _modelDisplay(caps, p.model)),
       if (p.reasoningEffort.isNotEmpty) MapEntry('思考预算', p.reasoningEffort),
       if (p.type.isNotEmpty) MapEntry('类型', p.type),
       MapEntry('MCP 工具', p.mcp.isEmpty ? '（不限）' : p.mcp.join('、')),
@@ -240,17 +257,24 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
   }
 
   static List<MapEntry<String, String>> _mcpDetails(McpOption s) {
-    return [
+    final rows = <MapEntry<String, String>>[
       MapEntry('标识', s.id),
+      if (s.description.isNotEmpty) MapEntry('说明', s.description),
       if (s.type.isNotEmpty) MapEntry('连接方式', s.type),
       if (s.command.isNotEmpty) MapEntry('命令', s.command),
       if (s.url.isNotEmpty) MapEntry('地址', s.url),
-      if (s.argsCount > 0) MapEntry('参数个数', '${s.argsCount}'),
-      if (s.toolCount > 0) MapEntry('工具个数', '${s.toolCount}'),
-      MapEntry('是否内置', s.builtin ? '是' : '否'),
-      MapEntry('当前状态', s.enabled ? '已启用' : '已停用'),
-      if (s.description.isNotEmpty) MapEntry('说明', s.description),
+      if (s.args.isNotEmpty) MapEntry('参数', s.args.join(' ')),
+      if (s.env.isNotEmpty)
+        MapEntry('环境变量', s.env.entries.map((e) => '${e.key}=${e.value}').join('\n')),
+      if (s.headers.isNotEmpty)
+        MapEntry('请求头', s.headers.entries.map((e) => '${e.key}=${e.value}').join('\n')),
+      if (s.authType.isNotEmpty && s.authType != 'none') MapEntry('认证', s.authType),
+      if (s.timeoutSeconds > 0) MapEntry('超时', '${s.timeoutSeconds} 秒'),
+      if (s.tags.isNotEmpty) MapEntry('标签', s.tags.join('、')),
+      if (s.toolCount > 0) MapEntry('工具数', '${s.toolCount}'),
+      MapEntry('状态', s.enabled ? '已启用' : '已停用'),
     ];
+    return rows;
   }
 
   static List<MapEntry<String, String>> _skillDetails(SkillOption k) {

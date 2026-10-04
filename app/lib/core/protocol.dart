@@ -500,10 +500,13 @@ class McpOption {
     this.builtin = false,
   });
 
-  /// 一句话说明，优先用电脑端的描述，没有就按类型兜底
+  /// 一句话说明，优先用电脑端的描述，没有就按类型兜底。
+  /// 内置工具也带上「内置」标记（以前只写「内置工具」，看不出是哪个）。
   String get summary {
+    if (builtin) {
+      return '内置工具' + (description.isNotEmpty ? ' · $description' : '');
+    }
     if (description.isNotEmpty) return description;
-    if (builtin) return '内置工具';
     if (type == 'sse' || url.isNotEmpty) return '远程服务（${url.isEmpty ? "SSE" : url}）';
     if (command.isNotEmpty) return '本地命令：$command';
     return '未填写说明';
