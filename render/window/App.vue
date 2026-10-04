@@ -828,6 +828,22 @@ const handleRelayCommand = async (cmd) => {
       return;
     }
 
+    if (action === 'choiceSubmit') {
+      // 手机上点了 ask_user_choice 的选项 → 交给电脑端正在等待的那个工具。
+      // resolve 后 AI 会基于选择继续生成，最终回复经 watcher 自动回传手机。
+      const toolCallId = String(cmd.toolCallId || '');
+      const answer = cmd.answer;
+      if (!toolCallId || !answer || typeof answer !== 'object') {
+        reply(false, { reason: 'choice_params_required' });
+        return;
+      }
+      // 选择提交后 AI 还要继续生成新一轮回复，先绑回传目标（与 reask 同理）
+      enqueueRelayReply(cmd.relayTo);
+      handleChoiceSubmit(toolCallId, answer);
+      reply(true);
+      return;
+    }
+
     if (action === 'deleteMessage') {
       // 重要：**不能**直接用手机传来的 index。
       // 手机那个 index 是从数据库读出来的（openConversation → loadUiMessages，
@@ -10631,6 +10647,19 @@ const relayWarn = (...args) => {
 // 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
 const RELAY_TOOL_TEXT_LIMIT = 800;
 
+// 工具调用状态 -> 手机可读中文标签（同步电脑端气泡里的运行状态）
+const relayToolStatusLabel = (s) => {
+  switch (s) {
+    case 'waiting': return '等待批准';
+    case 'approved': return '已批准';
+    case 'executing': return '执行中';
+    case 'finished': return '已完成';
+    case 'rejected': return '已拒绝';
+    case 'choosing': return '等待选择';
+    default: return '';
+  }
+};
+
 /**
  * 把一条消息转成手机端可读的纯文本。
  *
@@ -10644,9 +10673,14 @@ const relayToolCallsText = (m) => {
   for (const tc of calls) {
     if (!tc || typeof tc !== 'object') continue;
     const name = tc?.function?.name || tc?.name || 'tool';
-    const lines = [`🔧 调用工具 ${name}`];
+    const statusLabel = relayToolStatusLabel(tc?.approvalStatus);
+    const lines = [`🔧 调用工具 ${name}${statusLabel ? ` [${statusLabel}]` : ''}`];
     let args = null;
-    const rawArgs = tc?.function?.arguments;
+    // ⚠️ chat_show 里 tool_calls 项的结构是 { id, name, args, result, approvalStatus }
+    //（见 sendAI 里的 map）—— 参数在**顶层 args**，不在 function.arguments！
+    // 之前只读 function.arguments，拿到 undefined，选项/问题全部丢失，
+    // 手机上只剩「🔧 调用工具 ask_user_choice + 结果」。
+    const rawArgs = tc?.function?.arguments ?? tc?.args;
     if (rawArgs != null) {
       if (typeof rawArgs === 'string') {
         try { args = JSON.parse(rawArgs); } catch { args = null; }
@@ -10836,6 +10870,26 @@ watch(
       relayWarn('[relay] assistant text empty; content =', JSON.stringify(last.content)?.slice(0, 300));
       return;
     }
+    // 若这条消息正在等用户选择（ask_user_choice），把选项结构化传给手机，
+    // 手机气泡下可以直接渲染可点选的选项按钮（提交走 choiceSubmit 命令）。
+    let relayChoice = null;
+    if (Array.isArray(last.tool_calls)) {
+      const pending = last.tool_calls.find(
+        (tc) =>
+          tc &&
+          tc.approvalStatus === 'choosing' &&
+          tc.choiceData &&
+          Array.isArray(tc.choiceData.questions) &&
+          tc.choiceData.questions.length > 0
+      );
+      if (pending) {
+        relayChoice = {
+          toolCallId: String(pending.id ?? ''),
+          questions: pending.choiceData.questions
+        };
+      }
+    }
+
     relayLastSentAssistantId = last.id;
     relayLog('[relay] replying to phone. to =', to, 'len =', text.length);
     try {
@@ -10852,7 +10906,8 @@ watch(
             index: assistantIndex,
             conversationId: currentConversationStorage.value?.conversationId || '',
             modelTag: getCurrentAssistantDisplayName() || ''
-          }
+          },
+          ...(relayChoice ? { __relayChoice: relayChoice } : {})
         }
       });
       relayLog('[relay] reply sent ok');

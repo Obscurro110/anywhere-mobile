@@ -693,6 +693,19 @@ function extractMessageText(content) {
 // 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
 const TOOL_TEXT_LIMIT = 800
 
+// 工具调用状态 -> 手机可读中文标签（同步电脑端气泡里的运行状态）
+function toolStatusLabel(s) {
+  switch (s) {
+    case 'waiting': return '等待批准'
+    case 'approved': return '已批准'
+    case 'executing': return '执行中'
+    case 'finished': return '已完成'
+    case 'rejected': return '已拒绝'
+    case 'choosing': return '等待选择'
+    default: return ''
+  }
+}
+
 /**
  * 把一条消息转成手机端可读的纯文本。
  *
@@ -712,11 +725,14 @@ function extractMessagePlainText(m) {
   for (const tc of calls) {
     if (!tc || typeof tc !== 'object') continue
     const name = tc?.function?.name || tc?.name || 'tool'
-    const lines = [`🔧 调用工具 ${name}`]
+    const statusLabel = toolStatusLabel(tc?.approvalStatus)
+    const lines = [`🔧 调用工具 ${name}${statusLabel ? ` [${statusLabel}]` : ''}`]
 
     // 参数：ask_user_choice 渲染成「问题 + 选项」，其它工具给参数摘要
     let args = null
-    const rawArgs = tc?.function?.arguments
+    // ⚠️ chat_show 里 tool_calls 项是 { id, name, args, result, ... }：
+    // 参数在顶层 args，不在 function.arguments（详见 App.vue relayToolCallsText）
+    const rawArgs = tc?.function?.arguments ?? tc?.args
     if (rawArgs != null) {
       if (typeof rawArgs === 'string') {
         try { args = JSON.parse(rawArgs) } catch { args = null }
@@ -1491,7 +1507,10 @@ async function routePhoneChat(msg) {
             reqId,
             relayTo: to,
             messageId: msg?.messageId,
-            index: msg?.index
+            index: msg?.index,
+            // choiceSubmit（手机上点 ask_user_choice 的选项）要透传这两个
+            toolCallId: msg?.toolCallId,
+            answer: msg?.answer
           },
           target: targetWin
         },
