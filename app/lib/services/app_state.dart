@@ -185,17 +185,47 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    // 先把旧会话的记录落盘，再切到新会话的记录
+    // ⚠️ 关键：**同步**切换状态，不能等 await 之后再改。
+    //
+    // 以前是 `await _persistHistory()` 之后才改 _activeConversationId，
+    // 这段异步窗口期里：
+    //   · 新到的回复仍被算到**旧会话**头上；
+    //   · 别处触发的 _persistHistory() 会把内容写进**旧 key**；
+    //   · 用户快速连点两个会话时，两个异步闭包交错执行，
+    //     最终可能「id 是 A、内容却是 B」——就是"多个对话内容重合"。
+    // 现在先把旧会话内容快照下来，立刻切 id 并清空 messages，
+    // 落盘和加载都基于快照/新 id，天然不会串。
+    final oldId = _activeConversationId;
+    final snapshot = messages.where((m) => !m.pending).toList();
+
+    _activeConversationId = id;
+    _activeConversationTitle = title;
+    messages.clear(); // 立刻清空，避免旧会话内容残留在界面上
+    unawaited(_persistActiveConversation());
+    notifyListeners();
+
     unawaited(() async {
-      await _persistHistory();
-      _activeConversationId = id;
-      _activeConversationTitle = title;
-      await _persistActiveConversation();
+      // 旧会话的记录用**快照 + 旧 key** 落盘（此时 _activeConversationId 已变）
+      await _persistMessagesTo(oldId, snapshot);
       await _switchHistoryTo(id);
       // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
       notifyListeners();
     }());
-    notifyListeners();
+  }
+
+  /// 把指定的一份消息写到**指定会话**的 key（不依赖当前 _activeConversationId）。
+  Future<void> _persistMessagesTo(String? conversationId, List<ChatMessage> msgs) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final keep = msgs.where((m) => !m.pending).toList();
+      final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
+      await p.setString(
+        _historyKey(conversationId),
+        jsonEncode(trimmed.map((e) => e.toJson()).toList()),
+      );
+    } catch (e) {
+      debugPrint('[AppState] _persistMessagesTo failed: $e');
+    }
   }
 
   void _bind() {
@@ -1456,16 +1486,34 @@ class AppState extends ChangeNotifier {
 
   void _handleDeliveryStatus(Envelope env) {
     final st = env.payload?['status'];
-    if (st == 'undelivered') {
-      debugPrint('[AppState] message ${env.id} undelivered');
-      // 标记**最早**那个 pending 为失败，让界面停止转圈
-      // （同样不能只认最后一条，否则前面的 pending 会一直转）
-      final pi = _firstPendingIndex();
-      if (pi >= 0) {
-        messages[pi] = messages[pi]
-            .copyWith(text: '⚠️ 电脑端未收到（可能未启动或未连接）', pending: false);
-        _persistHistory();
+    if (st != 'undelivered') return;
+
+    // 中继可能把"哪条没送到"放在不同字段里，逐个试；
+    // 都没有就退回用 envelope 自己的 id。
+    final pl = env.payload ?? const {};
+    final candidates = <String>[
+      for (final k in ['messageId', 'id', 'originalId', 'clientMsgId', '__relayClientMsgId'])
+        if (pl[k] != null) pl[k].toString(),
+      env.id,
+    ].where((x) => x.isNotEmpty).toList();
+
+    // 1) 先按 id 精确找到对应的 pending 气泡
+    var pi = -1;
+    for (final cid in candidates) {
+      final idx = messages.indexWhere((m) => m.id == 'pending-$cid');
+      if (idx >= 0) {
+        pi = idx;
+        break;
       }
+    }
+    // 2) 找不到就退回「最早那个 pending」——总比一直转圈好
+    if (pi < 0) pi = _firstPendingIndex();
+
+    debugPrint('[AppState] undelivered; candidates=$candidates hit=$pi');
+    if (pi >= 0) {
+      messages[pi] = messages[pi]
+          .copyWith(text: '⚠️ 电脑端未收到（可能未启动或未连接）', pending: false);
+      _persistHistory();
     }
   }
 
@@ -1501,8 +1549,12 @@ class AppState extends ChangeNotifier {
     ));
 
     // Optimistic "thinking" bubble — replaced when the desktop answers.
+    //
+    // id 用 'pending-<envelope id>' 而不是随机 uuid：这样中继回
+    // delivery_status(undelivered) 时，能**精确**找到是哪一个气泡失败，
+    // 而不是随便挑一个（连发多条时会认错）。
     messages.add(ChatMessage(
-      id: 'pending-${_uuid.v4()}',
+      id: 'pending-${env.id}',
       role: ChatRole.assistant,
       text: '',
       time: DateTime.now(),
@@ -1515,11 +1567,11 @@ class AppState extends ChangeNotifier {
 
     final ok = _client.send(env);
     if (!ok) {
-      // 没发出去就把刚加的这个 pending 摘掉（它是排在最后的那条）
-      final lastIdx = messages.length - 1;
-      if (lastIdx >= 0 && messages[lastIdx].pending) {
-        messages.removeAt(lastIdx);
-      }
+      // 没发出去：把刚加的 pending 和**用户气泡**一起撤掉。
+      // 以前只摘 pending，用户气泡留在列表里看起来像"已发送"，
+      // 但其实根本没出去（输入框文字仍在，用户可以直接重发）。
+      messages.removeWhere((m) => m.id == 'pending-${env.id}' || m.id == env.id);
+      _persistHistory();
       notifyListeners();
     }
     return ok;
@@ -1583,8 +1635,19 @@ class AppState extends ChangeNotifier {
 
   /// 切换到某个会话时，把 messages 换成**那个会话自己**的记录
   Future<void> _switchHistoryTo(String? conversationId) async {
+    // await 之前先记住当前长度：getInstance() 是异步的，
+    // 这期间如果正好收到一条新消息（已被加进 messages），
+    // 下面 clear() 会把它冲掉 —— 表现就是「消息凭空消失」。
+    final before = messages.length;
+
     final p = await SharedPreferences.getInstance();
     final raw = p.getString(_historyKey(conversationId));
+
+    // await 期间新到的消息，稍后补回去（按 id 去重，避免和磁盘里的重复）
+    final arrived = messages.length > before
+        ? messages.sublist(before).toList()
+        : <ChatMessage>[];
+
     messages.clear();
     if (raw != null) {
       try {
@@ -1593,6 +1656,10 @@ class AppState extends ChangeNotifier {
             .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
             .where((m) => !m.pending));
       } catch (_) {}
+    }
+    if (arrived.isNotEmpty) {
+      final have = messages.map((m) => m.id).toSet();
+      messages.addAll(arrived.where((m) => !have.contains(m.id)));
     }
   }
 

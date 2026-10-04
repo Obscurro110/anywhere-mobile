@@ -380,24 +380,31 @@ class _ConversationsPageState extends State<ConversationsPage> {
   Future<void> _rename(
       BuildContext context, AppState state, ConversationOption c) async {
     final ctrl = TextEditingController(text: c.title);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('重命名会话'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(border: OutlineInputBorder()),
+    String? name;
+    try {
+      name = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('重命名会话'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(border: OutlineInputBorder()),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+                child: const Text('确定')),
+          ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-              child: const Text('确定')),
-        ],
-      ),
-    );
+      );
+    } finally {
+      // 必须释放：每次打开重命名框都会新建一个控制器，
+      // 不 dispose 会一直累积（对话框中途 return 也一样漏）。
+      ctrl.dispose();
+    }
     if (name == null || name.isEmpty || name == c.title) return;
     if (!context.mounted) return;
     final ok = state.renameConversationOnDesktop(c.id, name);
