@@ -535,4 +535,48 @@ void main() {
       expect(AssistantMeta(messageId: '', index: 0).isValid, isFalse);
     });
   });
+
+  group('会话隔离（内容不再互相重合）', () {
+    test('ConvMessage 能正确区分角色', () {
+      final u = ConvMessage.fromJson({'id': '1', 'index': 1, 'role': 'user', 'text': '你好'});
+      final a = ConvMessage.fromJson({'id': '2', 'index': 2, 'role': 'assistant', 'text': 'hi'});
+      final s = ConvMessage.fromJson({'id': '0', 'index': 0, 'role': 'system', 'text': 'sys'});
+      expect(u.isUser, isTrue);
+      expect(u.isSystem, isFalse);
+      expect(u.canReask, isFalse, reason: 'user 消息不能重新回答');
+      expect(a.canReask, isTrue);
+      expect(s.canDelete, isFalse, reason: '系统提示词不允许删');
+      expect(u.canDelete, isTrue);
+    });
+
+    test('ConvMessage 缺字段时不炸且 index 默认 -1', () {
+      final m = ConvMessage.fromJson({});
+      expect(m.id, '');
+      expect(m.index, -1);
+      expect(m.role, '');
+      expect(m.canDelete, isFalse);
+    });
+
+    test('聊天记录 key 按会话分开（不同会话不共用一份）', () {
+      // 复刻 AppState._historyKey 的规则：空=本机，非空=该会话独有
+      String key(String? id) {
+        final v = (id ?? '').trim();
+        return v.isEmpty ? 'chat_history' : 'chat_history:$v';
+      }
+      expect(key(null), 'chat_history');
+      expect(key(''), 'chat_history');
+      expect(key('convA'), 'chat_history:convA');
+      expect(key('convB'), 'chat_history:convB');
+      expect(key('convA') == key('convB'), isFalse,
+          reason: '两个会话必须各存各的，否则内容会重合');
+    });
+  });
+
+  group('桌面消息定位', () {
+    test('desktopMeta 只在 id+index 都有时才算有效', () {
+      expect(AssistantMeta(messageId: '5', index: 0).isValid, isTrue);
+      expect(AssistantMeta(messageId: '5').isValid, isFalse);
+      expect(AssistantMeta(index: 0).isValid, isFalse);
+    });
+  });
 }

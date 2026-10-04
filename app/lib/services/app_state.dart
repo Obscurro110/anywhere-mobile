@@ -55,9 +55,46 @@ class AppState extends ChangeNotifier {
   List<String> conversationProjects = const [];
 
   /// 某个会话的消息（会话详情页看）
-  List<ConvMessage> conversationMessages = const [];
-  bool loadingConversationMessages = false;
-  String? conversationMessagesError;
+  /// 每个会话各自一份消息列表，按 conversationId 隔离。
+  ///
+  /// 以前是一个全局单例 `conversationMessages`：打开会话 A 再打开 B 时，
+  /// 谁先请求谁后到达都会互相覆盖 —— 表现就是「多个会话内容重合」，
+  /// 甚至看到的是另一个会话的内容（比如只显示 AI 回复的那个）。
+  final Map<String, List<ConvMessage>> _convMessagesByConv = {};
+
+  /// 正在加载中的会话 id 集合（每个会话各自的 loading）
+  final Set<String> _convMessagesLoading = {};
+
+  /// 每个会话各自的错误信息
+  final Map<String, String> _convMessagesError = {};
+
+  /// 当前「正在查看」的会话 id。详情页进来时设置它。
+  ///
+  /// 这样列表 / loading / error 都跟着当前会话走，
+  /// 而不需要一个全局字段被所有会话抢着写。
+  String? _viewingConversationId;
+
+  /// 当前正在查看的会话 id
+  String? get viewingConversationId => _viewingConversationId;
+
+  /// 当前查看会话的消息列表（没有就空列表）
+  List<ConvMessage> get conversationMessages =>
+      _viewingConversationId == null
+          ? const []
+          : (_convMessagesByConv[_viewingConversationId!] ?? const []);
+
+  /// 当前查看会话是否在加载
+  bool get loadingConversationMessages =>
+      _viewingConversationId != null &&
+      _convMessagesLoading.contains(_viewingConversationId);
+
+  /// 当前查看会话的错误（没有就 null）
+  String? get conversationMessagesError =>
+      _viewingConversationId == null ? null : _convMessagesError[_viewingConversationId];
+
+  /// 某个会话的消息（详情页可显式按 id 取，避免依赖「当前查看」的时序）
+  List<ConvMessage> messagesOf(String conversationId) =>
+      _convMessagesByConv[conversationId] ?? const [];
 
   /// 最近一次「打开电脑端会话」的结果
   Map<String, dynamic>? lastConversationOpen;
@@ -118,10 +155,29 @@ class AppState extends ChangeNotifier {
   /// 当前对接着的电脑端会话标题
   String get activeConversationTitle => _activeConversationTitle;
 
+  /// 切换「当前对话的电脑端会话」。
+  ///
+  /// **必须同时换掉 messages** —— 每个会话的聊天记录是分开存的，
+  /// 不换就会出现「切了会话但还显示上一个会话内容」的重合问题。
   void _setActiveConversation(String? id, String title) {
-    _activeConversationId = id;
-    _activeConversationTitle = title;
-    unawaited(_persistActiveConversation());
+    final changed = (id ?? '') != (_activeConversationId ?? '');
+    if (!changed) {
+      _activeConversationTitle = title;
+      unawaited(_persistActiveConversation());
+      notifyListeners();
+      return;
+    }
+
+    // 先把旧会话的记录落盘，再切到新会话的记录
+    unawaited(() async {
+      await _persistHistory();
+      _activeConversationId = id;
+      _activeConversationTitle = title;
+      await _persistActiveConversation();
+      await _switchHistoryTo(id);
+      // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
+      notifyListeners();
+    }());
     notifyListeners();
   }
 
@@ -290,12 +346,28 @@ class AppState extends ChangeNotifier {
   // ---- 电脑端会话管理 ----
 
   /// 拉取某个会话的消息内容（会话详情页）。
+  ///
+  /// 只动**这个会话自己**的那份缓存，不影响别的会话 ——
+  /// 以前直接清空全局列表，导致并发/乱序响应时内容互相串。
   bool requestConversationMessages(String conversationId) {
-    if (!_client.isConnected) return false;
-    conversationMessages = const [];
-    conversationMessagesError = null;
-    loadingConversationMessages = true;
+    final cid = conversationId.trim();
+    if (cid.isEmpty) return false;
+
+    // 切到「正在查看这个会话」
+    _viewingConversationId = cid;
+
+    if (!_client.isConnected) {
+      _convMessagesError[cid] = '未连接中继';
+      notifyListeners();
+      return false;
+    }
+
+    // 只清这个会话的缓存与错误，不复用旧数据（避免显示过期内容）
+    _convMessagesByConv.remove(cid);
+    _convMessagesError.remove(cid);
+    _convMessagesLoading.add(cid);
     notifyListeners();
+
     return _client.send(Envelope(
       type: MsgType.chat,
       from: config.deviceId,
@@ -303,9 +375,16 @@ class AppState extends ChangeNotifier {
       payload: {
         'role': ChatRole.conversationMessagesRequest,
         'text': '',
-        'conversationId': conversationId,
+        'conversationId': cid,
       },
     ));
+  }
+
+  /// 详情页退出时调用，避免它退出后还影响别的页面
+  void stopViewingConversation(String conversationId) {
+    if (_viewingConversationId == conversationId) {
+      _viewingConversationId = null;
+    }
   }
 
   /// 删除电脑端某个会话（会话文件一起删除）。
@@ -820,20 +899,39 @@ class AppState extends ChangeNotifier {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final r =
             (decoded['__relayConversationMessages'] as Map?)?.cast<String, dynamic>() ?? {};
+
+        // **关键**：这份数据是哪个会话的？按它自己的 id 存。
+        // 以前不看 conversationId，谁后到就覆盖全局列表 ——
+        // 于是打开 A 再打开 B，A 的响应晚到就会把 B 的页面刷成 A 的内容。
+        final cid = (r['conversationId']?.toString() ?? '').trim();
+        if (cid.isEmpty) {
+          debugPrint('[AppState] conversation-messages 缺少 conversationId，已忽略');
+          return;
+        }
+
         final raw = (r['messages'] as List?) ?? const [];
-        conversationMessages = raw
+        _convMessagesByConv[cid] = raw
             .map((e) => ConvMessage.fromJson((e as Map).cast<String, dynamic>()))
             .toList();
+
         final ok = r['ok'] != false;
-        conversationMessagesError = ok
-            ? null
-            : _conversationOpenReason(r['reason']?.toString() ?? '读取消息失败');
-        loadingConversationMessages = false;
+        if (ok) {
+          _convMessagesError.remove(cid);
+        } else {
+          _convMessagesError[cid] =
+              _conversationOpenReason(r['reason']?.toString() ?? '读取消息失败');
+        }
+        _convMessagesLoading.remove(cid);
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] conversation-messages decode failed: $e');
-        loadingConversationMessages = false;
-        conversationMessagesError = '解析会话消息失败';
+        // 解不出来时至少把「正在查看的那个」的 loading 停掉，
+        // 否则详情页会一直转圈
+        final cid = _viewingConversationId;
+        if (cid != null) {
+          _convMessagesLoading.remove(cid);
+          _convMessagesError[cid] = '解析会话消息失败';
+        }
         notifyListeners();
       }
       return;
@@ -879,9 +977,12 @@ class AppState extends ChangeNotifier {
               break;
             case 'deleteMessages':
               final n = (r['deleted'] as num?)?.toInt() ?? 0;
-              conversationMessages = conversationMessages
-                  .where((m) => m.id.isNotEmpty)
-                  .toList();
+              // 删完刷新那个会话的消息（只动它自己那份缓存）。
+              // 以前这里给 getter 赋值 —— 那是编译不过的，而且逻辑也没意义。
+              final cid = (r['conversationId']?.toString() ?? '').trim();
+              if (cid.isNotEmpty) {
+                unawaited(requestConversationMessages(cid));
+              }
               _lastDeletedCount = n;
               break;
           }
@@ -1013,9 +1114,13 @@ class AppState extends ChangeNotifier {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final r = (decoded['__relayConversationOpen'] as Map?)?.cast<String, dynamic>() ?? {};
         final ok = r['ok'] == true;
-        _activeConversationId = ok ? r['conversationId']?.toString() : null;
-        _activeConversationTitle = ok ? (r['title']?.toString() ?? '') : '';
-        unawaited(_persistActiveConversation());
+        // 统一走 _setActiveConversation：它会落盘旧会话的记录、
+        // 再加载新会话的记录。直接改 _activeConversationId 会让
+        // messages 留在上一个会话，造成「多个对话内容重合」。
+        _setActiveConversation(
+          ok ? r['conversationId']?.toString() : null,
+          ok ? (r['title']?.toString() ?? '') : '',
+        );
         lastConversationOpen = {
           'ok': ok,
           'conversationId': r['conversationId']?.toString() ?? '',
@@ -1084,6 +1189,20 @@ class AppState extends ChangeNotifier {
     }
 
     final isAssistant = p.role == ChatRole.assistant;
+
+    // 会话归属校验：电脑端回的是**哪个**会话的消息？
+    //
+    // 只在手机已绑定电脑端会话时校验（p.conversationId 有值）。
+    // 否则会出现：从 A 切到 B 之后，A 迟到的回复被追加进 B 的聊天列表，
+    // 两个会话的内容又混在一起。
+    if (isAssistant && p.conversationId != null && p.conversationId!.isNotEmpty) {
+      final mine = _activeConversationId;
+      if (mine != null && mine.isNotEmpty && p.conversationId != mine) {
+        debugPrint('[AppState] 丢弃不属于当前会话的回复: '
+            'got=${p.conversationId} current=$mine');
+        return;
+      }
+    }
 
     // 情况 A：这条是「重新回答」的产物
     //   电脑端那边是「删掉旧的 assistant 气泡 → 重新生成」，
@@ -1284,19 +1403,55 @@ class AppState extends ChangeNotifier {
   }
 
   // ---- persistence ----
-  Future<void> _loadHistory() async {
+  /// 聊天记录的存储 key —— **按会话分开**。
+  ///
+  /// 以前所有会话共用一个 'chat_history'：切到别的电脑端会话时，messages
+  /// 不清空、新消息也写回同一个 key，于是几个会话的内容永远混在一起，
+  /// 看起来就是「多个对话互相重合」。现在每个会话各有各的 key。
+  String _historyKey(String? conversationId) {
+    final id = (conversationId ?? '').trim();
+    // 没绑定任何电脑端会话时（本机随便聊）用一个固定 key
+    return id.isEmpty ? 'chat_history' : 'chat_history:$id';
+  }
+
+  /// 把当前 messages 写回**当前会话自己**的 key
+  Future<void> _persistHistory() async {
     final p = await SharedPreferences.getInstance();
-    final raw = p.getString('chat_history');
+    final keep = messages.where((m) => !m.pending).toList();
+    final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
+    await p.setString(
+      _historyKey(_activeConversationId),
+      jsonEncode(trimmed.map((e) => e.toJson()).toList()),
+    );
+  }
+
+  /// 切换到某个会话时，把 messages 换成**那个会话自己**的记录
+  Future<void> _switchHistoryTo(String? conversationId) async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString(_historyKey(conversationId));
+    messages.clear();
     if (raw != null) {
       try {
         final list = jsonDecode(raw) as List;
-        messages
-          ..clear()
-          ..addAll(list
-              .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
-              .where((m) => !m.pending));
+        messages.addAll(list
+            .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+            .where((m) => !m.pending));
       } catch (_) {}
     }
+  }
+
+  Future<void> _loadHistory() async {
+    final p = await SharedPreferences.getInstance();
+
+    // 先恢复「上次接的是哪个电脑端会话」，再按它的 key 加载记录
+    final convId = p.getString('active_conversation_id');
+    if (convId != null && convId.isNotEmpty) {
+      _activeConversationId = convId;
+      _activeConversationTitle = p.getString('active_conversation_title') ?? '';
+    }
+
+    await _switchHistoryTo(_activeConversationId);
+
     final rawInbox = p.getString('inbox');
     if (rawInbox != null) {
       try {
@@ -1306,19 +1461,6 @@ class AppState extends ChangeNotifier {
           ..addAll(list.cast<Map<String, dynamic>>());
       } catch (_) {}
     }
-    // 记住上次接的是电脑端哪个会话，重启后仍能对得上
-    final convId = p.getString('active_conversation_id');
-    if (convId != null && convId.isNotEmpty) {
-      _activeConversationId = convId;
-      _activeConversationTitle = p.getString('active_conversation_title') ?? '';
-    }
-  }
-
-  Future<void> _persistHistory() async {
-    final p = await SharedPreferences.getInstance();
-    final keep = messages.where((m) => !m.pending).toList();
-    final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
-    await p.setString('chat_history', jsonEncode(trimmed.map((e) => e.toJson()).toList()));
   }
 
   Future<void> _persistActiveConversation() async {

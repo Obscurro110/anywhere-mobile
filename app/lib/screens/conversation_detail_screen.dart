@@ -27,13 +27,26 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().requestConversationMessages(widget.conversation.id);
+      if (mounted) {
+        context.read<AppState>().requestConversationMessages(widget.conversation.id);
+      }
     });
   }
 
   @override
+  void dispose() {
+    // 告诉 AppState 不再查看这个会话，避免它退出后还把
+    // 「当前查看会话」指向这里（会影响到别的页面读到的列表/loading）。
+    _state?.stopViewingConversation(widget.conversation.id);
+    super.dispose();
+  }
+
+  AppState? _state;
+
+  @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    _state = state;
 
     return Scaffold(
       appBar: AppBar(
@@ -52,7 +65,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
               )
             : null,
         actions: [
-          if (state.conversationMessages.isNotEmpty)
+          if (messages.isNotEmpty)
             _selecting
                 ? IconButton(
                     tooltip: '删除选中',
@@ -81,6 +94,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
   }
 
   Widget _body(BuildContext context, AppState state) {
+    // 只用**这个会话自己**的消息，不依赖全局「当前查看」的时序
+    final messages = state.messagesOf(widget.conversation.id);
+
     if (state.loadingConversationMessages) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -96,7 +112,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
         ),
       );
     }
-    if (state.conversationMessages.isEmpty) {
+    if (messages.isEmpty) {
       return const Center(
         child: Text('这个会话没有可显示的文字消息',
             style: TextStyle(color: Colors.white38)),
@@ -105,19 +121,19 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
 
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
-      itemCount: state.conversationMessages.length + 1,
+      itemCount: messages.length + 1,
       itemBuilder: (context, i) {
         if (i == 0) {
           return Padding(
             padding: const EdgeInsets.fromLTRB(6, 0, 6, 12),
             child: Text(
-              '共 ${state.conversationMessages.length} 条消息'
+              '共 ${messages.length} 条消息'
               '${_selecting ? " · 勾选后可删除" : ""}',
               style: const TextStyle(fontSize: 12, color: Colors.white38),
             ),
           );
         }
-        final m = state.conversationMessages[i - 1];
+        final m = messages[i - 1];
         return _messageTile(m);
       },
     );

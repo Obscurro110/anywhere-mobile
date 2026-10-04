@@ -20,7 +20,8 @@ class _TasksPageState extends State<TasksPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().requestTasks();
+      // 页面可能在这一帧内就被关掉了，不判 mounted 会拿到失效的 context
+      if (mounted) context.read<AppState>().requestTasks();
     });
   }
 
