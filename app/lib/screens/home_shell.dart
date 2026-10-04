@@ -205,7 +205,7 @@ class _HomeShellState extends State<HomeShell> {
                     style: TextStyle(fontSize: 12, color: Colors.white38)),
               ),
             for (final opt in <_TargetOpt>[
-              _TargetOpt(null, '所有设备', Icons.campaign_outlined),
+              const _TargetOpt(null, '所有设备', Icons.campaign_outlined),
               ...state.peers.map((d) => _TargetOpt(
                     d.deviceId,
                     '${d.deviceName} (${d.platform})',

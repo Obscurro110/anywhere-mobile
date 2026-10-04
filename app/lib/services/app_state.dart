@@ -981,7 +981,9 @@ class AppState extends ChangeNotifier {
               // 以前这里给 getter 赋值 —— 那是编译不过的，而且逻辑也没意义。
               final cid = (r['conversationId']?.toString() ?? '').trim();
               if (cid.isNotEmpty) {
-                unawaited(requestConversationMessages(cid));
+                // 注意：requestConversationMessages 返回 bool（发送是否成功），
+                // 不是 Future，所以不能套 unawaited。
+                requestConversationMessages(cid);
               }
               _lastDeletedCount = n;
               break;

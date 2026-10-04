@@ -47,6 +47,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     _state = state;
+    // AppBar 里也要用（是否显示「选择消息」按钮），所以这里再取一份
+    final messages = state.messagesOf(widget.conversation.id);
 
     return Scaffold(
       appBar: AppBar(
