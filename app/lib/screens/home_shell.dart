@@ -5,6 +5,7 @@ import '../services/app_state.dart';
 import '../widgets/connection_badge.dart';
 import 'chat_screen.dart';
 import 'conversations_screen.dart';
+import 'desktop_capabilities_screen.dart';
 import 'notifications_screen.dart';
 import 'settings_screen.dart';
 import 'tasks_screen.dart';
@@ -131,6 +132,8 @@ class _HomeShellState extends State<HomeShell> {
                   _push(context, const ConversationsPage());
                 case 'tasks':
                   _push(context, const TasksPage());
+                case 'caps':
+                  _push(context, const DesktopCapabilitiesPage());
                 case 'settings':
                   _push(context, const SettingsPage());
               }
@@ -148,13 +151,34 @@ class _HomeShellState extends State<HomeShell> {
                       : null,
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'tasks',
                 child: ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.schedule, size: 20),
-                  title: Text('定时任务'),
+                  leading: const Icon(Icons.schedule, size: 20),
+                  title: const Text('定时任务'),
+                  subtitle: state.tasks.isEmpty
+                      ? null
+                      : Text('${state.tasks.length} 个',
+                          style: const TextStyle(fontSize: 11)),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'caps',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.extension, size: 20),
+                  title: const Text('电脑端能力'),
+                  subtitle: Text(
+                    state.capabilities.isEmpty
+                        ? '未获取'
+                        : '模型 ${state.capabilities.models.length} · '
+                            'MCP ${state.capabilities.mcp.length} · '
+                            'Skill ${state.capabilities.skills.length}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
                 ),
               ),
               const PopupMenuItem(

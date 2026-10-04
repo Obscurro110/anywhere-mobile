@@ -74,6 +74,9 @@ class AppState extends ChangeNotifier {
   /// 最近一次定时任务管理操作的结果
   Map<String, dynamic>? lastTaskAction;
 
+  /// 正在等待电脑端回能力清单（给「电脑端能力」页的刷新按钮转圈用）
+  bool loadingCapabilities = false;
+
   /// 电脑端提示「消息已排队」的提示信息（null = 没在排队）
   Map<String, dynamic>? bufferNotice;
 
@@ -154,6 +157,15 @@ class AppState extends ChangeNotifier {
   // ---- capabilities ----
   void requestCapabilities() {
     if (!_client.isConnected) return;
+    loadingCapabilities = true;
+    notifyListeners();
+    // 兜底：10 秒还没回就别一直转圈
+    Future.delayed(const Duration(seconds: 10), () {
+      if (loadingCapabilities) {
+        loadingCapabilities = false;
+        notifyListeners();
+      }
+    });
     _client.send(Envelope(
       type: MsgType.chat,
       from: config.deviceId,
@@ -707,6 +719,7 @@ class AppState extends ChangeNotifier {
 
     // Desktop capability list
     if (p.role == ChatRole.capabilities) {
+      loadingCapabilities = false;
       try {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final raw = decoded['__relayCapabilities'] ?? decoded;

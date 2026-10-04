@@ -7,7 +7,6 @@ import '../widgets/update_card.dart';
 import 'conversations_screen.dart';
 import 'devices_screen.dart';
 import 'relay_settings_screen.dart';
-import 'tasks_screen.dart';
 
 /// 设置页（二级页面，从右上角 ⋮ 进入）。
 ///
@@ -22,7 +21,6 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final caps = state.capabilities;
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
@@ -62,26 +60,6 @@ class SettingsPage extends StatelessWidget {
                   ? null
                   : state.peers.map((d) => d.deviceName).join('、'),
               onTap: () => _push(context, const DevicesPage()),
-            ),
-            SettingTile(
-              icon: Icons.schedule,
-              iconColor: Colors.amberAccent,
-              title: '定时任务',
-              value: state.tasks.isEmpty ? '未同步' : '${state.tasks.length} 个',
-              subtitle: '可查看并「立即运行」',
-              onTap: () => _push(context, const TasksPage()),
-            ),
-            SettingTile(
-              icon: caps.isEmpty ? Icons.cloud_off : Icons.cloud_done,
-              iconColor: caps.isEmpty ? Colors.white38 : Colors.greenAccent,
-              title: '电脑端能力',
-              value: caps.isEmpty
-                  ? '未获取'
-                  : '助手 ${caps.prompts.length} · 模型 ${caps.models.length}',
-              subtitle: caps.isEmpty
-                  ? '点此从电脑端拉取'
-                  : 'MCP ${caps.mcp.length} · Skill ${caps.skills.length}',
-              onTap: state.requestCapabilities,
             ),
           ]),
 
