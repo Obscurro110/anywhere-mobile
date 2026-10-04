@@ -804,6 +804,9 @@ class ConvMessage {
   /// 电脑端数据库里的物理消息 id（messages.message_uuid）。
   /// **批量删除必须用它** —— 用 id 是删不中的（id 只是展示层的）。
   final String storageId;
+  /// 展示层记录 id（ui_messages.ui_uuid）。
+  /// 极少数纯 UI 消息没有 storageId，删除时退回用它。
+  final String uiStorageId;
   final String role;
   final String text;
   final String time;
@@ -812,6 +815,7 @@ class ConvMessage {
     required this.id,
     this.index = -1,
     this.storageId = '',
+    this.uiStorageId = '',
     required this.role,
     required this.text,
     this.time = '',
@@ -828,6 +832,7 @@ class ConvMessage {
         id: j['id'] as String? ?? '',
         index: (j['index'] as num?)?.toInt() ?? -1,
         storageId: j['storageId'] as String? ?? '',
+        uiStorageId: j['uiStorageId'] as String? ?? '',
         role: j['role'] as String? ?? '',
         text: j['text'] as String? ?? '',
         time: j['time'] as String? ?? '',

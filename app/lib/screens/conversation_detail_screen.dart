@@ -522,10 +522,14 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
     final state = context.read<AppState>();
     // 勾选的是 ConvMessage.id（展示 id），但电脑端批量删除要的是
     // storageId（数据库里的 message_uuid）。用错了会「删了没反应」。
-    final targets = state
-        .messagesOf(widget.conversation.id)
-        .where((m) => _selected.contains(m.id))
-        .map((m) => m.storageId)
+    // 少数纯 UI 消息没有 storageId，退回 uiStorageId（电脑端会按 ui_uuid 删）。
+    final byId = {
+      for (final m in state.messagesOf(widget.conversation.id)) m.id: m,
+    };
+    final targets = _selected
+        .map((id) => byId[id])
+        .whereType<ConvMessage>()
+        .map((m) => m.storageId.isNotEmpty ? m.storageId : m.uiStorageId)
         .where((s) => s.isNotEmpty)
         .toList();
     if (targets.isEmpty) {

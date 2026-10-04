@@ -59,6 +59,38 @@ index 24faf63..cb6235b 100644
    icon: build/icon.ico
    electronLanguages:
      - zh-CN
+diff --git a/main/core/conversationStore.js b/main/core/conversationStore.js
+index 4cb7363..ee61e97 100644
+--- a/main/core/conversationStore.js
++++ b/main/core/conversationStore.js
+@@ -1102,9 +1102,25 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
+     return withTransaction(db, () => {
+       assertConversationWriteLease(db, { holderInstanceId, leaseEpoch })
+       const stmt = db.prepare('DELETE FROM messages WHERE message_uuid = ?')
++      // ⚠️ 必须同时删 ui_messages：手机会话详情页读的是 chat_show
++      //（loadUiMessages 直接查 ui_messages 表）。只删 messages 的话，
++      // 重新打开会话时那条消息会“复活”，表现为「删了没反应」。
++      // 电脑端自己删 compaction 时就是两边一起删的，这里保持一致。
++      const uiByMsg = db.prepare('DELETE FROM ui_messages WHERE message_uuid = ?')
++      // 兜底：少数 ui 行没有对应 message_uuid（纯 UI 消息），只能按 ui_uuid 删。
++      // ui_uuid 与 message_uuid 都是 randomUUID，值域不同，不会误伤。
++      const uiByUuid = db.prepare('DELETE FROM ui_messages WHERE ui_uuid = ?')
+       let removed = 0
+-      for (const id of ids) removed += Number(stmt.run(id).changes) || 0
+-      return { ok: true, removed }
++      let uiRemoved = 0
++      for (const id of ids) {
++        removed += Number(stmt.run(id).changes) || 0
++        uiRemoved += Number(uiByMsg.run(id).changes) || 0
++        // 前两步都没命中 → 尝试按 ui_uuid 删（纯 UI 消息）
++        if (removed === 0 && uiRemoved === 0) {
++          uiRemoved += Number(uiByUuid.run(id).changes) || 0
++        }
++      }
++      return { ok: true, removed, uiRemoved }
+     })
+   } finally { db.close() }
+ }
 diff --git a/main/index.js b/main/index.js
 index f63f831..dda515c 100644
 --- a/main/index.js
@@ -86,10 +118,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..d1fddb7
+index 0000000..936d862
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2234 @@
+@@ -0,0 +1,2307 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -734,7 +766,8 @@ index 0000000..d1fddb7
 +    if (!m || typeof m !== 'object') return
 +    const role = String(m.role || '')
 +    if (role !== 'user' && role !== 'assistant' && role !== 'system') return
-+    const text = extractMessageText(m.content)
++    // 用增强版：content + tool_calls 一起转成手机可读文本
++    const text = extractMessagePlainText(m)
 +    if (!text) return
 +    messages.push({
 +      index,
@@ -779,6 +812,78 @@ index 0000000..d1fddb7
 +      .join('')
 +  }
 +  return ''
++}
++
++// 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
++const TOOL_TEXT_LIMIT = 800
++
++/**
++ * 把一条消息转成手机端可读的纯文本。
++ *
++ * ⚠️ 之前只读 content 里的 text —— 而工具调用（ask_user_choice / task_write
++ * / MCP 工具等）存在**独立的 tool_calls 字段**里，手机端完全看不到，
++ * 表现就是「APP 显示电脑端的信息不全」：
++ *   · 带 ask_user_choice 卡片的消息，手机上只剩一句话，选项全丢；
++ *   · content 为空、只有工具调用的消息，手机上整条消失。
++ */
++function extractMessagePlainText(m) {
++  if (!m || typeof m !== 'object') return ''
++  const parts = []
++  const contentText = extractMessageText(m.content)
++  if (contentText) parts.push(contentText)
++
++  const calls = Array.isArray(m.tool_calls) ? m.tool_calls : []
++  for (const tc of calls) {
++    if (!tc || typeof tc !== 'object') continue
++    const name = tc?.function?.name || tc?.name || 'tool'
++    const lines = [`🔧 调用工具 ${name}`]
++
++    // 参数：ask_user_choice 渲染成「问题 + 选项」，其它工具给参数摘要
++    let args = null
++    const rawArgs = tc?.function?.arguments
++    if (rawArgs != null) {
++      if (typeof rawArgs === 'string') {
++        try { args = JSON.parse(rawArgs) } catch { args = null }
++      } else if (typeof rawArgs === 'object') {
++        args = rawArgs
++      }
++    }
++    if (name === 'ask_user_choice' && args && Array.isArray(args.questions)) {
++      for (const q of args.questions) {
++        if (!q) continue
++        if (q.question) lines.push(`问题: ${q.question}`)
++        if (Array.isArray(q.options)) {
++          for (const o of q.options) {
++            if (!o) continue
++            const label = o.label ? String(o.label) : ''
++            const desc = o.description ? ` — ${String(o.description)}` : ''
++            const line = `  • ${label}${desc}`.trimEnd()
++            if (line.length > TOOL_TEXT_LIMIT) lines.push(line.slice(0, TOOL_TEXT_LIMIT) + '…')
++            else lines.push(line)
++          }
++        }
++      }
++    } else if (args && typeof args === 'object' && Object.keys(args).length > 0) {
++      let argStr = ''
++      try { argStr = JSON.stringify(args) } catch { argStr = '' }
++      if (argStr) {
++        if (argStr.length > TOOL_TEXT_LIMIT) argStr = argStr.slice(0, TOOL_TEXT_LIMIT) + '…'
++        lines.push(`参数: ${argStr}`)
++      }
++    }
++
++    // 结果（uiToolCall.result 会写回 tool_calls 项上）
++    const result = typeof tc.result === 'string' ? tc.result.trim() : ''
++    if (result) {
++      let r = result
++      if (r.length > TOOL_TEXT_LIMIT) r = r.slice(0, TOOL_TEXT_LIMIT) + '…'
++      lines.push(`结果: ${r}`)
++    }
++
++    parts.push(lines.join('\n'))
++  }
++
++  return parts.join('\n\n')
 +}
 +
 +/** 删除整个会话 */
@@ -2655,7 +2760,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..ffb90bd
+index 0000000..9f29f01
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2667,8 +2772,8 @@ index 0000000..ffb90bd
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.3';
-+export const RELAY_VERSION_CODE = 23;
++export const RELAY_VERSION = '1.7.4';
++export const RELAY_VERSION_CODE = 24;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3068,7 +3173,7 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..4c4ac1f 100644
+index 6bb1113..05988e9 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,173 @@ const normalizeWindowEventPayload = (input) => {
@@ -3364,7 +3469,7 @@ index 6bb1113..4c4ac1f 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10589,194 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10589,256 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -3407,16 +3512,78 @@ index 6bb1113..4c4ac1f 100644
 +};
 +
 +/** 从消息对象里抽取纯文本 */
++// 单个工具调用的参数/结果文本上限：手机屏幕有限，超长就截断
++const RELAY_TOOL_TEXT_LIMIT = 800;
++
++/**
++ * 把一条消息转成手机端可读的纯文本。
++ *
++ * ⚠️ 之前只读 content 里的 text —— 工具调用存在独立的 tool_calls 字段里，
++ * 手机端完全看不到（比如 ask_user_choice 的选项卡片、content 为空只有
++ * 工具调用的消息整条消失）。这里把 tool_calls 转成可读文本一并回传。
++ */
++const relayToolCallsText = (m) => {
++  const calls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
++  const parts = [];
++  for (const tc of calls) {
++    if (!tc || typeof tc !== 'object') continue;
++    const name = tc?.function?.name || tc?.name || 'tool';
++    const lines = [`🔧 调用工具 ${name}`];
++    let args = null;
++    const rawArgs = tc?.function?.arguments;
++    if (rawArgs != null) {
++      if (typeof rawArgs === 'string') {
++        try { args = JSON.parse(rawArgs); } catch { args = null; }
++      } else if (typeof rawArgs === 'object') {
++        args = rawArgs;
++      }
++    }
++    if (name === 'ask_user_choice' && args && Array.isArray(args.questions)) {
++      for (const q of args.questions) {
++        if (!q) continue;
++        if (q.question) lines.push(`问题: ${q.question}`);
++        if (Array.isArray(q.options)) {
++          for (const o of q.options) {
++            if (!o) continue;
++            const label = o.label ? String(o.label) : '';
++            const desc = o.description ? ` — ${String(o.description)}` : '';
++            const line = `  • ${label}${desc}`.trimEnd();
++            lines.push(line.length > RELAY_TOOL_TEXT_LIMIT ? line.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : line);
++          }
++        }
++      }
++    } else if (args && typeof args === 'object' && Object.keys(args).length > 0) {
++      let argStr = '';
++      try { argStr = JSON.stringify(args); } catch { argStr = ''; }
++      if (argStr) {
++        lines.push(`参数: ${argStr.length > RELAY_TOOL_TEXT_LIMIT ? argStr.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : argStr}`);
++      }
++    }
++    const result = typeof tc.result === 'string' ? tc.result.trim() : '';
++    if (result) {
++      const r = result.length > RELAY_TOOL_TEXT_LIMIT ? result.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : result;
++      lines.push(`结果: ${r}`);
++    }
++    parts.push(lines.join('\n'));
++  }
++  return parts.join('\n\n');
++};
++
 +const relayMessageText = (m) => {
 +  if (!m) return '';
-+  if (typeof m.content === 'string') return m.content;
-+  if (Array.isArray(m.content)) {
-+    return m.content
++  const parts = [];
++  if (typeof m.content === 'string') {
++    if (m.content.trim()) parts.push(m.content);
++  } else if (Array.isArray(m.content)) {
++    const t = m.content
 +      .filter((p) => p && p.type === 'text')
 +      .map((p) => p.text || '')
 +      .join('');
++    if (t.trim()) parts.push(t);
 +  }
-+  return '';
++  const toolText = relayToolCallsText(m);
++  if (toolText) parts.push(toolText);
++  return parts.join('\n\n');
 +};
 +
 +/** 收到手机消息时，记下"本轮回复要回传给谁" */
