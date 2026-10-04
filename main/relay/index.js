@@ -440,6 +440,25 @@ function isWindowAlive(id) {
 }
 
 /**
+ * 清掉 convWindows 里已经关掉的窗口引用。
+ *
+ * relay 没有窗口关闭事件可订阅，用户手动关掉会话窗口后，
+ * 这个 Map 会一直留着死引用（越用越大，而且 notifyConversationChanged
+ * 每次都要白跑一遍 isWindowAlive）。在关键路径上顺手清一下即可。
+ */
+function pruneConvWindows() {
+  if (!convWindows || convWindows.size === 0) return
+  for (const [cid, wid] of [...convWindows.entries()]) {
+    if (!isWindowAlive(wid)) convWindows.delete(cid)
+  }
+  // phoneWindowId 指向的窗口已经没了 → 复位，避免后续误判「已绑定」
+  if (phoneWindowId && !isWindowAlive(phoneWindowId)) {
+    phoneWindowId = null
+    phoneWindowKey = 'phone'
+  }
+}
+
+/**
  * 在电脑端立即运行一个定时任务（手机「立即运行」）。
  * 复刻 main/core/task_runner.js 的开窗口逻辑，但**跳过**"本机是否启用"检查
  * —— 用户既然在手机上主动点了，就直接跑。
@@ -1819,6 +1838,9 @@ async function routePhoneChat(msg) {
   // 只处理普通用户消息
   if (role !== 'user') return
 
+  // 顺手清掉已关闭窗口的死引用（见 pruneConvWindows 注释）
+  try { pruneConvWindows() } catch {}
+
   const text = String(msg?.text ?? '').trim()
   if (!text) return
   const relayTo = to
@@ -2176,6 +2198,15 @@ export function startRelay(context, overrideConfig = null, { force = false } = {
   // 通知 / 文件：只广播给界面展示
   relay.on('notification', (n) => emitToWindows('relay:incoming', { kind: 'notification', ...n }))
   relay.on('file', (file) => emitToWindows('relay:incoming', { kind: 'file', file }))
+
+  // 必须有人监听 'error'：Node 的 EventEmitter 在无人监听时 emit('error')
+  // 会抛未捕获异常。网络抖动（DNS/TLS/断网）都会走到这里。
+  relay.on('error', (err) => {
+    rwarn('[relay] socket error:', err?.message || err)
+  })
+  relay.on('relay_error', (info) => {
+    rwarn('[relay] relay error:', info?.message || JSON.stringify(info))
+  })
 
   relay.connect()
   registerIpc()
