@@ -257,6 +257,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 刷新在线设备列表（向中继发 presence 广播，收到后更新 peers）。
+  void refreshPeers() {
+    if (!_client.isConnected) return;
+    _client.send(Envelope(type: MsgType.presence));
+  }
+
   // ---- capabilities ----
   void requestCapabilities() {
     if (!_client.isConnected) return;
@@ -597,6 +603,44 @@ class AppState extends ChangeNotifier {
         'conversationId': conversationId,
         'index': index,
         if (messageId.isNotEmpty) 'messageId': messageId,
+      },
+    ));
+  }
+
+  /// 手机上已提交的选择结果：本地消息 id -> 用户选了哪个（给气泡显示"已选择"）。
+  final Map<String, String> _submittedChoices = {};
+  String? submittedChoiceFor(String messageId) => _submittedChoices[messageId];
+
+  /// 在手机上回答电脑端 ask_user_choice 的提问。
+  ///
+  /// 电脑端窗口里那个工具正 await 等着答案；提交后 AI 会基于选择继续生成，
+  /// 新回复会像普通回复一样回传到手机（电脑端已绑回传目标）。
+  /// [answer] 的结构见电脑端 buildChoiceResultText：
+  /// { responses: [{ questionIndex, type: 'select'|'custom'|'discuss', selected, customText }] }
+  ///
+  /// [messageId] / [displayText] 用于乐观更新：提交后本地立刻记下"已选择 xxx"，
+  /// 气泡里的选项区隐藏，避免重复点选；即使电脑端回执慢也不影响观感。
+  bool submitChoiceOnDesktop(
+      String conversationId, String toolCallId, Map<String, dynamic> answer,
+      {String? messageId, String displayText = ''}) {
+    if (!_client.isConnected) return false;
+    if (toolCallId.isEmpty) return false;
+    lastMessageAction = null;
+    if (messageId != null && messageId.isNotEmpty && displayText.isNotEmpty) {
+      _submittedChoices[messageId] = displayText;
+    }
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.messageAction,
+        'text': '',
+        'action': 'choiceSubmit',
+        'conversationId': conversationId,
+        'toolCallId': toolCallId,
+        'answer': answer,
       },
     ));
   }
@@ -1399,6 +1443,7 @@ class AppState extends ChangeNotifier {
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
         desktopMeta: p.assistantMeta,
         modelTag: p.assistantMeta?.modelTag ?? '',
+        choice: p.choice ?? p.assistantMeta?.choice,
       );
       if (idx >= 0) {
         messages[idx] = fresh;
@@ -1428,6 +1473,7 @@ class AppState extends ChangeNotifier {
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
         desktopMeta: p.assistantMeta,
         modelTag: p.assistantMeta?.modelTag ?? '',
+        choice: p.choice ?? p.assistantMeta?.choice,
       );
     } else {
       messages.add(ChatMessage(
@@ -1440,6 +1486,7 @@ class AppState extends ChangeNotifier {
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
         desktopMeta: p.assistantMeta,
         modelTag: p.assistantMeta?.modelTag ?? '',
+        choice: p.choice ?? p.assistantMeta?.choice,
       ));
     }
     _persistHistory();

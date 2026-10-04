@@ -242,6 +242,9 @@ class ChatPayload {
   /// 要靠它定位到电脑端 chat_show 里的正确位置）。
   final AssistantMeta? assistantMeta;
 
+  /// 电脑端正在等用户选择的提问（__relayChoice，随 assistantMeta.choice 一起）。
+  final ChoiceMeta? choice;
+
   ChatPayload({
     required this.role,
     required this.text,
@@ -249,6 +252,7 @@ class ChatPayload {
     this.attachments,
     this.options,
     this.assistantMeta,
+    this.choice,
   });
 
   Map<String, dynamic> toJson() => {
@@ -258,6 +262,7 @@ class ChatPayload {
         if (attachments != null) 'attachments': attachments,
         if (options != null && !options!.isEmpty) 'options': options!.toJson(),
         if (assistantMeta != null) '__relayAssistantMeta': assistantMeta!.toJson(),
+        if (choice != null) '__relayChoice': choice!.toJson(),
       };
 
   factory ChatPayload.fromJson(Map<String, dynamic> j) => ChatPayload(
@@ -271,6 +276,9 @@ class ChatPayload {
         assistantMeta: j['__relayAssistantMeta'] is Map
             ? AssistantMeta.fromJson(
                 (j['__relayAssistantMeta'] as Map).cast<String, dynamic>())
+            : null,
+        choice: j['__relayChoice'] is Map
+            ? ChoiceMeta.fromJson((j['__relayChoice'] as Map).cast<String, dynamic>())
             : null,
       );
 }
@@ -287,11 +295,16 @@ class AssistantMeta {
   /// 电脑端旧版本可能不报，此时为空，UI 会退回默认文案。
   final String modelTag;
 
+  /// 这条回复带着一个「等用户选择」的提问（电脑端 ask_user_choice 工具）。
+  /// 有值时气泡下渲染可点选的选项按钮，提交走 choiceSubmit 命令。
+  final ChoiceMeta? choice;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
     this.conversationId = '',
     this.modelTag = '',
+    this.choice,
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -301,6 +314,7 @@ class AssistantMeta {
         'index': index,
         'conversationId': conversationId,
         if (modelTag.isNotEmpty) 'modelTag': modelTag,
+        if (choice != null) 'choice': choice!.toJson(),
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
@@ -308,6 +322,80 @@ class AssistantMeta {
         index: (j['index'] as num?)?.toInt() ?? -1,
         conversationId: j['conversationId'] as String? ?? '',
         modelTag: j['modelTag'] as String? ?? '',
+        choice: j['choice'] is Map
+            ? ChoiceMeta.fromJson((j['choice'] as Map).cast<String, dynamic>())
+            : null,
+      );
+}
+
+/// 电脑端 ask_user_choice 的一条问题（手机端可直接点选）。
+class ChoiceOption {
+  final String label;
+  final String description;
+
+  const ChoiceOption({this.label = '', this.description = ''});
+
+  Map<String, dynamic> toJson() => {'label': label, 'description': description};
+
+  factory ChoiceOption.fromJson(Map<String, dynamic> j) => ChoiceOption(
+        label: j['label'] as String? ?? '',
+        description: j['description'] as String? ?? '',
+      );
+}
+
+class ChoiceQuestion {
+  final String id;
+  final String header;
+  final String question;
+  final List<ChoiceOption> options;
+
+  const ChoiceQuestion({
+    this.id = '',
+    this.header = '',
+    this.question = '',
+    this.options = const [],
+  });
+
+  Map<String, dynamic> toJson() => {
+        if (id.isNotEmpty) 'id': id,
+        if (header.isNotEmpty) 'header': header,
+        'question': question,
+        'options': options.map((e) => e.toJson()).toList(),
+      };
+
+  factory ChoiceQuestion.fromJson(Map<String, dynamic> j) => ChoiceQuestion(
+        id: j['id'] as String? ?? '',
+        header: j['header'] as String? ?? '',
+        question: j['question'] as String? ?? '',
+        options: (j['options'] as List?)
+                ?.map((e) =>
+                    ChoiceOption.fromJson((e as Map).cast<String, dynamic>()))
+                .toList() ??
+            const [],
+      );
+}
+
+class ChoiceMeta {
+  /// 电脑端正在等待的那个工具调用 id（提交时要带回）。
+  final String toolCallId;
+  final List<ChoiceQuestion> questions;
+
+  const ChoiceMeta({this.toolCallId = '', this.questions = const []});
+
+  bool get isValid => toolCallId.isNotEmpty && questions.isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'toolCallId': toolCallId,
+        'questions': questions.map((e) => e.toJson()).toList(),
+      };
+
+  factory ChoiceMeta.fromJson(Map<String, dynamic> j) => ChoiceMeta(
+        toolCallId: j['toolCallId'] as String? ?? '',
+        questions: (j['questions'] as List?)
+                ?.map((e) =>
+                    ChoiceQuestion.fromJson((e as Map).cast<String, dynamic>()))
+                .toList() ??
+            const [],
       );
 }
 

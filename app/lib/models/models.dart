@@ -18,6 +18,9 @@ export '../core/protocol.dart'
         ConvMessage,
         CompactConfig,
         AssistantMeta,
+        ChoiceMeta,
+        ChoiceQuestion,
+        ChoiceOption,
         Envelope,
         MsgType,
         kProtocolVersion;
@@ -43,6 +46,10 @@ class ChatMessage {
   /// 空字符串表示电脑端没报（旧版本），UI 会退回默认文案。
   final String modelTag;
 
+  /// 电脑端 ask_user_choice 正在等用户选择（气泡下渲染可点选的选项）。
+  /// 用户提交后此消息的 choice 应被置空（避免重复提交）。
+  final ChoiceMeta? choice;
+
   ChatMessage({
     required this.id,
     required this.role,
@@ -54,6 +61,7 @@ class ChatMessage {
     this.pending = false,
     this.desktopMeta,
     this.modelTag = '',
+    this.choice,
   });
 
   /// 是电脑端 AI 的回复（能重新回答 / 删除）
@@ -70,6 +78,7 @@ class ChatMessage {
         'attachments': attachments?.map((e) => e.toJson()).toList(),
         if (desktopMeta != null) 'desktopMeta': desktopMeta!.toJson(),
         if (modelTag.isNotEmpty) 'modelTag': modelTag,
+        if (choice != null) 'choice': choice!.toJson(),
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -87,9 +96,13 @@ class ChatMessage {
                 (j['desktopMeta'] as Map).cast<String, dynamic>())
             : null,
         modelTag: j['modelTag'] as String? ?? '',
+        choice: j['choice'] is Map
+            ? ChoiceMeta.fromJson((j['choice'] as Map).cast<String, dynamic>())
+            : null,
       );
 
-  ChatMessage copyWith({String? text, bool? pending}) => ChatMessage(
+  ChatMessage copyWith({String? text, bool? pending, ChoiceMeta? choice}) =>
+      ChatMessage(
         id: id,
         role: role,
         text: text ?? this.text,
@@ -100,6 +113,7 @@ class ChatMessage {
         pending: pending ?? this.pending,
         desktopMeta: desktopMeta,
         modelTag: modelTag,
+        choice: choice ?? this.choice,
       );
 }
 

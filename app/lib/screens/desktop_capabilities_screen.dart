@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 
 import '../core/protocol.dart';
 import '../services/app_state.dart';
-import 'desktop_capability_edit_screen.dart';
 
 /// 电脑端能力的**分类**。设置页里每一类一个入口，点进去只看这一类。
 enum CapabilityKind {
@@ -68,12 +67,6 @@ class DesktopCapabilityPage extends StatefulWidget {
 }
 
 class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
-  void _openEdit(BuildContext context, AppState state, String? editId) {
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => DesktopCapabilityEditPage(kind: widget.kind, editId: editId),
-    ));
-  }
-
   @override
   void initState() {
     super.initState();
@@ -89,19 +82,12 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
     final caps = state.capabilities;
     final kind = widget.kind;
 
-    final items = _buildItems(caps, kind);
+    final items = _buildItems(context, state, caps, kind);
 
     return Scaffold(
       appBar: AppBar(
         title: Text(kind.title),
         actions: [
-          // 新建（Skill 没有新建 —— 那是磁盘目录，手机端不建）
-          if (kind != CapabilityKind.skills)
-            IconButton(
-              tooltip: '新建',
-              icon: const Icon(Icons.add),
-              onPressed: () => _openEdit(context, state, null),
-            ),
           IconButton(
             tooltip: '重新拉取',
             icon: state.loadingCapabilities
@@ -145,40 +131,50 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
         CapabilityKind.skills => '电脑端 skills 目录里的技能，点开看说明与可用工具',
       };
 
-  static List<Widget> _buildItems(Capabilities caps, CapabilityKind kind) {
+  List<Widget> _buildItems(
+      BuildContext context, AppState state, Capabilities caps, CapabilityKind kind) {
     switch (kind) {
       case CapabilityKind.prompts:
-        return caps.prompts
-            .map((p) => _Row(
-                  title: p.label.isEmpty ? p.key : p.label,
-                  subtitle: _promptSummary(p),
-                  icon: Icons.auto_awesome_outlined,
-                  details: _promptDetails(p, caps),
-                  editId: p.key,
-                ))
-            .toList();
+        return caps.prompts.map((p) {
+          final selected = state.options.promptKey == p.key;
+          return _Row(
+            title: p.label.isEmpty ? p.key : p.label,
+            subtitle: _promptSummary(p),
+            icon: Icons.auto_awesome_outlined,
+            details: _promptDetails(p, caps),
+            selected: selected,
+            actionLabel: selected ? null : '选用',
+            onAction: selected ? null : () => state.applyPrompt(p.key),
+          );
+        }).toList();
 
       case CapabilityKind.models:
-        // 服务商列表（电脑端上报的 providers 明细）；老版本电脑端没有
-        // providers 时退回「按模型分组」的展示，至少还能看。
         if (caps.providers.isNotEmpty) {
-          return caps.providers
-              .map((p) => _Row(
-                    title: p.name.isEmpty ? p.id : p.name,
-                    subtitle: [
-                      if (p.modelList.isNotEmpty)
-                        '${p.modelList.length} 个模型 · ${p.modelList.take(2).join('、')}'
-                      else
-                        '暂无模型',
-                      if (p.apiType.isNotEmpty) p.apiType,
-                      if (!p.enable) '已停用',
-                      if (p.hasApiKey) '密钥已配置',
-                    ].join(' · '),
-                    icon: Icons.cloud_outlined,
-                    editId: p.id,
-                  ))
-              .toList();
+          return caps.providers.map((p) {
+            // 当前选中的模型是否属于这个服务商
+            final cur = state.options.model ?? '';
+            final curInThis = cur.isNotEmpty && cur.startsWith('${p.id}|');
+            return _Row(
+              title: p.name.isEmpty ? p.id : p.name,
+              subtitle: [
+                if (p.modelList.isNotEmpty)
+                  '${p.modelList.length} 个模型 · ${p.modelList.take(2).join('、')}'
+                else
+                  '暂无模型',
+                if (p.apiType.isNotEmpty) p.apiType,
+                if (!p.enable) '已停用',
+                if (p.hasApiKey) '密钥已配置',
+              ].join(' · '),
+              icon: Icons.cloud_outlined,
+              selected: curInThis,
+              actionLabel: p.modelList.isEmpty ? null : (curInThis ? '已选' : '选模型'),
+              onAction: p.modelList.isEmpty
+                  ? null
+                  : () => _pickModelFromProvider(context, state, p),
+            );
+          }).toList();
         }
+        // 老版本电脑端没有 providers，退回「按模型分组」只读展示
         final groups = <String, List<String>>{};
         final order = <String>[];
         for (final m in caps.models) {
@@ -192,32 +188,97 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
               title: pid,
               subtitle: (groups[pid] ?? const []).join('、'),
               icon: Icons.cloud_outlined,
-              editId: pid,
             ),
         ];
 
       case CapabilityKind.mcp:
-        return caps.mcp
-            .map((s) => _Row(
-                  title: s.label.isEmpty ? s.id : s.label,
-                  subtitle: s.summary,
-                  icon: Icons.extension_outlined,
-                  details: _mcpDetails(s),
-                  editId: s.id,
-                ))
-            .toList();
+        return caps.mcp.map((s) {
+          final cur = state.options.mcp ?? const [];
+          final selected = cur.contains(s.id);
+          return _Row(
+            title: s.label.isEmpty ? s.id : s.label,
+            subtitle: s.summary,
+            icon: Icons.extension_outlined,
+            details: _mcpDetails(s),
+            selected: selected,
+            actionLabel: selected ? '已选' : '添加',
+            onAction: () => _toggleMcp(context, state, s.id),
+          );
+        }).toList();
 
       case CapabilityKind.skills:
-        return caps.skills
-            .map((k) => _Row(
-                  title: k.label.isEmpty ? k.id : k.label,
-                  subtitle: k.summary,
-                  icon: Icons.psychology_outlined,
-                  details: _skillDetails(k),
-                  editId: k.id,
-                ))
-            .toList();
+        return caps.skills.map((k) {
+          final cur = state.options.skills ?? const [];
+          final selected = cur.contains(k.id);
+          return _Row(
+            title: k.label.isEmpty ? k.id : k.label,
+            subtitle: k.summary,
+            icon: Icons.psychology_outlined,
+            details: _skillDetails(k),
+            selected: selected,
+            actionLabel: selected ? '已选' : '添加',
+            onAction: () => _toggleSkill(context, state, k.id),
+          );
+        }).toList();
     }
+  }
+
+  /// 从某个服务商里挑一个模型作为当前会话模型。
+  void _pickModelFromProvider(
+      BuildContext context, AppState state, ProviderOption p) {
+    if (p.modelList.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1F2B),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Text(p.name.isEmpty ? p.id : p.name,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            ),
+            for (final model in p.modelList)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.smart_toy_outlined,
+                    size: 18, color: Colors.white38),
+                title: Text(model, style: const TextStyle(fontSize: 14)),
+                trailing: (state.options.model == '${p.id}|$model')
+                    ? const Icon(Icons.check, color: Colors.greenAccent)
+                    : null,
+                onTap: () {
+                  state.setOptions(
+                      state.options.copyWith(model: '${p.id}|$model'));
+                  Navigator.pop(ctx);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _toggleMcp(BuildContext context, AppState state, String id) {
+    final cur = Set<String>.from(state.options.mcp ?? const []);
+    if (cur.contains(id)) {
+      cur.remove(id);
+    } else {
+      cur.add(id);
+    }
+    state.setOptions(state.options.copyWith(mcp: cur.toList()));
+  }
+
+  void _toggleSkill(BuildContext context, AppState state, String id) {
+    final cur = Set<String>.from(state.options.skills ?? const []);
+    if (cur.contains(id)) {
+      cur.remove(id);
+    } else {
+      cur.add(id);
+    }
+    state.setOptions(state.options.copyWith(skills: cur.toList()));
   }
 
   /// 把电脑端的「providerId|模型名」显示成「服务商|模型名」；
@@ -309,15 +370,24 @@ class _Row extends StatelessWidget {
   final String subtitle;
   final IconData icon;
   final List<MapEntry<String, String>>? details;
-  /// 非空 = 这一行可以点进**编辑页**（优先于详情弹层）
-  final String? editId;
+
+  /// 当前会话是否已选用这一项（选中态：尾部打勾、不再显示操作按钮）
+  final bool selected;
+
+  /// 尾部操作按钮的文字（如「选用 / 选模型 / 添加」）。null = 无操作。
+  final String? actionLabel;
+
+  /// 尾部操作按钮的回调（选择 / 切换）。
+  final VoidCallback? onAction;
 
   const _Row({
     required this.title,
     required this.subtitle,
     required this.icon,
     this.details,
-    this.editId,
+    this.selected = false,
+    this.actionLabel,
+    this.onAction,
   });
 
   @override
@@ -333,30 +403,30 @@ class _Row extends StatelessWidget {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11.5, color: Colors.white54)),
-      trailing: editId != null
-          ? const Icon(Icons.edit_outlined, size: 17, color: Colors.white38)
-          : (hasDetails
-              ? const Icon(Icons.chevron_right, size: 18, color: Colors.white24)
-              : null),
-      onTap: () {
-        if (editId != null) {
-          Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => DesktopCapabilityEditPage(
-              kind: _kindOf(context),
-              editId: editId,
-            ),
-          ));
-          return;
-        }
-        if (hasDetails) _showDetails(context, title, details!);
-      },
+      trailing: _trailing(hasDetails),
+      onTap: hasDetails ? () => _showDetails(context, title, details!) : null,
     );
   }
 
-  /// 从祖先里拿 kind（_Row 是静态构建的，拿不到 widget.kind，用 InheritedContext）
-  CapabilityKind _kindOf(BuildContext context) {
-    final page = context.findAncestorStateOfType<_DesktopCapabilityPageState>();
-    return page?.widget.kind ?? CapabilityKind.models;
+  Widget? _trailing(bool hasDetails) {
+    if (onAction != null) {
+      if (selected) {
+        return const Icon(Icons.check_circle, size: 19, color: Colors.greenAccent);
+      }
+      return TextButton(
+        onPressed: onAction,
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(actionLabel ?? '选择', style: const TextStyle(fontSize: 13)),
+      );
+    }
+    if (hasDetails) {
+      return const Icon(Icons.chevron_right, size: 18, color: Colors.white24);
+    }
+    return null;
   }
 
   static void _showDetails(

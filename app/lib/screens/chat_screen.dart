@@ -219,6 +219,9 @@ class _Bubble extends StatelessWidget {
               )
             else if (msg.text.isNotEmpty)
               SelectableText(msg.text, style: const TextStyle(fontSize: 15)),
+            // 电脑端 ask_user_choice 提问：气泡下渲染可点选的选项
+            if (msg.choice?.isValid == true && !msg.pending)
+              _ChoicePanel(msg: msg),
             for (final f in atts)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -264,6 +267,143 @@ class _Bubble extends StatelessWidget {
             if (!msg.pending)
               _ActionBar(msg: msg, outgoing: outgoing, isLast: isLast),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 电脑端 ask_user_choice 提问的选项面板。
+///
+/// 单选：点某个选项立即提交（回传 toolCallId + 选中项），
+/// 提交后本地记录"已选择"，选项区隐藏，避免重复点选。
+class _ChoicePanel extends StatelessWidget {
+  final ChatMessage msg;
+  const _ChoicePanel({required this.msg});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final choice = msg.choice;
+    if (choice == null || !choice.isValid) return const SizedBox.shrink();
+
+    final submitted = state.submittedChoiceFor(msg.id);
+    if (submitted != null && submitted.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1D2438),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFF3A46C9)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.check_circle_outline,
+                  size: 16, color: Colors.greenAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('已选择：$submitted',
+                    style: const TextStyle(fontSize: 13.5)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var qi = 0; qi < choice.questions.length; qi++)
+            _buildQuestion(context, state, choice, qi),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuestion(
+      BuildContext context, AppState state, ChoiceMeta choice, int qi) {
+    final q = choice.questions[qi];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (q.header.isNotEmpty || q.question.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                [if (q.header.isNotEmpty) q.header, if (q.question.isNotEmpty) q.question]
+                    .join('：'),
+                style: const TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w600),
+              ),
+            ),
+          if (q.options.isEmpty)
+            const Text('（无可选项）',
+                style: TextStyle(fontSize: 12.5, color: Colors.white38))
+          else
+            ...q.options.map((o) => _optionTile(context, state, choice, qi, o)),
+        ],
+      ),
+    );
+  }
+
+  Widget _optionTile(BuildContext context, AppState state, ChoiceMeta choice,
+      int qi, ChoiceOption o) {
+    final label = o.label;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: const Color(0xFF2A3148),
+        borderRadius: BorderRadius.circular(9),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(9),
+          onTap: () {
+            final cid = msg.conversationId ?? state.activeConversationId ?? '';
+            state.submitChoiceOnDesktop(
+              cid,
+              choice.toolCallId,
+              {
+                'responses': [
+                  {'questionIndex': qi, 'type': 'select', 'selected': [label]}
+                ],
+              },
+              messageId: msg.id,
+              displayText: label,
+            );
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.radio_button_unchecked,
+                    size: 16, color: Colors.lightBlueAccent),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: const TextStyle(fontSize: 13.5)),
+                      if (o.description.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(o.description,
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white54)),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

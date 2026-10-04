@@ -6,7 +6,6 @@ import '../widgets/setting_tiles.dart';
 import '../widgets/update_card.dart';
 import 'conversations_screen.dart';
 import 'desktop_capabilities_screen.dart';
-import 'devices_screen.dart';
 import 'relay_settings_screen.dart';
 
 /// 设置页（二级页面，从右上角 ⋮ 进入）。
@@ -49,18 +48,6 @@ class SettingsPage extends StatelessWidget {
                       : state.activeConversationTitle)
                   : '列出电脑端已有会话，点开即可接着聊',
               onTap: () => _push(context, const ConversationsPage()),
-            ),
-            SettingTile(
-              icon: Icons.devices,
-              iconColor: Colors.lightBlueAccent,
-              title: '设备',
-              value: state.peers.isEmpty
-                  ? '暂无在线'
-                  : '${state.peers.length} 台在线',
-              subtitle: state.peers.isEmpty
-                  ? null
-                  : state.peers.map((d) => d.deviceName).join('、'),
-              onTap: () => _push(context, const DevicesPage()),
             ),
             // 电脑端能力的四类，各自一个入口（点进去只显示这一类）
             ...CapabilityKind.values.map((k) {
@@ -214,8 +201,7 @@ class _StatusCard extends StatelessWidget {
           _kv('本机', '${state.config.deviceName} · ${_short(state.config.deviceId)}'),
           if (state.capabilities.desktopVersion.isNotEmpty)
             _kv('电脑端', 'v${state.capabilities.desktopVersion}'),
-          if (state.peers.isNotEmpty)
-            _kv('在线设备', state.peers.map((d) => d.deviceName).join('、')),
+          _devicesRow(state),
         ],
       ),
     );
@@ -223,6 +209,36 @@ class _StatusCard extends StatelessWidget {
 
   static String _short(String id) =>
       id.length >= 10 ? id.substring(0, 10) : id;
+
+  /// 在线设备行：与中继连接状态整合，点右侧刷新重新探测在线设备。
+  Widget _devicesRow(AppState state) {
+    final names = state.peers.map((d) => d.deviceName).toList();
+    final label = names.isEmpty ? '暂无（点右侧刷新）' : names.join('、');
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 62,
+            child: Text('在线设备',
+                style: const TextStyle(fontSize: 12, color: Colors.white38)),
+          ),
+          Expanded(
+            child: Text(label,
+                style: const TextStyle(fontSize: 12, color: Colors.white70)),
+          ),
+          InkWell(
+            onTap: () => state.refreshPeers(),
+            child: const Padding(
+              padding: EdgeInsets.only(left: 8),
+              child: Icon(Icons.refresh, size: 16, color: Colors.white54),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _kv(String k, String v) => Padding(
         padding: const EdgeInsets.only(top: 4),
