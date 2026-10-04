@@ -231,34 +231,33 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
 
   /// 单条消息的操作菜单：重新回答 / 删除这条 / 复制
   Future<void> _messageMenu(ConvMessage m) async {
+    // 菜单项只显示图标（不显示汉字），长按有提示
     final items = <PopupMenuEntry<String>>[
-      const PopupMenuItem(
+      PopupMenuItem(
         value: 'copy',
-        child: ListTile(
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          leading: Icon(Icons.copy, size: 18),
-          title: Text('复制'),
+        height: 44,
+        child: Tooltip(
+          message: '复制',
+          child: const Icon(Icons.copy, size: 20),
         ),
       ),
       if (m.canReask)
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'reask',
-          child: ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.refresh, size: 18),
-            title: Text('重新回答'),
+          height: 44,
+          child: Tooltip(
+            message: '重新回答',
+            child: const Icon(Icons.refresh, size: 20),
           ),
         ),
       if (m.canDelete)
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'delete',
-          child: ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
-            title: Text('删除这条', style: TextStyle(color: Colors.redAccent)),
+          height: 44,
+          child: Tooltip(
+            message: '删除这条',
+            child: const Icon(Icons.delete_outline,
+                size: 20, color: Colors.redAccent),
           ),
         ),
     ];

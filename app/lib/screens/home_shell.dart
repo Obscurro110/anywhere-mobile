@@ -135,39 +135,39 @@ class _HomeShellState extends State<HomeShell> {
                   _push(context, const SettingsPage());
               }
             },
+            // 只显示图标（不显示汉字）；「对话中」用小圆点表示，
+            // 定时任务有数量时用角标数字表示。
             itemBuilder: (ctx) => [
               PopupMenuItem(
                 value: 'conv',
-                child: ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.forum_outlined, size: 20),
-                  title: const Text('电脑端对话'),
-                  subtitle: state.activeConversationId != null
-                      ? const Text('对话中', style: TextStyle(fontSize: 11))
-                      : null,
+                height: 48,
+                child: Tooltip(
+                  message: '电脑端对话',
+                  child: Badge(
+                    isLabelVisible: state.activeConversationId != null,
+                    smallSize: 7,
+                    child: const Icon(Icons.forum_outlined, size: 22),
+                  ),
                 ),
               ),
               PopupMenuItem(
                 value: 'tasks',
-                child: ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.schedule, size: 20),
-                  title: const Text('定时任务'),
-                  subtitle: state.tasks.isEmpty
-                      ? null
-                      : Text('${state.tasks.length} 个',
-                          style: const TextStyle(fontSize: 11)),
+                height: 48,
+                child: Tooltip(
+                  message: '定时任务',
+                  child: Badge(
+                    isLabelVisible: state.tasks.isNotEmpty,
+                    label: Text('${state.tasks.length}'),
+                    child: const Icon(Icons.schedule, size: 22),
+                  ),
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'settings',
-                child: ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.settings_outlined, size: 20),
-                  title: Text('设置'),
+                height: 48,
+                child: Tooltip(
+                  message: '设置',
+                  child: const Icon(Icons.settings_outlined, size: 22),
                 ),
               ),
             ],

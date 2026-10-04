@@ -369,30 +369,27 @@ class _ActionBar extends StatelessWidget {
     final color = busy
         ? Colors.lightBlueAccent
         : (danger ? Colors.redAccent : Colors.white54);
+    // 只显示图标（文字放到长按提示里）—— 界面更干净，
+    // 也不会因为中文标签把气泡底部撑得很宽。
     return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (busy)
-                SizedBox(
-                  width: 13,
-                  height: 13,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.8,
-                    valueColor: AlwaysStoppedAnimation(color),
-                  ),
-                )
-              else
-                Icon(icon, size: 15, color: color),
-              const SizedBox(width: 4),
-              Text(label, style: TextStyle(fontSize: 11.5, color: color)),
-            ],
+      padding: const EdgeInsets.only(right: 2),
+      child: Tooltip(
+        message: label,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+            child: busy
+                ? SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      valueColor: AlwaysStoppedAnimation(color),
+                    ),
+                  )
+                : Icon(icon, size: 16, color: color),
           ),
         ),
       ),

@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..b6833d4
+index 0000000..7eeb43e
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,1788 @@
+@@ -0,0 +1,1980 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -293,6 +293,7 @@ index 0000000..b6833d4
 +async function readCapabilities() {
 +  const result = {
 +    models: [],
++    providers: [],
 +    mcp: [],
 +    skills: [],
 +    prompts: [],
@@ -327,6 +328,28 @@ index 0000000..b6833d4
 +      }
 +    }
 +
++    // ---- 服务商明细（手机「模型」编辑页回填用）----
++    // 注意：绝不带 api_key，只带 hasApiKey 布尔。
++    const provOrder = Array.isArray(config.providerOrder)
++      ? config.providerOrder
++      : Object.keys(config.providers || {})
++    for (const pid of provOrder) {
++      const provider = config.providers?.[pid]
++      if (!provider || typeof provider !== 'object') continue
++      result.providers.push({
++        id: String(pid),
++        name: (provider.name || pid).toString(),
++        url: (provider.url || '').toString(),
++        apiType: (provider.apiType || 'chat_completions').toString(),
++        enable: provider.enable !== false,
++        retryCount: Number.isFinite(provider.retryCount) ? provider.retryCount : 3,
++        headers: provider.headers && typeof provider.headers === 'object' ? { ...provider.headers } : {},
++        modelList: Array.isArray(provider.modelList) ? [...provider.modelList] : [],
++        hasApiKey: typeof provider.api_key === 'string' && provider.api_key.length > 0,
++        folderId: (provider.folderId || '').toString()
++      })
++    }
++
 +    // ---- MCP：config.mcpServers ----
 +    // 带上 description / 连接方式，手机端才能解释「这个 MCP 是干什么的」
 +    const servers = config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {}
@@ -339,10 +362,19 @@ index 0000000..b6833d4
 +        enabled: s.enable !== false && s.isActive !== false,
 +        description: (s.description || s.desc || '').toString(),
 +        type: String(type),
-+        // 连接信息（给详情页展示，注意不包含任何 token）
++        // 连接信息（详情页展示 + 编辑页回填）
 +        command: (s.command || '').toString(),
-+        url: (s.url || '').toString(),
++        url: (s.url || s.baseUrl || '').toString(),
++        baseUrl: (s.baseUrl || s.url || '').toString(),
++        args: Array.isArray(s.args) ? [...s.args] : [],
 +        argsCount: Array.isArray(s.args) ? s.args.length : 0,
++        env: s.env && typeof s.env === 'object' ? { ...s.env } : {},
++        headers: s.headers && typeof s.headers === 'object' ? { ...s.headers } : {},
++        isActive: s.isActive !== false && s.enable !== false,
++        isPersistent: s.isPersistent === true,
++        timeoutSeconds: Number(s.timeoutSeconds) || 120,
++        tags: Array.isArray(s.tags) ? [...s.tags] : [],
++        auth: s.auth && typeof s.auth === 'object' ? { type: s.auth.type || 'none' } : { type: 'none' },
 +        toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
 +        builtin: s.type === 'builtin'
 +      })
@@ -356,6 +388,10 @@ index 0000000..b6833d4
 +        const skills = listSkills(skillPath)
 +        for (const sk of Array.isArray(skills) ? skills : []) {
 +          if (!sk?.id) continue
++          // 带上正文与元数据，手机编辑页才能改
++          let skDetails = null
++          try { skDetails = getSkillDetails(skillPath, sk.id) } catch (_) { skDetails = null }
++          const skMeta = (skDetails?.metadata && typeof skDetails.metadata === 'object') ? skDetails.metadata : {}
 +          result.skills.push({
 +            id: sk.id,
 +            label: sk.name || sk.id,
@@ -363,7 +399,11 @@ index 0000000..b6833d4
 +            userInvocable: sk.userInvocable !== false,
 +            disabled: sk.disabled === true,
 +            context: sk.context || 'normal',
-+            allowedTools: Array.isArray(sk.allowedTools) ? sk.allowedTools : []
++            allowedTools: Array.isArray(sk.allowedTools) ? sk.allowedTools : [],
++            instructions: skDetails?.ok ? String(skDetails.content || '') : '',
++            argumentHint: (skMeta['argument-hint'] || '').toString(),
++            agent: (skMeta.agent || '').toString(),
++            model: (skMeta.model || '').toString()
 +          })
 +        }
 +      } catch (err) {
@@ -388,7 +428,27 @@ index 0000000..b6833d4
 +        // ---- 助手预设（会话建立时电脑端本来就会应用这些）----
 +        reasoningEffort: p.reasoning_effort || p.reasoningEffort || '',
 +        mcp: Array.isArray(p.defaultMcpServers) ? [...p.defaultMcpServers] : [],
-+        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : []
++        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : [],
++        // ---- 其余字段：手机编辑页回填用（与电脑端弹窗一致）----
++        promptText: (p.prompt || '').toString(),
++        enable: p.enable !== false,
++        showMode: (p.showMode || 'window').toString(),
++        matchRegex: (p.matchRegex || '').toString(),
++        stream: p.stream !== false,
++        isTemperature: p.isTemperature === true,
++        temperature: typeof p.temperature === 'number' ? p.temperature : 0.7,
++        isDirectSend_normal: p.isDirectSend_normal !== false,
++        isDirectSend_file: p.isDirectSend_file === true,
++        isDirectSend_image: p.isDirectSend_image !== false,
++        ifTextNecessary: p.ifTextNecessary === true,
++        voice: (p.voice || '').toString(),
++        window_width: Number(p.window_width) || 540,
++        window_height: Number(p.window_height) || 700,
++        isAlwaysOnTop: p.isAlwaysOnTop !== false,
++        autoCloseOnBlur: p.autoCloseOnBlur !== false,
++        backgroundOpacity: typeof p.backgroundOpacity === 'number' ? p.backgroundOpacity : 0.6,
++        backgroundBlur: Number(p.backgroundBlur) || 0,
++        autoSaveChat: p.autoSaveChat === true
 +      })
 +    }
 +
@@ -1442,24 +1502,62 @@ index 0000000..b6833d4
 +
 +    try {
 +      // ---- 助手（config.prompts）----
++      // 字段与电脑端「快捷助手」编辑弹窗一一对应（Prompts.vue savePrompt）。
 +      if (op === 'prompt-save') {
 +        const key = String(body.key || '').trim()
++        const oldKey = String(body.oldKey || key).trim()
 +        if (!key) return fail('key_required')
 +        if (!/^[\w-]{1,64}$/.test(key)) return fail('key_invalid')
++        if (key === '__DEFAULT__') return fail('protected')
 +        await mutateConfig((cfg) => {
 +          cfg.prompts = cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {}
-+          const prev = cfg.prompts[key] && typeof cfg.prompts[key] === 'object' ? cfg.prompts[key] : {}
-+          const next = { ...prev }
-+          if (typeof body.label === 'string' && body.label.trim()) next.name = body.label.trim()
-+          if (typeof body.prompt === 'string') next.prompt = body.prompt
-+          if (typeof body.model === 'string') next.model = body.model
-+          if (typeof body.reasoningEffort === 'string') next.reasoning_effort = body.reasoningEffort
++          const src = cfg.prompts[oldKey] && typeof cfg.prompts[oldKey] === 'object' ? cfg.prompts[oldKey] : {}
++          const next = { ...src }
++          const str = (v, k) => { if (typeof v === 'string') next[k] = v }
++          const bool = (v, k) => { if (typeof v === 'boolean') next[k] = v }
++          const num = (v, k) => { if (typeof v === 'number' && Number.isFinite(v)) next[k] = v }
++
++          str(body.label, 'name')
++          str(body.type, 'type')
++          str(body.showMode, 'showMode')
++          str(body.matchRegex, 'matchRegex')
++          str(body.prompt, 'prompt')
++          str(body.model, 'model')
++          str(body.icon, 'icon')
++          str(body.voice, 'voice')
++          str(body.reasoningEffort, 'reasoning_effort')
++          str(body.backgroundImage, 'backgroundImage')
++          str(body.autoSaveProjectId, 'autoSaveProjectId')
++          bool(body.enable, 'enable')
++          bool(body.stream, 'stream')
++          bool(body.isTemperature, 'isTemperature')
++          bool(body.isDirectSend_normal, 'isDirectSend_normal')
++          bool(body.isDirectSend_file, 'isDirectSend_file')
++          bool(body.isDirectSend_image, 'isDirectSend_image')
++          bool(body.ifTextNecessary, 'ifTextNecessary')
++          bool(body.isAlwaysOnTop, 'isAlwaysOnTop')
++          bool(body.autoCloseOnBlur, 'autoCloseOnBlur')
++          bool(body.autoSaveChat, 'autoSaveChat')
++          num(body.temperature, 'temperature')
++          num(body.window_width, 'window_width')
++          num(body.window_height, 'window_height')
++          num(body.backgroundOpacity, 'backgroundOpacity')
++          num(body.backgroundBlur, 'backgroundBlur')
 +          if (Array.isArray(body.mcp)) next.defaultMcpServers = body.mcp.map((x) => String(x))
 +          if (Array.isArray(body.skills)) next.defaultSkills = body.skills.map((x) => String(x))
-+          if (typeof body.enable === 'boolean') next.enable = body.enable
 +          if (!next.type) next.type = 'general'
 +          if (typeof next.stream !== 'boolean') next.stream = true
++
++          if (key !== oldKey) delete cfg.prompts[oldKey]
 +          cfg.prompts[key] = next
++          // tags 里引用旧 key 的也一起改名，避免助手从分组里消失
++          if (key !== oldKey && cfg.tags && typeof cfg.tags === 'object') {
++            for (const tag of Object.keys(cfg.tags)) {
++              if (Array.isArray(cfg.tags[tag])) {
++                cfg.tags[tag] = cfg.tags[tag].map((x) => (x === oldKey ? key : x))
++              }
++            }
++          }
 +        })
 +        await reply(true, { key })
 +        return
@@ -1470,12 +1568,20 @@ index 0000000..b6833d4
 +        if (key === 'AI') return fail('protected')
 +        await mutateConfig((cfg) => {
 +          if (cfg.prompts && typeof cfg.prompts === 'object') delete cfg.prompts[key]
++          if (cfg.tags && typeof cfg.tags === 'object') {
++            for (const tag of Object.keys(cfg.tags)) {
++              if (Array.isArray(cfg.tags[tag])) {
++                cfg.tags[tag] = cfg.tags[tag].filter((x) => x !== key)
++              }
++            }
++          }
 +        })
 +        await reply(true, { key })
 +        return
 +      }
 +
 +      // ---- 模型 / 服务商（config.providers + providerOrder）----
++      // 字段对齐电脑端 Providers.vue（name/url/api_key/modelList/enable/headers/retryCount/apiType）
 +      if (op === 'provider-save') {
 +        let id = String(body.id || '').trim()
 +        const name = String(body.name || '').trim()
@@ -1498,9 +1604,15 @@ index 0000000..b6833d4
 +          if (url) next.url = url
 +          if (typeof body.apiKey === 'string' && body.apiKey.trim()) next.api_key = body.apiKey.trim()
 +          if (typeof body.enable === 'boolean') next.enable = body.enable
++          if (typeof body.apiType === 'string' && body.apiType) next.apiType = body.apiType
++          if (typeof body.retryCount === 'number' && Number.isFinite(body.retryCount)) {
++            next.retryCount = Math.max(0, Math.floor(body.retryCount))
++          }
++          if (body.headers && typeof body.headers === 'object') next.headers = { ...body.headers }
 +          if (models) next.modelList = models
 +          if (!next.apiType) next.apiType = 'chat_completions'
 +          if (typeof next.retryCount !== 'number') next.retryCount = 3
++          if (!next.headers || typeof next.headers !== 'object') next.headers = {}
 +          cfg.providers[pid] = next
 +          id = pid
 +        })
@@ -1521,6 +1633,7 @@ index 0000000..b6833d4
 +      }
 +
 +      // ---- MCP（config.mcpServers）----
++      // 字段对齐电脑端 Mcp.vue（name/description/type/baseUrl/command/args/env/headers/auth/isActive/isPersistent/timeoutSeconds/tags）
 +      if (op === 'mcp-save') {
 +        const id = String(body.id || '').trim()
 +        if (!id) return fail('id_required')
@@ -1529,13 +1642,40 @@ index 0000000..b6833d4
 +          cfg.mcpServers = cfg.mcpServers && typeof cfg.mcpServers === 'object' ? cfg.mcpServers : {}
 +          const prev = cfg.mcpServers[id] && typeof cfg.mcpServers[id] === 'object' ? cfg.mcpServers[id] : {}
 +          const next = { ...prev, id }
-+          if (typeof body.name === 'string' && body.name.trim()) next.name = body.name.trim()
-+          if (typeof body.type === 'string' && body.type) next.type = body.type
-+          if (typeof body.command === 'string') next.command = body.command
++          const str = (v, k) => { if (typeof v === 'string') next[k] = v }
++          str(body.name, 'name')
++          str(body.description, 'description')
++          str(body.type, 'type')
++          str(body.command, 'command')
++          // 电脑端 config 里 sse/http 用的是 baseUrl，历史数据也有 url —— 两个都写
++          if (typeof body.baseUrl === 'string') {
++            next.baseUrl = body.baseUrl
++            next.url = body.baseUrl
++          } else if (typeof body.url === 'string') {
++            next.url = body.url
++            next.baseUrl = body.url
++          }
 +          if (Array.isArray(body.args)) next.args = body.args.map((x) => String(x))
-+          if (typeof body.url === 'string') next.url = body.url
-+          if (typeof body.isActive === 'boolean') next.isActive = body.isActive
-+          if (!next.type) next.type = next.url ? 'sse' : 'stdio'
++          if (body.env && typeof body.env === 'object') next.env = { ...body.env }
++          if (body.headers && typeof body.headers === 'object') next.headers = { ...body.headers }
++          if (typeof body.isActive === 'boolean') {
++            next.isActive = body.isActive
++            next.enable = body.isActive
++          }
++          if (typeof body.isPersistent === 'boolean') next.isPersistent = body.isPersistent
++          if (typeof body.timeoutSeconds === 'number' && Number.isFinite(body.timeoutSeconds)) {
++            next.timeoutSeconds = Math.max(1, Math.floor(body.timeoutSeconds))
++          }
++          if (Array.isArray(body.tags)) next.tags = body.tags.map((x) => String(x))
++          if (body.auth && typeof body.auth === 'object') {
++            const t = String(body.auth.type || 'none')
++            if (t === 'bearer') {
++              next.auth = { type: 'bearer', bearerToken: String(body.auth.bearerToken || '') }
++            } else {
++              next.auth = { type: 'none' }
++            }
++          }
++          if (!next.type) next.type = (next.baseUrl || next.url) ? 'sse' : 'stdio'
 +          if (typeof next.timeoutSeconds !== 'number') next.timeoutSeconds = 120
 +          cfg.mcpServers[id] = next
 +        })
@@ -1548,18 +1688,30 @@ index 0000000..b6833d4
 +        if (String(id).startsWith('builtin_')) return fail('builtin_readonly')
 +        await mutateConfig((cfg) => {
 +          if (cfg.mcpServers && typeof cfg.mcpServers === 'object') delete cfg.mcpServers[id]
++          // 同时从所有助手的预设里摘掉，和电脑端删除逻辑一致
++          if (cfg.prompts && typeof cfg.prompts === 'object') {
++            for (const k of Object.keys(cfg.prompts)) {
++              const pr = cfg.prompts[k]
++              if (pr && Array.isArray(pr.defaultMcpServers)) {
++                pr.defaultMcpServers = pr.defaultMcpServers.filter((x) => x !== id)
++              }
++            }
++          }
 +        })
 +        await reply(true, { id })
 +        return
 +      }
 +
 +      // ---- Skill（磁盘上的 SKILL.md）----
-+      if (op === 'skill-toggle' || op === 'skill-delete') {
++      if (op === 'skill-toggle' || op === 'skill-delete' || op === 'skill-save') {
 +        const id = String(body.id || '').trim()
 +        if (!id) return fail('id_required')
 +        const cfgRes = await (ctx?.dataApi?.getConfig?.() || Promise.resolve(null))
 +        const skillPath = cfgRes?.config?.skillPath || ''
 +        if (!skillPath) return fail('skill_dir_not_configured')
++        const details = getSkillDetails(skillPath, id)
++        if (!details?.ok) return fail('skill_not_found')
++        const mdPath = join(skillPath, id, 'SKILL.md')
 +
 +        if (op === 'skill-delete') {
 +          const ok = deleteSkill(skillPath, id)
@@ -1568,26 +1720,66 @@ index 0000000..b6833d4
 +          return
 +        }
 +
-+        // skill-toggle：改 SKILL.md frontmatter 里的 disable-model-invocation
-+        const details = getSkillDetails(skillPath, id)
-+        if (!details?.ok) return fail('skill_not_found')
-+        const mdPath = join(skillPath, id, 'SKILL.md')
++        // 读取现有 frontmatter + 正文（保留未知字段）
 +        let content = ''
 +        try { content = readFileSync(mdPath, 'utf-8') } catch (_) { content = '' }
 +        if (!content) return fail('skill_md_missing')
-+        const disabled = body.disabled === true
-+        const flag = 'disable-model-invocation'
-+        const re = new RegExp('^' + flag + ':\\s*.*$', 'm')
-+        let nextContent
-+        if (re.test(content)) {
-+          nextContent = content.replace(re, flag + ': ' + (disabled ? 'true' : 'false'))
-+        } else if (content.startsWith('---')) {
-+          nextContent = content.replace(/^---\r?\n/, '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n')
++        const meta = (details.metadata && typeof details.metadata === 'object') ? { ...details.metadata } : {}
++        const bodyText = String(details.content || '')
++
++        if (op === 'skill-toggle') {
++          const disabled = body.disabled === true
++          if (disabled) meta['disable-model-invocation'] = true
++          else delete meta['disable-model-invocation']
 +        } else {
-+          nextContent = '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n---\n' + content
++          // skill-save：名称 / 描述 / 启用 / fork / 允许工具 / 正文
++          const str = (v, k) => { if (typeof v === 'string' && v.trim()) meta[k] = v.trim() }
++          str(body.name, 'name')
++          if (typeof body.description === 'string') meta.description = body.description
++          if (typeof body.enabled === 'boolean') {
++            if (body.enabled) delete meta['disable-model-invocation']
++            else meta['disable-model-invocation'] = true
++          }
++          if (typeof body.forkMode === 'boolean') {
++            if (body.forkMode) meta.context = 'fork'
++            else delete meta.context
++          }
++          if (typeof body.allowedTools === 'string') {
++            const tools = body.allowedTools.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
++            if (tools.length) meta['allowed-tools'] = tools
++            else delete meta['allowed-tools']
++          }
 +        }
-+        writeFileSync(mdPath, nextContent, 'utf-8')
-+        await reply(true, { id, disabled })
++
++        // 写回 YAML frontmatter（与电脑端 saveSkillContent 同样的字段顺序）
++        const yamlScalar = (v) => (typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v))
++        const lines = ['---']
++        const push = (k, v) => {
++          if (v === undefined || v === null || v === '') return
++          if (Array.isArray(v)) {
++            if (!v.length) return
++            lines.push(k + ': [' + v.map((x) => '"' + String(x).replace(/"/g, '\\"') + '"').join(', ') + ']')
++            return
++          }
++          lines.push(k + ': ' + yamlScalar(v))
++        }
++        push('name', meta.name)
++        push('description', meta.description)
++        push('argument-hint', meta['argument-hint'])
++        push('user-invocable', meta['user-invocable'])
++        if (meta['disable-model-invocation'] === true) lines.push('disable-model-invocation: true')
++        if (meta.context === 'fork') lines.push('context: fork')
++        push('agent', meta.agent)
++        push('model', meta.model)
++        push('allowed-tools', meta['allowed-tools'])
++        lines.push('---')
++        lines.push('')
++        const nextBody = op === 'skill-save' && typeof body.instructions === 'string'
++          ? body.instructions
++          : bodyText
++        lines.push(nextBody || '')
++        writeFileSync(mdPath, lines.join('\n'), 'utf-8')
++        await reply(true, { id, disabled: meta['disable-model-invocation'] === true })
 +        return
 +      }
 +
@@ -2571,10 +2763,10 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..b8e1353 100644
+index 6bb1113..f513c7e 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -741,9 +741,144 @@ const normalizeWindowEventPayload = (input) => {
+@@ -741,9 +741,148 @@ const normalizeWindowEventPayload = (input) => {
      return input.payload;
    }
  
@@ -2656,6 +2848,10 @@ index 6bb1113..b8e1353 100644
 +        reply(false, { reason: 'busy' });
 +        return;
 +      }
++      // 「重新回答」也会产生一条新的 AI 回复要回传手机 ——
++      // 所以也要排队，否则队列早已清空时回传目标为 null，手机就会
++      // 一直停在「重新回答中」。
++      enqueueRelayReply(cmd.relayTo);
 +      await reaskAI(targetId);
 +      reply(true);
 +      return;
@@ -2719,7 +2915,7 @@ index 6bb1113..b8e1353 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -759,6 +894,35 @@ const flushPendingWindowPayloadQueue = async () => {
+@@ -759,6 +898,35 @@ const flushPendingWindowPayloadQueue = async () => {
  };
  
  
@@ -2755,7 +2951,7 @@ index 6bb1113..b8e1353 100644
  const handleAppendMessageEvent = async (data, options = {}) => {
    if (!data || !ensureConversationWriteAccess(true)) return;
  
-@@ -769,6 +933,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -769,6 +937,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -2779,7 +2975,7 @@ index 6bb1113..b8e1353 100644
      return;
    }
  
-@@ -790,7 +971,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -790,7 +975,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: multilineText });
@@ -2790,7 +2986,7 @@ index 6bb1113..b8e1353 100644
      }
    } else if (data.type === "over" && data.payload) {
      const overText = String(data.payload);
-@@ -799,7 +982,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -799,7 +986,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: overText });
@@ -2801,7 +2997,7 @@ index 6bb1113..b8e1353 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3046,7 +3231,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3046,7 +3235,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -2818,7 +3014,7 @@ index 6bb1113..b8e1353 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5687,7 +5880,18 @@ onMounted(async () => {
+@@ -5687,7 +5884,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -2838,7 +3034,7 @@ index 6bb1113..b8e1353 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10560,139 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10564,194 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -2849,6 +3045,25 @@ index 6bb1113..b8e1353 100644
 +// ============================================================================
 +const relayReplyTarget = ref(null);
 +let relayLastSentAssistantId = null;
++
++// 手机排队的消息数：每来一条要 AI 回复的手机消息就 +1，回传成功就 -1。
++//
++// 为什么需要它：以前发完一条回复就无条件把 relayReplyTarget 清空，
++// 于是「连续发两条」时，第一条回复发完目标就没了，第二条回复再也发不出去，
++// 手机端就永远卡在「电脑端处理中」。现在只在队列清空时才解绑。
++let relayPendingPhoneReplies = 0;
++let relayPendingResetTimer = null;
++
++/** 队列有变化时刷新兜底定时器：15 分钟没人认领就强制解绑，避免脏状态 */
++const touchRelayPendingTimer = () => {
++  if (relayPendingResetTimer) clearTimeout(relayPendingResetTimer);
++  if (relayPendingPhoneReplies <= 0) return;
++  relayPendingResetTimer = setTimeout(() => {
++    relayWarn('[relay] pending replies timed out; resetting', relayPendingPhoneReplies);
++    relayPendingPhoneReplies = 0;
++    relayReplyTarget.value = null;
++  }, 15 * 60 * 1000);
++};
 +
 +/**
 + * 窗口内的日志同时打一份到主进程终端。
@@ -2878,8 +3093,32 @@ index 6bb1113..b8e1353 100644
 +const armRelayReply = (relayTo) => {
 +  if (!relayTo) return;
 +  relayReplyTarget.value = String(relayTo);
-+  relayLastSentAssistantId = null;
 +  relayLog('[relay] armed reply target =', relayReplyTarget.value);
++};
++
++/** 收到一条需要 AI 回复的手机消息 → 排队 +1 */
++const enqueueRelayReply = (relayTo) => {
++  if (!relayTo) return;
++  armRelayReply(relayTo);
++  relayPendingPhoneReplies += 1;
++  touchRelayPendingTimer();
++  relayLog('[relay] pending phone replies =', relayPendingPhoneReplies);
++};
++
++/** 一条回复已回传成功 → 队列 -1；清空才解绑目标 */
++const settleRelayReply = () => {
++  relayPendingPhoneReplies = Math.max(0, relayPendingPhoneReplies - 1);
++  relayLog('[relay] pending phone replies left =', relayPendingPhoneReplies);
++  if (relayPendingPhoneReplies <= 0) {
++    relayPendingPhoneReplies = 0;
++    relayReplyTarget.value = null;
++    if (relayPendingResetTimer) {
++      clearTimeout(relayPendingResetTimer);
++      relayPendingResetTimer = null;
++    }
++  } else {
++    touchRelayPendingTimer();
++  }
 +};
 +
 +// 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
@@ -2893,7 +3132,18 @@ index 6bb1113..b8e1353 100644
 +  const p = env?.payload;
 +  relayLog('[relay] window event:', env?.event, 'relayTo =', p?.relayTo || p?.__relayTo);
 +  if (p && typeof p === 'object') {
-+    armRelayReply(p.relayTo || p.__relayTo);
++    const relayTo = p.relayTo || p.__relayTo;
++    // 空事件（只用来重绑目标 / 恢复会话）不该入队
++    const isRealPhoneMessage =
++      !p.__relayArmOnly &&
++      typeof p.payload === 'string' &&
++      p.payload.trim().length > 0;
++    if (isRealPhoneMessage) {
++      enqueueRelayReply(relayTo);
++    } else {
++      armRelayReply(relayTo);
++      relayLog('[relay] arm-only event (not queued)');
++    }
 +  }
 +  // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
 +  const opts = p?.__relayOptions;
@@ -2969,7 +3219,8 @@ index 6bb1113..b8e1353 100644
 +        }
 +      });
 +      relayLog('[relay] reply sent ok');
-+      relayReplyTarget.value = null;
++      // 只有队列里没有别的手机消息在等，才解绑回传目标
++      settleRelayReply();
 +    } catch (err) {
 +      relayWarn('[relay] reply send failed:', err);
 +    }

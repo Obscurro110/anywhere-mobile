@@ -159,7 +159,23 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
             .toList();
 
       case CapabilityKind.models:
-        // 按服务商分组显示，点服务商进编辑页
+        // 服务商列表（电脑端上报的 providers 明细）；老版本电脑端没有
+        // providers 时退回「按模型分组」的展示，至少还能看。
+        if (caps.providers.isNotEmpty) {
+          return caps.providers
+              .map((p) => _Row(
+                    title: p.name.isEmpty ? p.id : p.name,
+                    subtitle: [
+                      if (p.modelList.isNotEmpty) '${p.modelList.length} 个模型',
+                      if (p.url.isNotEmpty) p.url,
+                      if (!p.enable) '已停用',
+                      if (p.hasApiKey) '已配置密钥',
+                    ].join(' · '),
+                    icon: Icons.cloud_outlined,
+                    editId: p.id,
+                  ))
+              .toList();
+        }
         final groups = <String, List<String>>{};
         final order = <String>[];
         for (final m in caps.models) {

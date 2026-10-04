@@ -356,12 +356,72 @@ class FileMeta {
 // Capabilities (desktop -> phone)
 // ---------------------------------------------------------------------------
 
+/// 电脑端「服务商」（模型来源）。字段对齐桌面 Providers.vue。
+///
+/// 注意：api_key 只写不读 —— 电脑端只回 hasApiKey 布尔，
+/// 手机上留空就表示"不修改"。
+class ProviderOption {
+  final String id;
+  final String name;
+  final String url;
+  final String apiType;
+  final bool enable;
+  final int retryCount;
+  final Map<String, String> headers;
+  final List<String> modelList;
+  final bool hasApiKey;
+  final String folderId;
+
+  ProviderOption({
+    required this.id,
+    required this.name,
+    this.url = '',
+    this.apiType = 'chat_completions',
+    this.enable = true,
+    this.retryCount = 3,
+    this.headers = const {},
+    this.modelList = const [],
+    this.hasApiKey = false,
+    this.folderId = '',
+  });
+
+  factory ProviderOption.fromJson(Map<String, dynamic> j) => ProviderOption(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? j['id'] as String? ?? '',
+        url: j['url'] as String? ?? '',
+        apiType: j['apiType'] as String? ?? 'chat_completions',
+        enable: j['enable'] as bool? ?? true,
+        retryCount: (j['retryCount'] as num?)?.toInt() ?? 3,
+        headers: _stringMap(j['headers']),
+        modelList: ((j['modelList'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        hasApiKey: j['hasApiKey'] as bool? ?? false,
+        folderId: j['folderId'] as String? ?? '',
+      );
+
+  String get summary {
+    final bits = <String>[];
+    if (modelList.isNotEmpty) bits.add('${modelList.length} 个模型');
+    if (url.isNotEmpty) bits.add(url);
+    if (bits.isEmpty) bits.add(enable ? '已启用' : '已停用');
+    return bits.join(' · ');
+  }
+}
+
 class ModelOption {
   final String value; // "<providerId>|<modelName>"
   final String label;
   final String provider;
+  final String providerId;
 
-  ModelOption({required this.value, required this.label, this.provider = ''});
+  ModelOption({
+    required this.value,
+    required this.label,
+    this.provider = '',
+    this.providerId = '',
+  });
 
   /// 服务商显示名。电脑端没上报时退回 value 里的 providerId。
   String get providerLabel {
@@ -385,7 +445,14 @@ class ModelOption {
         value: j['value'] as String? ?? '',
         label: j['label'] as String? ?? j['value'] as String? ?? '',
         provider: j['provider'] as String? ?? '',
+        providerId: j['providerId'] as String? ?? '',
       );
+}
+
+/// JSON 里的对象转 String->String（值可能是数字/布尔）。
+Map<String, String> _stringMap(dynamic raw) {
+  if (raw is! Map) return const {};
+  return raw.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
 }
 
 class McpOption {
@@ -398,6 +465,15 @@ class McpOption {
   final String type;
   final String command;
   final String url;
+  final String baseUrl;
+  final List<String> args;
+  final Map<String, String> env;
+  final Map<String, String> headers;
+  final bool isActive;
+  final bool isPersistent;
+  final int timeoutSeconds;
+  final List<String> tags;
+  final String authType;
   final int argsCount;
   final int toolCount;
   final bool builtin;
@@ -410,6 +486,15 @@ class McpOption {
     this.type = '',
     this.command = '',
     this.url = '',
+    this.baseUrl = '',
+    this.args = const [],
+    this.env = const {},
+    this.headers = const {},
+    this.isActive = true,
+    this.isPersistent = false,
+    this.timeoutSeconds = 120,
+    this.tags = const [],
+    this.authType = 'none',
     this.argsCount = 0,
     this.toolCount = 0,
     this.builtin = false,
@@ -432,6 +517,23 @@ class McpOption {
         type: j['type'] as String? ?? '',
         command: j['command'] as String? ?? '',
         url: j['url'] as String? ?? '',
+        baseUrl: j['baseUrl'] as String? ?? '',
+        args: ((j['args'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        env: _stringMap(j['env']),
+        headers: _stringMap(j['headers']),
+        isActive: j['isActive'] as bool? ?? true,
+        isPersistent: j['isPersistent'] as bool? ?? false,
+        timeoutSeconds: (j['timeoutSeconds'] as num?)?.toInt() ?? 120,
+        tags: ((j['tags'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList(),
+        authType: (j['auth'] is Map)
+            ? (j['auth']['type']?.toString() ?? 'none')
+            : 'none',
         argsCount: (j['argsCount'] as num?)?.toInt() ?? 0,
         toolCount: (j['toolCount'] as num?)?.toInt() ?? 0,
         builtin: j['builtin'] as bool? ?? false,
@@ -446,6 +548,10 @@ class SkillOption {
   final bool disabled;
   final String context;
   final List<String> allowedTools;
+  final String instructions;
+  final String argumentHint;
+  final String agent;
+  final String model;
 
   SkillOption({
     required this.id,
@@ -455,6 +561,10 @@ class SkillOption {
     this.disabled = false,
     this.context = 'normal',
     this.allowedTools = const [],
+    this.instructions = '',
+    this.argumentHint = '',
+    this.agent = '',
+    this.model = '',
   });
 
   /// 一句话说明（电脑端 SKILL.md 的 description）
@@ -472,6 +582,10 @@ class SkillOption {
             .map((e) => e.toString())
             .where((e) => e.isNotEmpty)
             .toList(),
+        instructions: j['instructions'] as String? ?? '',
+        argumentHint: j['argumentHint'] as String? ?? '',
+        agent: j['agent'] as String? ?? '',
+        model: j['model'] as String? ?? '',
       );
 }
 
@@ -495,6 +609,27 @@ class PromptOption {
   /// 助手预设的 Skill 名称列表
   final List<String> skills;
 
+  // ---- 编辑页回填用的其余字段（与电脑端 Prompts.vue 对齐）----
+  final String promptText;
+  final bool enable;
+  final String showMode;
+  final String matchRegex;
+  final bool stream;
+  final bool isTemperature;
+  final double temperature;
+  final bool isDirectSend_normal;
+  final bool isDirectSend_file;
+  final bool isDirectSend_image;
+  final bool ifTextNecessary;
+  final String voice;
+  final int windowWidth;
+  final int windowHeight;
+  final bool isAlwaysOnTop;
+  final bool autoCloseOnBlur;
+  final double backgroundOpacity;
+  final int backgroundBlur;
+  final bool autoSaveChat;
+
   PromptOption({
     required this.key,
     required this.label,
@@ -504,6 +639,25 @@ class PromptOption {
     this.reasoningEffort = '',
     this.mcp = const [],
     this.skills = const [],
+    this.promptText = '',
+    this.enable = true,
+    this.showMode = 'window',
+    this.matchRegex = '',
+    this.stream = true,
+    this.isTemperature = false,
+    this.temperature = 0.7,
+    this.isDirectSend_normal = true,
+    this.isDirectSend_file = false,
+    this.isDirectSend_image = true,
+    this.ifTextNecessary = false,
+    this.voice = '',
+    this.windowWidth = 540,
+    this.windowHeight = 700,
+    this.isAlwaysOnTop = true,
+    this.autoCloseOnBlur = true,
+    this.backgroundOpacity = 0.6,
+    this.backgroundBlur = 0,
+    this.autoSaveChat = false,
   });
 
   /// 这个助手是否带了任何预设（用于 UI 上提示"已套用助手预设"）
@@ -538,6 +692,25 @@ class PromptOption {
             .map((e) => e.toString().trim())
             .where((e) => e.isNotEmpty)
             .toList(),
+        promptText: j['promptText'] as String? ?? '',
+        enable: j['enable'] as bool? ?? true,
+        showMode: j['showMode'] as String? ?? 'window',
+        matchRegex: j['matchRegex'] as String? ?? '',
+        stream: j['stream'] as bool? ?? true,
+        isTemperature: j['isTemperature'] as bool? ?? false,
+        temperature: (j['temperature'] as num?)?.toDouble() ?? 0.7,
+        isDirectSend_normal: j['isDirectSend_normal'] as bool? ?? true,
+        isDirectSend_file: j['isDirectSend_file'] as bool? ?? false,
+        isDirectSend_image: j['isDirectSend_image'] as bool? ?? true,
+        ifTextNecessary: j['ifTextNecessary'] as bool? ?? false,
+        voice: j['voice'] as String? ?? '',
+        windowWidth: (j['window_width'] as num?)?.toInt() ?? 540,
+        windowHeight: (j['window_height'] as num?)?.toInt() ?? 700,
+        isAlwaysOnTop: j['isAlwaysOnTop'] as bool? ?? true,
+        autoCloseOnBlur: j['autoCloseOnBlur'] as bool? ?? true,
+        backgroundOpacity: (j['backgroundOpacity'] as num?)?.toDouble() ?? 0.6,
+        backgroundBlur: (j['backgroundBlur'] as num?)?.toInt() ?? 0,
+        autoSaveChat: j['autoSaveChat'] as bool? ?? false,
       );
 }
 
@@ -776,6 +949,9 @@ class Capabilities {
   /// 电脑端的会话压缩配置（null = 电脑端版本太旧，不支持）
   final CompactConfig? compact;
 
+  /// 电脑端服务商明细（手机「模型」编辑页用）
+  final List<ProviderOption> providers;
+
   final List<String> reasoningEffortOptions;
   final ChatOptions current;
   final int fetchedAt;
@@ -787,6 +963,7 @@ class Capabilities {
 
   Capabilities({
     this.models = const [],
+    this.providers = const [],
     this.mcp = const [],
     this.skills = const [],
     this.prompts = const [],
@@ -817,6 +994,10 @@ class Capabilities {
         models: ((j['models'] as List?) ?? [])
             .map((e) => ModelOption.fromJson((e as Map).cast<String, dynamic>()))
             .where((m) => m.value.isNotEmpty)
+            .toList(),
+        providers: ((j['providers'] as List?) ?? [])
+            .map((e) => ProviderOption.fromJson((e as Map).cast<String, dynamic>()))
+            .where((p) => p.id.isNotEmpty)
             .toList(),
         mcp: ((j['mcp'] as List?) ?? [])
             .map((e) => McpOption.fromJson((e as Map).cast<String, dynamic>()))
@@ -851,6 +1032,7 @@ class Capabilities {
 
   Capabilities withTasks(List<TaskOption> next) => Capabilities(
         models: models,
+        providers: providers,
         mcp: mcp,
         skills: skills,
         prompts: prompts,

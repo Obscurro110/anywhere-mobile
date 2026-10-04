@@ -144,7 +144,24 @@ class AppState extends ChangeNotifier {
   String _activeConversationTitle = '';
 
   /// True while we're waiting for the desktop's reply (drives the UI spinner).
-  bool get awaitingReply => messages.isNotEmpty && messages.last.pending;
+  bool get awaitingReply => hasPendingReply;
+
+  /// 最早那条「等待电脑端回复」的气泡下标；没有就 -1。
+  ///
+  /// 为什么是**最早**而不是最后：连续发多条时会有多个 pending 气泡排队。
+  /// 电脑端是按顺序回复的，所以第一个回复该落在第一个 pending 上。
+  /// 以前只认 `messages.last.pending`，于是：
+  ///   · 第 1 条回复把第 2 个 pending 覆盖掉（内容错位）
+  ///   · 第 1 个 pending 再也没人认领 → 一直显示「电脑端处理中」
+  int _firstPendingIndex() {
+    for (var i = 0; i < messages.length; i++) {
+      if (messages[i].pending) return i;
+    }
+    return -1;
+  }
+
+  /// 是否还有气泡在等电脑端回复
+  bool get hasPendingReply => _firstPendingIndex() >= 0;
 
   RelayClient get client => _client;
   String get deviceId => config.deviceId;
@@ -1066,6 +1083,7 @@ class AppState extends ChangeNotifier {
         if (c != null && r['ok'] == true) {
           capabilities = Capabilities(
             models: capabilities.models,
+            providers: capabilities.providers,
             mcp: capabilities.mcp,
             skills: capabilities.skills,
             prompts: capabilities.prompts,
@@ -1299,9 +1317,12 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    // 情况 B：正常回复 —— 合并进 awaiting 的 pending 气泡
-    if (isAssistant && messages.isNotEmpty && messages.last.pending) {
-      messages[messages.length - 1] = ChatMessage(
+    // 情况 B：正常回复 —— 合并进**最早**那个 pending 气泡
+    // （电脑端按顺序回复，所以每个回复认领最早的一条；
+    //   以前只认最后一条，连续发消息时会留下永远转圈的 pending）
+    final pendingIdx = isAssistant ? _firstPendingIndex() : -1;
+    if (isAssistant && pendingIdx >= 0) {
+      messages[pendingIdx] = ChatMessage(
         id: env.id,
         role: p.role,
         text: p.text,
@@ -1371,9 +1392,11 @@ class AppState extends ChangeNotifier {
     final st = env.payload?['status'];
     if (st == 'undelivered') {
       debugPrint('[AppState] message ${env.id} undelivered');
-      // Mark the pending bubble as failed so the UI stops spinning.
-      if (messages.isNotEmpty && messages.last.pending) {
-        messages[messages.length - 1] = messages.last
+      // 标记**最早**那个 pending 为失败，让界面停止转圈
+      // （同样不能只认最后一条，否则前面的 pending 会一直转）
+      final pi = _firstPendingIndex();
+      if (pi >= 0) {
+        messages[pi] = messages[pi]
             .copyWith(text: '⚠️ 电脑端未收到（可能未启动或未连接）', pending: false);
         _persistHistory();
       }
@@ -1426,10 +1449,12 @@ class AppState extends ChangeNotifier {
 
     final ok = _client.send(env);
     if (!ok) {
-      if (messages.isNotEmpty && messages.last.pending) {
-        messages.removeLast();
-        notifyListeners();
+      // 没发出去就把刚加的这个 pending 摘掉（它是排在最后的那条）
+      final lastIdx = messages.length - 1;
+      if (lastIdx >= 0 && messages[lastIdx].pending) {
+        messages.removeAt(lastIdx);
       }
+      notifyListeners();
     }
     return ok;
   }
