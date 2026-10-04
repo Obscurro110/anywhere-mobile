@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createFileStore } from './fileStore.js';
 import { createWss } from './wsHub.js';
-import { parseTokens, validateTokenConfig } from './auth.js';
+import { parseTokens, validateTokenConfig, userForToken } from './auth.js';
 
 // ---- tiny .env loader (no dependency) ----
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,9 +45,18 @@ const server = http.createServer(async (req, res) => {
   try {
     await handleHttp(req, res);
   } catch (err) {
+    // 不把 err 细节返回给客户端，避免泄露内部路径/栈
     console.error('[relay] http error', err);
-    res.writeHead(500, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: false, error: 'internal_error' }));
+    const body = JSON.stringify({ ok: false, error: 'internal_error' });
+    if (!res.headersSent) {
+      res.writeHead(500, {
+        ...SECURITY_HEADERS,
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+    } else {
+      res.end();
+    }
   }
 });
 
@@ -62,6 +71,9 @@ async function handleHttp(req, res) {
   // download a relayed file: /file/:id?token=...
   const fileMatch = url.pathname.match(/^\/file\/([\w-]+)$/);
   if (fileMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return json(res, 405, { ok: false, error: 'method_not_allowed' });
+    }
     const token = url.searchParams.get('token');
     if (!token || !isValidToken(token)) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -92,9 +104,9 @@ async function handleHttp(req, res) {
   return json(res, 404, { ok: false, error: 'not_found' });
 }
 
+// ⚠️ 时序安全：不要用 `v === t` 提前短路比较，否则能用响应耗时逐字节爆破 token。
 function isValidToken(t) {
-  for (const v of tokens.values()) if (v === t) return true;
-  return false;
+  return userForToken(tokens, t) !== null;
 }
 
 // 统一安全响应头（对公网服务尤其重要）

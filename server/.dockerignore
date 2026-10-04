@@ -4,3 +4,4 @@ data
 .env.*
 *.log
 test-e2e.mjs
+test-security.mjs

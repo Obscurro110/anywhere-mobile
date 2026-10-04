@@ -28,6 +28,8 @@ services:
       - MAX_FILE_MB=${MAX_FILE_MB:-512}
     volumes:
       # 中转文件持久化，避免容器重建丢失
+      # ⚠️ 容器以 node(uid 1000) 运行，宿主 data 目录需可写：
+      #    mkdir -p data && chown -R 1000:1000 data
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

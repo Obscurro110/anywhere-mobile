@@ -82,14 +82,21 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
   async function saveStream(stream, name, mime = 'application/octet-stream') {
     const id = randomUUID();
     const safeName = sanitizeName(name);
-    const out = createWriteStream(dataPath(id));
+    const outPath = dataPath(id);
+    const out = createWriteStream(outPath);
     let size = 0;
     stream.on('data', (c) => {
       size += c.length;
       if (size > maxBytes) stream.destroy(new Error('file_too_large'));
     });
-    await pipeline(stream, out);
-    const meta = { id, name: safeName, size, mime, createdAt: Date.now(), path: dataPath(id) };
+    try {
+      await pipeline(stream, out);
+    } catch (err) {
+      // 失败（超限/断流）时清掉已写的半截文件，避免磁盘残留
+      try { if (existsSync(outPath)) unlinkSync(outPath); } catch {}
+      throw err;
+    }
+    const meta = { id, name: safeName, size, mime, createdAt: Date.now(), path: outPath };
     index.set(id, meta);
     persistMeta(meta);
     return publicMeta(meta);
@@ -105,8 +112,14 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
     }
     if (buf.length > maxBytes) throw new Error('file_too_large');
     const id = randomUUID();
-    await pipeline(Readable.from(buf), createWriteStream(dataPath(id)));
-    const meta = { id, name: sanitizeName(name), size: buf.length, mime, createdAt: Date.now(), path: dataPath(id) };
+    const outPath = dataPath(id);
+    try {
+      await pipeline(Readable.from(buf), createWriteStream(outPath));
+    } catch (err) {
+      try { if (existsSync(outPath)) unlinkSync(outPath); } catch {}
+      throw err;
+    }
+    const meta = { id, name: sanitizeName(name), size: buf.length, mime, createdAt: Date.now(), path: outPath };
     index.set(id, meta);
     persistMeta(meta);
     return publicMeta(meta);
@@ -119,7 +132,7 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
   async function serve(id, req, res) {
     const meta = index.get(id);
     if (!meta || !existsSync(meta.path)) {
-      res.writeHead(404, { 'content-type': 'application/json' });
+      res.writeHead(404, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' });
       res.end(JSON.stringify({ ok: false, error: 'not_found' }));
       return;
     }
