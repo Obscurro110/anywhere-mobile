@@ -201,6 +201,7 @@ function describeTaskSchedule(task = {}) {
 async function readCapabilities() {
   const result = {
     models: [],
+    providers: [],
     mcp: [],
     skills: [],
     prompts: [],
@@ -235,6 +236,28 @@ async function readCapabilities() {
       }
     }
 
+    // ---- 服务商明细（手机「模型」编辑页回填用）----
+    // 注意：绝不带 api_key，只带 hasApiKey 布尔。
+    const provOrder = Array.isArray(config.providerOrder)
+      ? config.providerOrder
+      : Object.keys(config.providers || {})
+    for (const pid of provOrder) {
+      const provider = config.providers?.[pid]
+      if (!provider || typeof provider !== 'object') continue
+      result.providers.push({
+        id: String(pid),
+        name: (provider.name || pid).toString(),
+        url: (provider.url || '').toString(),
+        apiType: (provider.apiType || 'chat_completions').toString(),
+        enable: provider.enable !== false,
+        retryCount: Number.isFinite(provider.retryCount) ? provider.retryCount : 3,
+        headers: provider.headers && typeof provider.headers === 'object' ? { ...provider.headers } : {},
+        modelList: Array.isArray(provider.modelList) ? [...provider.modelList] : [],
+        hasApiKey: typeof provider.api_key === 'string' && provider.api_key.length > 0,
+        folderId: (provider.folderId || '').toString()
+      })
+    }
+
     // ---- MCP：config.mcpServers ----
     // 带上 description / 连接方式，手机端才能解释「这个 MCP 是干什么的」
     const servers = config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {}
@@ -247,10 +270,19 @@ async function readCapabilities() {
         enabled: s.enable !== false && s.isActive !== false,
         description: (s.description || s.desc || '').toString(),
         type: String(type),
-        // 连接信息（给详情页展示，注意不包含任何 token）
+        // 连接信息（详情页展示 + 编辑页回填）
         command: (s.command || '').toString(),
-        url: (s.url || '').toString(),
+        url: (s.url || s.baseUrl || '').toString(),
+        baseUrl: (s.baseUrl || s.url || '').toString(),
+        args: Array.isArray(s.args) ? [...s.args] : [],
         argsCount: Array.isArray(s.args) ? s.args.length : 0,
+        env: s.env && typeof s.env === 'object' ? { ...s.env } : {},
+        headers: s.headers && typeof s.headers === 'object' ? { ...s.headers } : {},
+        isActive: s.isActive !== false && s.enable !== false,
+        isPersistent: s.isPersistent === true,
+        timeoutSeconds: Number(s.timeoutSeconds) || 120,
+        tags: Array.isArray(s.tags) ? [...s.tags] : [],
+        auth: s.auth && typeof s.auth === 'object' ? { type: s.auth.type || 'none' } : { type: 'none' },
         toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
         builtin: s.type === 'builtin'
       })
@@ -264,6 +296,10 @@ async function readCapabilities() {
         const skills = listSkills(skillPath)
         for (const sk of Array.isArray(skills) ? skills : []) {
           if (!sk?.id) continue
+          // 带上正文与元数据，手机编辑页才能改
+          let skDetails = null
+          try { skDetails = getSkillDetails(skillPath, sk.id) } catch (_) { skDetails = null }
+          const skMeta = (skDetails?.metadata && typeof skDetails.metadata === 'object') ? skDetails.metadata : {}
           result.skills.push({
             id: sk.id,
             label: sk.name || sk.id,
@@ -271,7 +307,11 @@ async function readCapabilities() {
             userInvocable: sk.userInvocable !== false,
             disabled: sk.disabled === true,
             context: sk.context || 'normal',
-            allowedTools: Array.isArray(sk.allowedTools) ? sk.allowedTools : []
+            allowedTools: Array.isArray(sk.allowedTools) ? sk.allowedTools : [],
+            instructions: skDetails?.ok ? String(skDetails.content || '') : '',
+            argumentHint: (skMeta['argument-hint'] || '').toString(),
+            agent: (skMeta.agent || '').toString(),
+            model: (skMeta.model || '').toString()
           })
         }
       } catch (err) {
@@ -296,7 +336,27 @@ async function readCapabilities() {
         // ---- 助手预设（会话建立时电脑端本来就会应用这些）----
         reasoningEffort: p.reasoning_effort || p.reasoningEffort || '',
         mcp: Array.isArray(p.defaultMcpServers) ? [...p.defaultMcpServers] : [],
-        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : []
+        skills: Array.isArray(p.defaultSkills) ? [...p.defaultSkills] : [],
+        // ---- 其余字段：手机编辑页回填用（与电脑端弹窗一致）----
+        promptText: (p.prompt || '').toString(),
+        enable: p.enable !== false,
+        showMode: (p.showMode || 'window').toString(),
+        matchRegex: (p.matchRegex || '').toString(),
+        stream: p.stream !== false,
+        isTemperature: p.isTemperature === true,
+        temperature: typeof p.temperature === 'number' ? p.temperature : 0.7,
+        isDirectSend_normal: p.isDirectSend_normal !== false,
+        isDirectSend_file: p.isDirectSend_file === true,
+        isDirectSend_image: p.isDirectSend_image !== false,
+        ifTextNecessary: p.ifTextNecessary === true,
+        voice: (p.voice || '').toString(),
+        window_width: Number(p.window_width) || 540,
+        window_height: Number(p.window_height) || 700,
+        isAlwaysOnTop: p.isAlwaysOnTop !== false,
+        autoCloseOnBlur: p.autoCloseOnBlur !== false,
+        backgroundOpacity: typeof p.backgroundOpacity === 'number' ? p.backgroundOpacity : 0.6,
+        backgroundBlur: Number(p.backgroundBlur) || 0,
+        autoSaveChat: p.autoSaveChat === true
       })
     }
 
@@ -1350,24 +1410,62 @@ async function routePhoneChat(msg) {
 
     try {
       // ---- 助手（config.prompts）----
+      // 字段与电脑端「快捷助手」编辑弹窗一一对应（Prompts.vue savePrompt）。
       if (op === 'prompt-save') {
         const key = String(body.key || '').trim()
+        const oldKey = String(body.oldKey || key).trim()
         if (!key) return fail('key_required')
         if (!/^[\w-]{1,64}$/.test(key)) return fail('key_invalid')
+        if (key === '__DEFAULT__') return fail('protected')
         await mutateConfig((cfg) => {
           cfg.prompts = cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {}
-          const prev = cfg.prompts[key] && typeof cfg.prompts[key] === 'object' ? cfg.prompts[key] : {}
-          const next = { ...prev }
-          if (typeof body.label === 'string' && body.label.trim()) next.name = body.label.trim()
-          if (typeof body.prompt === 'string') next.prompt = body.prompt
-          if (typeof body.model === 'string') next.model = body.model
-          if (typeof body.reasoningEffort === 'string') next.reasoning_effort = body.reasoningEffort
+          const src = cfg.prompts[oldKey] && typeof cfg.prompts[oldKey] === 'object' ? cfg.prompts[oldKey] : {}
+          const next = { ...src }
+          const str = (v, k) => { if (typeof v === 'string') next[k] = v }
+          const bool = (v, k) => { if (typeof v === 'boolean') next[k] = v }
+          const num = (v, k) => { if (typeof v === 'number' && Number.isFinite(v)) next[k] = v }
+
+          str(body.label, 'name')
+          str(body.type, 'type')
+          str(body.showMode, 'showMode')
+          str(body.matchRegex, 'matchRegex')
+          str(body.prompt, 'prompt')
+          str(body.model, 'model')
+          str(body.icon, 'icon')
+          str(body.voice, 'voice')
+          str(body.reasoningEffort, 'reasoning_effort')
+          str(body.backgroundImage, 'backgroundImage')
+          str(body.autoSaveProjectId, 'autoSaveProjectId')
+          bool(body.enable, 'enable')
+          bool(body.stream, 'stream')
+          bool(body.isTemperature, 'isTemperature')
+          bool(body.isDirectSend_normal, 'isDirectSend_normal')
+          bool(body.isDirectSend_file, 'isDirectSend_file')
+          bool(body.isDirectSend_image, 'isDirectSend_image')
+          bool(body.ifTextNecessary, 'ifTextNecessary')
+          bool(body.isAlwaysOnTop, 'isAlwaysOnTop')
+          bool(body.autoCloseOnBlur, 'autoCloseOnBlur')
+          bool(body.autoSaveChat, 'autoSaveChat')
+          num(body.temperature, 'temperature')
+          num(body.window_width, 'window_width')
+          num(body.window_height, 'window_height')
+          num(body.backgroundOpacity, 'backgroundOpacity')
+          num(body.backgroundBlur, 'backgroundBlur')
           if (Array.isArray(body.mcp)) next.defaultMcpServers = body.mcp.map((x) => String(x))
           if (Array.isArray(body.skills)) next.defaultSkills = body.skills.map((x) => String(x))
-          if (typeof body.enable === 'boolean') next.enable = body.enable
           if (!next.type) next.type = 'general'
           if (typeof next.stream !== 'boolean') next.stream = true
+
+          if (key !== oldKey) delete cfg.prompts[oldKey]
           cfg.prompts[key] = next
+          // tags 里引用旧 key 的也一起改名，避免助手从分组里消失
+          if (key !== oldKey && cfg.tags && typeof cfg.tags === 'object') {
+            for (const tag of Object.keys(cfg.tags)) {
+              if (Array.isArray(cfg.tags[tag])) {
+                cfg.tags[tag] = cfg.tags[tag].map((x) => (x === oldKey ? key : x))
+              }
+            }
+          }
         })
         await reply(true, { key })
         return
@@ -1378,12 +1476,20 @@ async function routePhoneChat(msg) {
         if (key === 'AI') return fail('protected')
         await mutateConfig((cfg) => {
           if (cfg.prompts && typeof cfg.prompts === 'object') delete cfg.prompts[key]
+          if (cfg.tags && typeof cfg.tags === 'object') {
+            for (const tag of Object.keys(cfg.tags)) {
+              if (Array.isArray(cfg.tags[tag])) {
+                cfg.tags[tag] = cfg.tags[tag].filter((x) => x !== key)
+              }
+            }
+          }
         })
         await reply(true, { key })
         return
       }
 
       // ---- 模型 / 服务商（config.providers + providerOrder）----
+      // 字段对齐电脑端 Providers.vue（name/url/api_key/modelList/enable/headers/retryCount/apiType）
       if (op === 'provider-save') {
         let id = String(body.id || '').trim()
         const name = String(body.name || '').trim()
@@ -1406,9 +1512,15 @@ async function routePhoneChat(msg) {
           if (url) next.url = url
           if (typeof body.apiKey === 'string' && body.apiKey.trim()) next.api_key = body.apiKey.trim()
           if (typeof body.enable === 'boolean') next.enable = body.enable
+          if (typeof body.apiType === 'string' && body.apiType) next.apiType = body.apiType
+          if (typeof body.retryCount === 'number' && Number.isFinite(body.retryCount)) {
+            next.retryCount = Math.max(0, Math.floor(body.retryCount))
+          }
+          if (body.headers && typeof body.headers === 'object') next.headers = { ...body.headers }
           if (models) next.modelList = models
           if (!next.apiType) next.apiType = 'chat_completions'
           if (typeof next.retryCount !== 'number') next.retryCount = 3
+          if (!next.headers || typeof next.headers !== 'object') next.headers = {}
           cfg.providers[pid] = next
           id = pid
         })
@@ -1429,6 +1541,7 @@ async function routePhoneChat(msg) {
       }
 
       // ---- MCP（config.mcpServers）----
+      // 字段对齐电脑端 Mcp.vue（name/description/type/baseUrl/command/args/env/headers/auth/isActive/isPersistent/timeoutSeconds/tags）
       if (op === 'mcp-save') {
         const id = String(body.id || '').trim()
         if (!id) return fail('id_required')
@@ -1437,13 +1550,40 @@ async function routePhoneChat(msg) {
           cfg.mcpServers = cfg.mcpServers && typeof cfg.mcpServers === 'object' ? cfg.mcpServers : {}
           const prev = cfg.mcpServers[id] && typeof cfg.mcpServers[id] === 'object' ? cfg.mcpServers[id] : {}
           const next = { ...prev, id }
-          if (typeof body.name === 'string' && body.name.trim()) next.name = body.name.trim()
-          if (typeof body.type === 'string' && body.type) next.type = body.type
-          if (typeof body.command === 'string') next.command = body.command
+          const str = (v, k) => { if (typeof v === 'string') next[k] = v }
+          str(body.name, 'name')
+          str(body.description, 'description')
+          str(body.type, 'type')
+          str(body.command, 'command')
+          // 电脑端 config 里 sse/http 用的是 baseUrl，历史数据也有 url —— 两个都写
+          if (typeof body.baseUrl === 'string') {
+            next.baseUrl = body.baseUrl
+            next.url = body.baseUrl
+          } else if (typeof body.url === 'string') {
+            next.url = body.url
+            next.baseUrl = body.url
+          }
           if (Array.isArray(body.args)) next.args = body.args.map((x) => String(x))
-          if (typeof body.url === 'string') next.url = body.url
-          if (typeof body.isActive === 'boolean') next.isActive = body.isActive
-          if (!next.type) next.type = next.url ? 'sse' : 'stdio'
+          if (body.env && typeof body.env === 'object') next.env = { ...body.env }
+          if (body.headers && typeof body.headers === 'object') next.headers = { ...body.headers }
+          if (typeof body.isActive === 'boolean') {
+            next.isActive = body.isActive
+            next.enable = body.isActive
+          }
+          if (typeof body.isPersistent === 'boolean') next.isPersistent = body.isPersistent
+          if (typeof body.timeoutSeconds === 'number' && Number.isFinite(body.timeoutSeconds)) {
+            next.timeoutSeconds = Math.max(1, Math.floor(body.timeoutSeconds))
+          }
+          if (Array.isArray(body.tags)) next.tags = body.tags.map((x) => String(x))
+          if (body.auth && typeof body.auth === 'object') {
+            const t = String(body.auth.type || 'none')
+            if (t === 'bearer') {
+              next.auth = { type: 'bearer', bearerToken: String(body.auth.bearerToken || '') }
+            } else {
+              next.auth = { type: 'none' }
+            }
+          }
+          if (!next.type) next.type = (next.baseUrl || next.url) ? 'sse' : 'stdio'
           if (typeof next.timeoutSeconds !== 'number') next.timeoutSeconds = 120
           cfg.mcpServers[id] = next
         })
@@ -1456,18 +1596,30 @@ async function routePhoneChat(msg) {
         if (String(id).startsWith('builtin_')) return fail('builtin_readonly')
         await mutateConfig((cfg) => {
           if (cfg.mcpServers && typeof cfg.mcpServers === 'object') delete cfg.mcpServers[id]
+          // 同时从所有助手的预设里摘掉，和电脑端删除逻辑一致
+          if (cfg.prompts && typeof cfg.prompts === 'object') {
+            for (const k of Object.keys(cfg.prompts)) {
+              const pr = cfg.prompts[k]
+              if (pr && Array.isArray(pr.defaultMcpServers)) {
+                pr.defaultMcpServers = pr.defaultMcpServers.filter((x) => x !== id)
+              }
+            }
+          }
         })
         await reply(true, { id })
         return
       }
 
       // ---- Skill（磁盘上的 SKILL.md）----
-      if (op === 'skill-toggle' || op === 'skill-delete') {
+      if (op === 'skill-toggle' || op === 'skill-delete' || op === 'skill-save') {
         const id = String(body.id || '').trim()
         if (!id) return fail('id_required')
         const cfgRes = await (ctx?.dataApi?.getConfig?.() || Promise.resolve(null))
         const skillPath = cfgRes?.config?.skillPath || ''
         if (!skillPath) return fail('skill_dir_not_configured')
+        const details = getSkillDetails(skillPath, id)
+        if (!details?.ok) return fail('skill_not_found')
+        const mdPath = join(skillPath, id, 'SKILL.md')
 
         if (op === 'skill-delete') {
           const ok = deleteSkill(skillPath, id)
@@ -1476,26 +1628,66 @@ async function routePhoneChat(msg) {
           return
         }
 
-        // skill-toggle：改 SKILL.md frontmatter 里的 disable-model-invocation
-        const details = getSkillDetails(skillPath, id)
-        if (!details?.ok) return fail('skill_not_found')
-        const mdPath = join(skillPath, id, 'SKILL.md')
+        // 读取现有 frontmatter + 正文（保留未知字段）
         let content = ''
         try { content = readFileSync(mdPath, 'utf-8') } catch (_) { content = '' }
         if (!content) return fail('skill_md_missing')
-        const disabled = body.disabled === true
-        const flag = 'disable-model-invocation'
-        const re = new RegExp('^' + flag + ':\\s*.*$', 'm')
-        let nextContent
-        if (re.test(content)) {
-          nextContent = content.replace(re, flag + ': ' + (disabled ? 'true' : 'false'))
-        } else if (content.startsWith('---')) {
-          nextContent = content.replace(/^---\r?\n/, '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n')
+        const meta = (details.metadata && typeof details.metadata === 'object') ? { ...details.metadata } : {}
+        const bodyText = String(details.content || '')
+
+        if (op === 'skill-toggle') {
+          const disabled = body.disabled === true
+          if (disabled) meta['disable-model-invocation'] = true
+          else delete meta['disable-model-invocation']
         } else {
-          nextContent = '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n---\n' + content
+          // skill-save：名称 / 描述 / 启用 / fork / 允许工具 / 正文
+          const str = (v, k) => { if (typeof v === 'string' && v.trim()) meta[k] = v.trim() }
+          str(body.name, 'name')
+          if (typeof body.description === 'string') meta.description = body.description
+          if (typeof body.enabled === 'boolean') {
+            if (body.enabled) delete meta['disable-model-invocation']
+            else meta['disable-model-invocation'] = true
+          }
+          if (typeof body.forkMode === 'boolean') {
+            if (body.forkMode) meta.context = 'fork'
+            else delete meta.context
+          }
+          if (typeof body.allowedTools === 'string') {
+            const tools = body.allowedTools.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
+            if (tools.length) meta['allowed-tools'] = tools
+            else delete meta['allowed-tools']
+          }
         }
-        writeFileSync(mdPath, nextContent, 'utf-8')
-        await reply(true, { id, disabled })
+
+        // 写回 YAML frontmatter（与电脑端 saveSkillContent 同样的字段顺序）
+        const yamlScalar = (v) => (typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v))
+        const lines = ['---']
+        const push = (k, v) => {
+          if (v === undefined || v === null || v === '') return
+          if (Array.isArray(v)) {
+            if (!v.length) return
+            lines.push(k + ': [' + v.map((x) => '"' + String(x).replace(/"/g, '\\"') + '"').join(', ') + ']')
+            return
+          }
+          lines.push(k + ': ' + yamlScalar(v))
+        }
+        push('name', meta.name)
+        push('description', meta.description)
+        push('argument-hint', meta['argument-hint'])
+        push('user-invocable', meta['user-invocable'])
+        if (meta['disable-model-invocation'] === true) lines.push('disable-model-invocation: true')
+        if (meta.context === 'fork') lines.push('context: fork')
+        push('agent', meta.agent)
+        push('model', meta.model)
+        push('allowed-tools', meta['allowed-tools'])
+        lines.push('---')
+        lines.push('')
+        const nextBody = op === 'skill-save' && typeof body.instructions === 'string'
+          ? body.instructions
+          : bodyText
+        lines.push(nextBody || '')
+        writeFileSync(mdPath, lines.join('\n'), 'utf-8')
+        await reply(true, { id, disabled: meta['disable-model-invocation'] === true })
         return
       }
 

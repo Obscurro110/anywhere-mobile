@@ -819,6 +819,10 @@ const handleRelayCommand = async (cmd) => {
         reply(false, { reason: 'busy' });
         return;
       }
+      // 「重新回答」也会产生一条新的 AI 回复要回传手机 ——
+      // 所以也要排队，否则队列早已清空时回传目标为 null，手机就会
+      // 一直停在「重新回答中」。
+      enqueueRelayReply(cmd.relayTo);
       await reaskAI(targetId);
       reply(true);
       return;
@@ -10568,6 +10572,25 @@ const scrollToMessageByIndex = async (index) => {
 const relayReplyTarget = ref(null);
 let relayLastSentAssistantId = null;
 
+// 手机排队的消息数：每来一条要 AI 回复的手机消息就 +1，回传成功就 -1。
+//
+// 为什么需要它：以前发完一条回复就无条件把 relayReplyTarget 清空，
+// 于是「连续发两条」时，第一条回复发完目标就没了，第二条回复再也发不出去，
+// 手机端就永远卡在「电脑端处理中」。现在只在队列清空时才解绑。
+let relayPendingPhoneReplies = 0;
+let relayPendingResetTimer = null;
+
+/** 队列有变化时刷新兜底定时器：15 分钟没人认领就强制解绑，避免脏状态 */
+const touchRelayPendingTimer = () => {
+  if (relayPendingResetTimer) clearTimeout(relayPendingResetTimer);
+  if (relayPendingPhoneReplies <= 0) return;
+  relayPendingResetTimer = setTimeout(() => {
+    relayWarn('[relay] pending replies timed out; resetting', relayPendingPhoneReplies);
+    relayPendingPhoneReplies = 0;
+    relayReplyTarget.value = null;
+  }, 15 * 60 * 1000);
+};
+
 /**
  * 窗口内的日志同时打一份到主进程终端。
  * 打包成 exe 后窗口 DevTools 不方便开，这样双击运行时就能看到 [relay:window] 日志。
@@ -10596,8 +10619,32 @@ const relayMessageText = (m) => {
 const armRelayReply = (relayTo) => {
   if (!relayTo) return;
   relayReplyTarget.value = String(relayTo);
-  relayLastSentAssistantId = null;
   relayLog('[relay] armed reply target =', relayReplyTarget.value);
+};
+
+/** 收到一条需要 AI 回复的手机消息 → 排队 +1 */
+const enqueueRelayReply = (relayTo) => {
+  if (!relayTo) return;
+  armRelayReply(relayTo);
+  relayPendingPhoneReplies += 1;
+  touchRelayPendingTimer();
+  relayLog('[relay] pending phone replies =', relayPendingPhoneReplies);
+};
+
+/** 一条回复已回传成功 → 队列 -1；清空才解绑目标 */
+const settleRelayReply = () => {
+  relayPendingPhoneReplies = Math.max(0, relayPendingPhoneReplies - 1);
+  relayLog('[relay] pending phone replies left =', relayPendingPhoneReplies);
+  if (relayPendingPhoneReplies <= 0) {
+    relayPendingPhoneReplies = 0;
+    relayReplyTarget.value = null;
+    if (relayPendingResetTimer) {
+      clearTimeout(relayPendingResetTimer);
+      relayPendingResetTimer = null;
+    }
+  } else {
+    touchRelayPendingTimer();
+  }
 };
 
 // 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
@@ -10611,7 +10658,18 @@ window.api?.onWindowEvent?.((env) => {
   const p = env?.payload;
   relayLog('[relay] window event:', env?.event, 'relayTo =', p?.relayTo || p?.__relayTo);
   if (p && typeof p === 'object') {
-    armRelayReply(p.relayTo || p.__relayTo);
+    const relayTo = p.relayTo || p.__relayTo;
+    // 空事件（只用来重绑目标 / 恢复会话）不该入队
+    const isRealPhoneMessage =
+      !p.__relayArmOnly &&
+      typeof p.payload === 'string' &&
+      p.payload.trim().length > 0;
+    if (isRealPhoneMessage) {
+      enqueueRelayReply(relayTo);
+    } else {
+      armRelayReply(relayTo);
+      relayLog('[relay] arm-only event (not queued)');
+    }
   }
   // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
   const opts = p?.__relayOptions;
@@ -10687,7 +10745,8 @@ watch(
         }
       });
       relayLog('[relay] reply sent ok');
-      relayReplyTarget.value = null;
+      // 只有队列里没有别的手机消息在等，才解绑回传目标
+      settleRelayReply();
     } catch (err) {
       relayWarn('[relay] reply send failed:', err);
     }
