@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/protocol.dart';
 import '../services/app_state.dart';
+import 'desktop_capability_edit_screen.dart';
 
 /// 电脑端能力的**分类**。设置页里每一类一个入口，点进去只看这一类。
 enum CapabilityKind {
@@ -67,6 +68,12 @@ class DesktopCapabilityPage extends StatefulWidget {
 }
 
 class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
+  void _openEdit(BuildContext context, AppState state, String? editId) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DesktopCapabilityEditPage(kind: widget.kind, editId: editId),
+    ));
+  }
+
   @override
   void initState() {
     super.initState();
@@ -88,6 +95,13 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
       appBar: AppBar(
         title: Text(kind.title),
         actions: [
+          // 新建（Skill 没有新建 —— 那是磁盘目录，手机端不建）
+          if (kind != CapabilityKind.skills)
+            IconButton(
+              tooltip: '新建',
+              icon: const Icon(Icons.add),
+              onPressed: () => _openEdit(context, state, null),
+            ),
           IconButton(
             tooltip: '重新拉取',
             icon: state.loadingCapabilities
@@ -140,17 +154,28 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
                   subtitle: _promptSummary(p),
                   icon: Icons.auto_awesome_outlined,
                   details: _promptDetails(p),
+                  editId: p.key,
                 ))
             .toList();
 
       case CapabilityKind.models:
-        return caps.models
-            .map((m) => _Row(
-                  title: m.displayName,
-                  subtitle: m.value,
-                  icon: Icons.smart_toy_outlined,
-                ))
-            .toList();
+        // 按服务商分组显示，点服务商进编辑页
+        final groups = <String, List<String>>{};
+        final order = <String>[];
+        for (final m in caps.models) {
+          final pid = m.providerLabel;
+          if (!order.contains(pid)) order.add(pid);
+          (groups[pid] ??= []).add(m.label);
+        }
+        return [
+          for (final pid in order)
+            _Row(
+              title: pid,
+              subtitle: (map[pid] ?? []).join('、'),
+              icon: Icons.cloud_outlined,
+              editId: pid,
+            ),
+        ];
 
       case CapabilityKind.mcp:
         return caps.mcp
@@ -159,6 +184,7 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
                   subtitle: s.summary,
                   icon: Icons.extension_outlined,
                   details: _mcpDetails(s),
+                  editId: s.id,
                 ))
             .toList();
 
@@ -169,6 +195,7 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
                   subtitle: k.summary,
                   icon: Icons.psychology_outlined,
                   details: _skillDetails(k),
+                  editId: k.id,
                 ))
             .toList();
     }
@@ -242,12 +269,15 @@ class _Row extends StatelessWidget {
   final String subtitle;
   final IconData icon;
   final List<MapEntry<String, String>>? details;
+  /// 非空 = 这一行可以点进**编辑页**（优先于详情弹层）
+  final String? editId;
 
   const _Row({
     required this.title,
     required this.subtitle,
     required this.icon,
     this.details,
+    this.editId,
   });
 
   @override
@@ -263,11 +293,30 @@ class _Row extends StatelessWidget {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11.5, color: Colors.white54)),
-      trailing: hasDetails
-          ? const Icon(Icons.chevron_right, size: 18, color: Colors.white24)
-          : null,
-      onTap: hasDetails ? () => _showDetails(context, title, details!) : null,
+      trailing: editId != null
+          ? const Icon(Icons.edit_outlined, size: 17, color: Colors.white38)
+          : (hasDetails
+              ? const Icon(Icons.chevron_right, size: 18, color: Colors.white24)
+              : null),
+      onTap: () {
+        if (editId != null) {
+          Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => DesktopCapabilityEditPage(
+              kind: _kindOf(context),
+              editId: editId,
+            ),
+          ));
+          return;
+        }
+        if (hasDetails) _showDetails(context, title, details!);
+      },
     );
+  }
+
+  /// 从祖先里拿 kind（_Row 是静态构建的，拿不到 widget.kind，用 InheritedContext）
+  CapabilityKind _kindOf(BuildContext context) {
+    final page = context.findAncestorStateOfType<_DesktopCapabilityPageState>();
+    return page?.widget.kind ?? CapabilityKind.models;
   }
 
   static void _showDetails(

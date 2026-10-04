@@ -99,6 +99,13 @@ class ChatRole {
   /// Desktop -> phone: where your just-sent message landed on the desktop
   /// (so the phone can offer 「删除这条」 on its own outgoing bubbles).
   static const userMessageMeta = 'user-message-meta';
+
+  /// Phone -> desktop: edit a capability entry (assistant / provider / MCP /
+  /// skill). op + body; see DesktopCapsEdit in app_state.
+  static const capsEdit = 'caps-edit';
+
+  /// Desktop -> phone: result of a caps-edit op (carries fresh capabilities).
+  static const capsEditResult = 'caps-edit-result';
 }
 
 /// A single unit of data flowing over the relay.
@@ -364,8 +371,15 @@ class ModelOption {
   }
 
   /// 「服务商|模型名」，和电脑端口径一致（如 "Doro|claude-opus-5"）。
-  String get displayName =>
-      providerLabel.isEmpty ? label : '$providerLabel|$label';
+  ///
+  /// 防御：如果 label 本身已经带了「服务商|」前缀（旧版电脑端或手填的
+  /// label 会这样），就不要再加一遍，避免显示成「国模|国模|xxx」。
+  String get displayName {
+    final p = providerLabel;
+    if (p.isEmpty) return label;
+    if (label.startsWith('$p|') || label == p) return label;
+    return '$p|$label';
+  }
 
   factory ModelOption.fromJson(Map<String, dynamic> j) => ModelOption(
         value: j['value'] as String? ?? '',

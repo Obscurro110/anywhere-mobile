@@ -233,6 +233,43 @@ class AppState extends ChangeNotifier {
     ));
   }
 
+  // ---- 电脑端能力编辑 ----
+
+  /// 最近一次能力编辑的结果（给 UI 弹提示用）
+  Map<String, dynamic>? lastCapsEdit;
+
+  /// 正在等待电脑端回执的编辑 op（给按钮转圈用）
+  String? editingCapsOp;
+
+  /// 给电脑端发一条能力编辑指令。
+  ///
+  /// [op] 见桌面端 caps-edit 分支：prompt-save / prompt-delete /
+  /// provider-save / provider-delete / mcp-save / mcp-delete /
+  /// skill-toggle / skill-delete。
+  /// 回执（caps-edit-result）会带上**最新的能力清单**，直接替换本地缓存。
+  bool editDesktopCapability(String op, Map<String, dynamic> body) {
+    if (!_client.isConnected) return false;
+    lastCapsEdit = null;
+    editingCapsOp = op;
+    notifyListeners();
+    final ok = _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.capsEdit,
+        'text': '',
+        'op': op,
+        'body': body,
+      },
+    ));
+    if (!ok) {
+      editingCapsOp = null;
+      notifyListeners();
+    }
+    return ok;
+  }
+
   void setOptions(ChatOptions next) {
     options = next;
     notifyListeners();
@@ -1141,6 +1178,32 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] conversation-open-result decode failed: $e');
+      }
+      return;
+    }
+
+    // 电脑端回执：能力编辑结果（带最新能力清单）
+    if (p.role == ChatRole.capsEditResult) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayCapsEditResult'] as Map?)?.cast<String, dynamic>() ?? {};
+        final ok = r['ok'] == true;
+        final capsJson = r['capabilities'];
+        if (ok && capsJson is Map) {
+          capabilities = Capabilities.fromJson(capsJson.cast<String, dynamic>());
+          loadingCapabilities = false;
+        }
+        lastCapsEdit = {
+          'op': r['op']?.toString() ?? '',
+          'ok': ok,
+          'reason': r['reason']?.toString() ?? '',
+        };
+        editingCapsOp = null;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[AppState] caps-edit-result decode failed: $e');
+        editingCapsOp = null;
+        notifyListeners();
       }
       return;
     }
