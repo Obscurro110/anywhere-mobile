@@ -533,6 +533,16 @@ async function listPhoneConversations() {
   }
   const all = await listLocalConversations(dirPath)
 
+    // 助手名需要 config.prompts 来映射
+    let promptsCfg = null
+    try {
+      const cRes = await ctx?.dataApi?.getConfig?.()
+      promptsCfg = cRes?.config?.prompts && typeof cRes.config.prompts === 'object'
+        ? cRes.config.prompts
+        : null
+    } catch (_) {}
+
+
   // conversationId -> { projectId, projectName }
   const projectOf = new Map()
   let projects = []
@@ -555,21 +565,33 @@ async function listPhoneConversations() {
     rwarn('[relay] read projects failed:', err?.message || err)
   }
 
-  const list = (Array.isArray(all) ? all : [])
-    .map((item) => {
+  const list = []
+    // 逐个补 promptKey / assistantName：openConversation 读 sessionData 里的
+    // promptKey（同一文件，开销可控）；读不到就留空，手机端继续用默认助手。
+    for (const item of Array.isArray(all) ? all : []) {
       const c = toPhoneConversation(item)
+      if (!c.id) continue
       const hit = projectOf.get(c.id)
-      return {
+      let promptKey = ''
+      try {
+        const opened = await openConversation({ dirPath, reference: c.id, activeOnly: true, pageSize: 1 })
+        promptKey =
+          opened?.sessionData?.promptKey ||
+          opened?.sessionData?.sessionMetadata?.promptKey ||
+          ''
+      } catch (_) {}
+      const p = promptsCfg && promptKey ? promptsCfg[promptKey] : null
+      list.push({
         ...c,
+        promptKey,
+        assistantName: (p && (p.name || p.title)) ? (p.name || p.title) : '',
         projectId: hit?.projectId || '',
         projectName: hit?.projectName || ''
-      }
-    })
-    .filter((c) => c.id)
-    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      })
+    }
+    list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
 
-  return { ok: true, dirPath, conversations: list, projects }
-}
+    return { ok: true, dirPath, conversations: list, projects }}
 
 /**
  * 读取某个会话的消息列表（手机看会话内容用）。
@@ -611,7 +633,24 @@ async function readPhoneConversationMessages(conversationId) {
       time: m.completedTimestamp || m.timestamp || ''
     })
   })
-  return { ok: true, messages, count: messages.length }
+  const promptKey =
+      opened.sessionData?.promptKey ||
+      opened.sessionData?.sessionMetadata?.promptKey ||
+      ''
+    let assistantName = ''
+    try {
+      const cRes = await ctx?.dataApi?.getConfig?.()
+      const pc = cRes?.config?.prompts
+      const p = pc && typeof pc === 'object' && promptKey ? pc[promptKey] : null
+      assistantName = (p && (p.name || p.title)) ? (p.name || p.title) : ''
+    } catch (_) {}
+    return {
+      ok: true,
+      messages,
+      count: messages.length,
+      promptKey,
+      assistantName
+    }
 }
 
 /** 从 content（字符串 / [{type:'text',text}]）里抽纯文本 */
@@ -675,6 +714,47 @@ async function deletePhoneMessages(conversationId, storageIds) {
  * 手机点开某个电脑端会话：
  * 把该会话在本机窗口里打开，并把回复回传目标绑到那个窗口。
  */
+
+  /**
+   * 手机端改了会话内容 / 标题 / 会话本身后，广播给所有可能打开这个会话的窗口。
+   * 窗口收到后自己判断 conversationId 是否匹配再刷新，避免误刷其它会话。
+   */
+  function notifyConversationChanged(conversationId, action, extra = {}) {
+    if (!conversationId) return
+    const refs = new Set()
+    if (phoneWindowId) refs.add(phoneWindowId)
+    for (const ref of convWindows.values()) refs.add(ref)
+    try {
+      const all = ctx?.listWindows?.()
+      if (Array.isArray(all)) {
+        for (const w of all) {
+          const ref = w?.ref || w?.id || w?.windowId
+          if (ref) refs.add(ref)
+        }
+      }
+    } catch (_) {}
+    for (const ref of refs) {
+      if (!ref || !isWindowAlive(ref)) continue
+      try {
+        ctx.dispatchWindowEvent(
+          {
+            event: 'relay:command',
+            payload: {
+              action,
+              reqId: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              conversationId,
+              ...extra
+            },
+            target: ref
+          },
+          { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
+        )
+      } catch (err) {
+        rwarn('[relay] notify conversation window failed:', action, err?.message || err)
+      }
+    }
+  }
+
 async function openPhoneConversation(conversationId, relayTo) {
   const dirPath = await readChatDirPath()
   if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
@@ -726,7 +806,20 @@ async function openPhoneConversation(conversationId, relayTo) {
     phoneWindowKey = reuseKey
     convWindows.set(opened.descriptor.conversationId, res.id)
     rlog('[relay] opened conversation window:', res.id, 'conv =', opened.descriptor.conversationId)
-    return { ok: true, windowId: res.id, title: opened.descriptor.title }
+        let assistantName = ''
+    try {
+      const cRes = await ctx?.dataApi?.getConfig?.()
+      const pc = cRes?.config?.prompts
+      const p = pc && typeof pc === 'object' && promptKey ? pc[promptKey] : null
+      assistantName = (p && (p.name || p.title)) ? (p.name || p.title) : ''
+    } catch (_) {}
+    return {
+      ok: true,
+      windowId: res.id,
+      title: opened.descriptor.title,
+      promptKey,
+      assistantName
+    }
   }
   rwarn('[relay] openWindow for conversation returned:', res)
   return { ok: false, reason: 'open_window_failed' }
@@ -1131,6 +1224,10 @@ async function routePhoneChat(msg) {
       rwarn('[relay] conversation delete failed:', err?.message || err)
       res = { ok: false, reason: String(err?.message || err) }
     }
+    if (res?.ok !== false) {
+      // 删会话后也广播：打开的窗口若还显示这个会话就重载（会提示不存在）
+      notifyConversationChanged(conversationId, 'syncMessages')
+    }
     relay?.sendChat(
       JSON.stringify({
         __relayConversationActionResult: {
@@ -1157,6 +1254,9 @@ async function routePhoneChat(msg) {
       rwarn('[relay] conversation rename failed:', err?.message || err)
       res = { ok: false, reason: String(err?.message || err) }
     }
+    if (res?.ok !== false) {
+      notifyConversationChanged(conversationId, 'syncTitle', { title: res.title || title })
+    }
     relay?.sendChat(
       JSON.stringify({
         __relayConversationActionResult: {
@@ -1182,6 +1282,11 @@ async function routePhoneChat(msg) {
     } catch (err) {
       rwarn('[relay] conversation messages delete failed:', err?.message || err)
       res = { ok: false, reason: String(err?.message || err) }
+    }
+    if (res?.ok !== false) {
+      // 让电脑端已经打开这个会话的窗口按磁盘最新数据刷新，
+      // 否则手机删了，电脑端界面还留着旧消息。
+      notifyConversationChanged(conversationId, 'syncMessages')
     }
     relay?.sendChat(
       JSON.stringify({

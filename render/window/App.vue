@@ -876,6 +876,31 @@ const handleRelayCommand = async (cmd) => {
       return;
     }
 
+    if (action === 'syncMessages') {
+      // 手机端批量删除/外部改库后，让本窗口按磁盘最新数据重载。
+      // 只处理当前这个会话；不匹配就不动，避免把其它窗口误刷新。
+      const wantId = String(cmd.conversationId || '');
+      if (wantId && String(currentConversationStorage.value?.conversationId || '') !== wantId) {
+        reply(false, { reason: 'conversation_mismatch' });
+        return;
+      }
+      const okReload = await reloadConversationWindowFromStore({ activeOnly: true, pageSize: 5000 });
+      reply(!!okReload, { reason: okReload ? '' : 'reload_failed' });
+      return;
+    }
+
+    if (action === 'syncTitle') {
+      const title = String(cmd.title || '');
+      if (currentConversationStorage.value) {
+        currentConversationStorage.value = {
+          ...currentConversationStorage.value,
+          title: title || currentConversationStorage.value.title
+        };
+      }
+      reply(true);
+      return;
+    }
+
     reply(false, { reason: 'unknown_action' });
   } catch (err) {
     relayWarn('[relay] command failed:', action, err);
