@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createFileStore } from './fileStore.js';
 import { createWss } from './wsHub.js';
-import { parseTokens } from './auth.js';
+import { parseTokens, validateTokenConfig } from './auth.js';
 
 // ---- tiny .env loader (no dependency) ----
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,8 +23,15 @@ const MAX_FILE_MB = parseInt(process.env.MAX_FILE_MB || '512', 10);
 const FILE_TTL_HOURS = parseInt(process.env.FILE_TTL_HOURS || '72', 10);
 
 const tokens = parseTokens(process.env.AUTH_TOKENS || 'default-user:CHANGE_ME_TOKEN');
-if (tokens.size === 0) {
-  console.error('[relay] No AUTH_TOKENS configured. Refusing to start.');
+const tokenCheck = validateTokenConfig(tokens);
+if (tokenCheck.warn.length > 0) {
+  console.warn('[relay] ⚠️ AUTH_TOKENS 安全性提醒：');
+  for (const w of tokenCheck.warn) console.warn('[relay]   - ' + w);
+}
+if (tokenCheck.fatal.length > 0) {
+  console.error('[relay] AUTH_TOKENS 配置不安全，拒绝启动：');
+  for (const p of tokenCheck.fatal) console.error('[relay]   - ' + p);
+  console.error('[relay] 请在 .env / 环境变量里设置 token（不要用默认占位值）。');
   process.exit(1);
 }
 
@@ -74,7 +81,11 @@ async function handleHttp(req, res) {
       const meta = await fileStore.saveStream(req, name);
       return json(res, 200, { ok: true, file: meta });
     } catch (err) {
-      return json(res, 413, { ok: false, error: String(err.message || err) });
+      // 不要把内部错误信息原样抛给客户端（可能暴露路径/实现细节）
+      const msg = String(err?.message || err || '');
+      const userMsg = msg.includes('too_large') ? 'file_too_large' : 'upload_failed';
+      console.error('[relay] upload failed:', msg);
+      return json(res, 413, { ok: false, error: userMsg });
     }
   }
 
@@ -86,9 +97,21 @@ function isValidToken(t) {
   return false;
 }
 
-function json(res, code, obj) {
+// 统一安全响应头（对公网服务尤其重要）
+const SECURITY_HEADERS = {
+  'content-type': 'application/json',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'cache-control': 'no-store',
+};
+
+function json(res, code, obj, extraHeaders = {}) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.writeHead(code, {
+    ...SECURITY_HEADERS,
+    'content-length': Buffer.byteLength(body),
+    ...extraHeaders,
+  });
   res.end(body);
 }
 
@@ -105,7 +128,20 @@ server.listen(PORT, HOST, () => {
 // periodic purge
 setInterval(() => fileStore.purge(), 30 * 60 * 1000);
 
-process.on('SIGINT', () => {
-  console.log('\n[relay] shutting down...');
-  wss.close(() => server.close(() => process.exit(0)));
-});
+// 优雅关闭：Docker/1Panel 停止容器时发的是 SIGTERM，不能只处理 SIGINT，
+// 否则文件流写一半就被强杀。
+function shutdown(signal) {
+  console.log(`\n[relay] ${signal} received, shutting down...`);
+  // 给在途请求一点时间收尾
+  const force = setTimeout(() => process.exit(1), 10_000);
+  force.unref?.();
+  try {
+    wss.close(() => {
+      server.close(() => process.exit(0));
+    });
+  } catch {
+    process.exit(0);
+  }
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
