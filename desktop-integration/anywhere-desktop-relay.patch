@@ -2779,7 +2779,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..a573a95
+index 0000000..5530d2e
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2791,8 +2791,8 @@ index 0000000..a573a95
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.6';
-+export const RELAY_VERSION_CODE = 26;
++export const RELAY_VERSION = '1.7.7';
++export const RELAY_VERSION_CODE = 27;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -2983,12 +2983,15 @@ index 71669d3..46c305c 100644
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
 diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
-index 2ad1391..79987d7 100644
+index 2ad1391..28cb7e4 100644
 --- a/render/main/components/Setting.vue
 +++ b/render/main/components/Setting.vue
-@@ -94,7 +94,8 @@ const collapsedCards = ref({
-   networkProxy: false,
-   voice: false,
+@@ -91,22 +91,82 @@ const collapsedCards = ref({
+   general: false,
+   desktop: false,
+ 
+-  networkProxy: false,
+-  voice: false,
    data: false,
 -  webdav: false
 +  webdav: false,
@@ -2996,9 +2999,10 @@ index 2ad1391..79987d7 100644
  });
  
  const cardDefinitions = {
-@@ -103,10 +104,73 @@ const cardDefinitions = {
-   networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
-   voice: { id: 'voice', titleKey: 'setting.voice.title' },
+   general: { id: 'general', titleKey: 'setting.title' },
+   desktop: { id: 'desktop', titleKey: 'setting.desktop.title' },
+-  networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
+-  voice: { id: 'voice', titleKey: 'setting.voice.title' },
    data: { id: 'data', titleKey: 'setting.dataManagement.title' },
 -  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' }
 +  webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' },
@@ -3071,9 +3075,12 @@ index 2ad1391..79987d7 100644
  const shortcutRecorder = ref({
    target: '',
    index: -1,
-@@ -315,7 +379,8 @@ function initCardOrder() {
-       cardDefinitions.networkProxy,
-       cardDefinitions.voice,
+@@ -312,10 +372,9 @@ function initCardOrder() {
+     settingsCards.value = [
+       cardDefinitions.general,
+       cardDefinitions.desktop,
+-      cardDefinitions.networkProxy,
+-      cardDefinitions.voice,
        cardDefinitions.data,
 -      cardDefinitions.webdav
 +      cardDefinitions.webdav,
@@ -3081,7 +3088,7 @@ index 2ad1391..79987d7 100644
      ];
    }
    
-@@ -335,7 +400,12 @@ const onOrderChange = async () => {
+@@ -335,7 +394,12 @@ const onOrderChange = async () => {
  
  function toggleCard(cardName) {
    collapsedCards.value[cardName] = !collapsedCards.value[cardName];
@@ -3095,7 +3102,7 @@ index 2ad1391..79987d7 100644
    if (currentConfig.value) {
      const plainState = JSON.parse(JSON.stringify(collapsedCards.value));
      
-@@ -431,10 +501,15 @@ onMounted(() => {
+@@ -431,10 +495,15 @@ onMounted(() => {
      ensureNetworkProxyConfig();
      initCardOrder();
    }
@@ -3111,7 +3118,81 @@ index 2ad1391..79987d7 100644
  })
  
  onDeactivated(() => {
-@@ -2310,6 +2385,79 @@ async function pullSelectedCloudSkillsToLocal() {
+@@ -1927,12 +1996,7 @@ async function pullSelectedCloudSkillsToLocal() {
+           <template #item="{ element }">
+             <div class="settings-card">
+               <div class="card-header" :class="{ 'is-collapsed': collapsedCards[element.id] }" @click="toggleCard(element.id)">
+-                <span v-if="element.id === 'voice'">
+-                  <el-tooltip :content="t('setting.voice.description')" placement="top">
+-                    <span>{{ t(element.titleKey) }}</span>
+-                  </el-tooltip>
+-                </span>
+-                <span v-else>{{ element.titleKey ? t(element.titleKey) : element.staticTitle }}</span>
++                <span>{{ element.titleKey ? t(element.titleKey) : element.staticTitle }}</span>
+                 <el-icon class="collapse-icon" :class="{ 'is-expanded': !collapsedCards[element.id] }"><ArrowRight /></el-icon>
+               </div>
+ 
+@@ -2146,59 +2210,7 @@ async function pullSelectedCloudSkillsToLocal() {
+                       </div>
+                     </div>
+                   </div>
+-                  <div v-if="element.id === 'networkProxy'" class="card-body">
+-                    <div class="setting-option-item">
+-                      <div class="setting-text-content">
+-                        <span class="setting-option-label">{{ t('setting.networkProxy.enabled.label') }}</span>
+-                        <span class="setting-option-description">{{ t('setting.networkProxy.enabled.description') }}</span>
+-                      </div>
+-                      <el-switch v-model="currentConfig.networkProxy.enabled" @change="handleNetworkProxyEnabledChange" />
+-                    </div>
+-
+-                    <div class="setting-option-item network-proxy-item">
+-                      <div class="setting-text-content">
+-                        <span class="setting-option-label">{{ t('setting.networkProxy.server.label') }}</span>
+-                        <span class="setting-option-description">{{ t('setting.networkProxy.server.description') }}</span>
+-                      </div>
+-                      <el-input
+-                        v-model="currentConfig.networkProxy.server"
+-                        :disabled="!currentConfig.networkProxy.enabled"
+-                        :placeholder="t('setting.networkProxy.server.placeholder')"
+-                        class="network-proxy-input"
+-                        @keyup.enter="saveNetworkProxyConfig"
+-                        @blur="currentConfig.networkProxy.enabled && saveNetworkProxyConfig()"
+-                      />
+-                    </div>
+-
+-                    <div class="setting-option-item no-border network-proxy-item">
+-                      <div class="setting-text-content">
+-                        <span class="setting-option-label">{{ t('setting.networkProxy.bypassRules.label') }}</span>
+-                        <span class="setting-option-description">{{ t('setting.networkProxy.bypassRules.description') }}</span>
+-                      </div>
+-                      <el-input
+-                        v-model="currentConfig.networkProxy.bypassRules"
+-                        :disabled="!currentConfig.networkProxy.enabled"
+-                        :placeholder="t('setting.networkProxy.bypassRules.placeholder')"
+-                        class="network-proxy-input"
+-                        @keyup.enter="saveNetworkProxyConfig"
+-                        @blur="currentConfig.networkProxy.enabled && saveNetworkProxyConfig()"
+-                      />
+-                    </div>
+-                  </div>
+-
+-
+ 
+-<div v-if="element.id === 'voice'" class="card-body">
+-                    <div class="voice-list-container">
+-                      <el-tag v-for="voice in currentConfig.voiceList" :key="voice" closable @click="editVoice(voice)"
+-                        @close="deleteVoice(voice)" class="voice-tag" size="large">
+-                        {{ voice }}
+-                      </el-tag>
+-                      <el-button class="add-voice-button" type="primary" plain :icon="Plus" @click="addNewVoice">
+-                        {{ t('setting.voice.add') }}
+-                      </el-button>
+-                    </div>
+-                  </div>
+ 
+                   <div v-if="element.id === 'data'" class="card-body">
+                     <div class="setting-option-item">
+@@ -2310,6 +2322,79 @@ async function pullSelectedCloudSkillsToLocal() {
                      </div>
                    </div>
  
@@ -3192,7 +3273,7 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..b88dc2e 100644
+index 6bb1113..4dbd096 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -3504,7 +3585,7 @@ index 6bb1113..b88dc2e 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10605,319 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10605,334 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -3800,6 +3881,18 @@ index 6bb1113..b88dc2e 100644
 +      // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
 +      // 再带上「服务商|模型名」，手机气泡上就不用写死 "Anywhere Desktop" 了。
 +      const assistantIndex = chat_show.value.length - 1;
++      // 消息元数据：时间 / 耗时 / token，让手机气泡和电脑端显示一致。
++      const tokenUsage = last.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
++      const startTime = Number(last.startTime) || Number(last.timestamp) || 0;
++      const endTime = Number(last.endTime) || 0;
++      const relayTokens = tokenUsage
++        ? {
++            prompt: Number(tokenUsage.prompt_tokens) || 0,
++            completion: Number(tokenUsage.completion_tokens) || 0,
++            reasoning: Number(tokenUsage.reasoning_tokens) || 0,
++            total: Number(tokenUsage.total_tokens) || 0
++          }
++        : null;
 +      await window.api.sendRelayChat({
 +        text,
 +        to,
@@ -3808,7 +3901,10 @@ index 6bb1113..b88dc2e 100644
 +            messageId: String(last.id ?? ''),
 +            index: assistantIndex,
 +            conversationId: currentConversationStorage.value?.conversationId || '',
-+            modelTag: getCurrentAssistantDisplayName() || ''
++            modelTag: getCurrentAssistantDisplayName() || '',
++            startTime,
++            endTime,
++            ...(relayTokens ? { tokens: relayTokens } : {})
 +          },
 +          ...(relayChoice ? { __relayChoice: relayChoice } : {})
 +        }

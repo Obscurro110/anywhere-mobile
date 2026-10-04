@@ -299,12 +299,25 @@ class AssistantMeta {
   /// 有值时气泡下渲染可点选的选项按钮，提交走 choiceSubmit 命令。
   final ChoiceMeta? choice;
 
+  /// 这条回复开始生成的时间（毫秒时间戳，电脑端 startTime/timestamp）。
+  /// 0 = 电脑端没报（旧版本）。
+  final int startTime;
+
+  /// 生成结束时间（毫秒时间戳）。与 startTime 相减即耗时。0 = 没报 / 未完成。
+  final int endTime;
+
+  /// token 用量（输入/思考/输出/总计）。null = 电脑端没报。
+  final TokenUsage? tokens;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
     this.conversationId = '',
     this.modelTag = '',
     this.choice,
+    this.startTime = 0,
+    this.endTime = 0,
+    this.tokens,
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -315,6 +328,9 @@ class AssistantMeta {
         'conversationId': conversationId,
         if (modelTag.isNotEmpty) 'modelTag': modelTag,
         if (choice != null) 'choice': choice!.toJson(),
+        if (startTime > 0) 'startTime': startTime,
+        if (endTime > 0) 'endTime': endTime,
+        if (tokens != null) 'tokens': tokens!.toJson(),
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
@@ -325,6 +341,42 @@ class AssistantMeta {
         choice: j['choice'] is Map
             ? ChoiceMeta.fromJson((j['choice'] as Map).cast<String, dynamic>())
             : null,
+        startTime: (j['startTime'] as num?)?.toInt() ?? 0,
+        endTime: (j['endTime'] as num?)?.toInt() ?? 0,
+        tokens: j['tokens'] is Map
+            ? TokenUsage.fromJson((j['tokens'] as Map).cast<String, dynamic>())
+            : null,
+      );
+}
+
+/// 一次 AI 回复的 token 用量。
+class TokenUsage {
+  final int prompt; // 输入
+  final int completion; // 输出
+  final int reasoning; // 思考
+  final int total;
+
+  const TokenUsage({
+    this.prompt = 0,
+    this.completion = 0,
+    this.reasoning = 0,
+    this.total = 0,
+  });
+
+  bool get isEmpty => prompt <= 0 && completion <= 0;
+
+  Map<String, dynamic> toJson() => {
+        'prompt': prompt,
+        'completion': completion,
+        'reasoning': reasoning,
+        'total': total,
+      };
+
+  factory TokenUsage.fromJson(Map<String, dynamic> j) => TokenUsage(
+        prompt: (j['prompt'] as num?)?.toInt() ?? 0,
+        completion: (j['completion'] as num?)?.toInt() ?? 0,
+        reasoning: (j['reasoning'] as num?)?.toInt() ?? 0,
+        total: (j['total'] as num?)?.toInt() ?? 0,
       );
 }
 

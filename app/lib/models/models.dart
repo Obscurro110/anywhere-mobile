@@ -21,6 +21,7 @@ export '../core/protocol.dart'
         ChoiceMeta,
         ChoiceQuestion,
         ChoiceOption,
+        TokenUsage,
         Envelope,
         MsgType,
         kProtocolVersion;

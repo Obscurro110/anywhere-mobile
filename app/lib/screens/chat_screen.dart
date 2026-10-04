@@ -266,8 +266,97 @@ class _Bubble extends StatelessWidget {
             // 气泡下方的操作栏（对齐电脑端气泡底部的按钮）
             if (!msg.pending)
               _ActionBar(msg: msg, outgoing: outgoing, isLast: isLast),
+            // 时间 / 耗时 / token 元信息（和电脑端气泡一致）
+            _MetaLine(msg: msg, outgoing: outgoing),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 消息元信息（时间 / 耗时 / token）—— 对齐电脑端气泡的显示
+// ---------------------------------------------------------------------------
+String _fmtClock(int ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int n) => n.toString().padLeft(2, '0');
+  final hm = '${two(d.hour)}:${two(d.minute)}';
+  final now = DateTime.now();
+  final sameDay = d.year == now.year && d.month == now.month && d.day == now.day;
+  return sameDay ? hm : '${two(d.month)}-${two(d.day)} $hm';
+}
+
+String _fmtDurationMs(int ms) {
+  if (ms <= 0) return '';
+  final sec = ms / 1000.0;
+  if (sec < 60) return '${sec.toStringAsFixed(1)} s';
+  return '${(sec / 60).toStringAsFixed(1)} min';
+}
+
+String _fmtToken(int n) {
+  if (n <= 0) return '0';
+  if (n >= 1000000) {
+    return '${(n / 1000000).toStringAsFixed(n >= 10000000 ? 1 : 2)}M';
+  }
+  if (n >= 10000) return '${(n / 1000).toStringAsFixed(n >= 100000 ? 0 : 1)}K';
+  return '$n';
+}
+
+/// 气泡底部的元信息：时间（+耗时）与 token 用量。
+class _MetaLine extends StatelessWidget {
+  final ChatMessage msg;
+  final bool outgoing;
+  const _MetaLine({required this.msg, required this.outgoing});
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = msg.desktopMeta;
+
+    // 时间：AI 消息优先用电脑端 startTime，否则用本地时间
+    final startMs = (meta != null && meta.startTime > 0)
+        ? meta.startTime
+        : msg.time.millisecondsSinceEpoch;
+
+    // 耗时
+    final duration = (meta != null && meta.startTime > 0 && meta.endTime > meta.startTime)
+        ? _fmtDurationMs(meta.endTime - meta.startTime)
+        : '';
+
+    // token
+    final t = meta?.tokens;
+    String? tokenStr;
+    if (t != null && !t.isEmpty) {
+      final inT = _fmtToken(t.prompt);
+      final outT = _fmtToken(t.completion);
+      final reasonT = _fmtToken(t.reasoning);
+      tokenStr = reasonT.isNotEmpty && t.reasoning > 0
+          ? '输入 $inT · 思考 $reasonT · 输出 $outT'
+          : '输入 $inT · 输出 $outT';
+    }
+
+    if (startMs <= 0 && (duration.isEmpty && tokenStr == null)) {
+      return const SizedBox.shrink();
+    }
+
+    final lines = <String>[];
+    if (startMs > 0) {
+      lines.add(duration.isNotEmpty ? '${_fmtClock(startMs)} ($duration)' : _fmtClock(startMs));
+    }
+    if (tokenStr != null) lines.add(tokenStr);
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final line in lines)
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Text(line,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.white38)),
+            ),
+        ],
       ),
     );
   }
