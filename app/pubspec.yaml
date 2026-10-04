@@ -10,6 +10,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # 中文本地化：没有它，TextField/SelectableText 长按弹出的
+  # 系统菜单（复制/粘贴/全选/剪切）会是英文。
+  flutter_localizations:
+    sdk: flutter
   cupertino_icons: ^1.0.8
 
   # state + storage
@@ -22,7 +26,9 @@ dependencies:
 
   # utils
   uuid: ^4.5.1
-  intl: ^0.19.0
+  # intl 版本交给 flutter_localizations 决定（两者必须匹配，否则运行时崩）。
+  # DateFormat 的 API 在 0.19 / 0.20 完全一致，用 any 让 pub 解析到兼容版本。
+  intl: any
 
   # notifications (local, shown when a push arrives over the relay)
   flutter_local_notifications: ^17.2.3

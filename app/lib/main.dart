@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 
@@ -30,6 +31,19 @@ class AnywhereApp extends StatelessWidget {
     return MaterialApp(
       title: 'Anywhere Mobile',
       debugShowCheckedModeBanner: false,
+      // 中文本地化：Flutter 的系统菜单（长按文本的「复制/粘贴/全选」、
+      // 日期选择器、无障碍语义等）默认是英文，必须显式声明中文，
+      // 否则会话界面长按文字弹出来的是 Copy / Paste / Select all。
+      locale: const Locale('zh', 'CN'),
+      supportedLocales: const [
+        Locale('zh', 'CN'),
+        Locale('en', 'US'),
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(

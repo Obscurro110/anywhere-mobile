@@ -2760,7 +2760,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..9f29f01
+index 0000000..a32d35b
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2772,8 +2772,8 @@ index 0000000..9f29f01
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.4';
-+export const RELAY_VERSION_CODE = 24;
++export const RELAY_VERSION = '1.7.5';
++export const RELAY_VERSION_CODE = 25;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3173,7 +3173,7 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..05988e9 100644
+index 6bb1113..6ec137b 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,173 @@ const normalizeWindowEventPayload = (input) => {
@@ -3469,7 +3469,7 @@ index 6bb1113..05988e9 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10589,256 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10589,280 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -3670,14 +3670,19 @@ index 6bb1113..05988e9 100644
 +// 注意：assistant 气泡先以 isPreparing:true 入列，流式填充 content，
 +// 完成后由 finalize* 删除 isPreparing 字段（不是设成 false）。
 +watch(
-+  () =>
-+    chat_show.value
++  () => {
++    // ⚠️ 必须把 loading 也纳入依赖：AI 整轮处理中/结束时 loading 会翻转，
++    // 但 chat_show 不一定同时变化；只监听 chat_show 会漏掉"最终回答"。
++    const loadingFlag = loading.value ? 1 : 0;
++    const tail = chat_show.value
 +      .map((m) =>
 +        m?.role === 'assistant'
 +          ? `${m.id}:${m.isPreparing ? 1 : 0}:${m.status || ''}:${relayMessageText(m).length}`
 +          : ''
 +      )
-+      .join('|'),
++      .join('|');
++    return `${loadingFlag}#${tail}`;
++  },
 +  async () => {
 +    const to = relayReplyTarget.value;
 +    if (!to) return;
@@ -3690,6 +3695,25 @@ index 6bb1113..05988e9 100644
 +      relayLog('[relay] assistant still preparing, status =', last.status, 'isPreparing =', last.isPreparing);
 +      return;
 +    }
++
++    // ⚠️ 是否"正在等用户交互"（工具在等用户选择 / 批准）。
++    // 这种消息必须发出去：否则用户根本不知道 AI 在问他什么。
++    const waitingUser = Array.isArray(last.tool_calls) && last.tool_calls.some(
++      (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
++    );
++
++    // ⚠️ 核心修复：AI 整轮还没跑完（流式输出 / 工具执行中）时**绝不发送**。
++    //
++    // 之前只判断 isPreparing / status，但 isPreparing 在"发起 API 请求前"
++    // 就被删除了（见上方 delete preparingBubble.isPreparing），status 也被清空，
++    // 于是流式输出的**第一个片段**就被当成完整回复发了出去 —— 手机上看到的
++    // 就是硬截断（比如停在"…为了"），而且 relayLastSentAssistantId 去重后
++    // 后续完整内容再也不发。现在用 loading 兜住整个生成周期。
++    if (loading.value && !waitingUser) {
++      relayLog('[relay] turn still running (loading); defer sending');
++      return;
++    }
++
 +    if (last.id === relayLastSentAssistantId) return;
 +    const text = relayMessageText(last).trim();
 +    if (!text) {
