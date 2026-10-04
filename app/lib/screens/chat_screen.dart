@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:open_filex/open_filex.dart';
 import 'package:provider/provider.dart';
 
@@ -218,7 +220,7 @@ class _Bubble extends StatelessWidget {
                 ),
               )
             else if (msg.text.isNotEmpty)
-              SelectableText(msg.text, style: const TextStyle(fontSize: 15)),
+              _MarkdownText(text: msg.text),
             // 电脑端 ask_user_choice 提问：气泡下渲染可点选的选项
             if (msg.choice?.isValid == true && !msg.pending)
               _ChoicePanel(msg: msg),
@@ -301,6 +303,72 @@ String _fmtToken(int n) {
   }
   if (n >= 10000) return '${(n / 1000).toStringAsFixed(n >= 100000 ? 0 : 1)}K';
   return '$n';
+}
+
+// ---------------------------------------------------------------------------
+// Markdown 渲染（表格 / 代码块 / 标题 / 加粗 / 列表 / 引用）——
+// 对齐电脑端气泡：之前手机端是 SelectableText 直出原始 Markdown，
+// 看到的是 "| 维度 | 现状 |"、"## 一、"、** 这类记号，和电脑端差很多。
+// ---------------------------------------------------------------------------
+final MarkdownStyleSheet _bubbleMarkdownStyle = MarkdownStyleSheet(
+  p: const TextStyle(fontSize: 15, height: 1.45, color: Colors.white),
+  a: const TextStyle(
+      fontSize: 15,
+      height: 1.45,
+      color: Color(0xFF8AB4F8),
+      decoration: TextDecoration.underline),
+  em: const TextStyle(
+      fontSize: 15, height: 1.45, color: Colors.white, fontStyle: FontStyle.italic),
+  strong: const TextStyle(
+      fontSize: 15, height: 1.45, color: Colors.white, fontWeight: FontWeight.w700),
+  h1: const TextStyle(fontSize: 21, height: 1.3, color: Colors.white, fontWeight: FontWeight.w700),
+  h2: const TextStyle(fontSize: 18.5, height: 1.3, color: Colors.white, fontWeight: FontWeight.w700),
+  h3: const TextStyle(fontSize: 16.5, height: 1.3, color: Colors.white, fontWeight: FontWeight.w700),
+  h4: const TextStyle(fontSize: 15.5, color: Colors.white, fontWeight: FontWeight.w700),
+  h5: const TextStyle(fontSize: 15, color: Colors.white, fontWeight: FontWeight.w700),
+  h6: const TextStyle(fontSize: 14.5, color: Colors.white, fontWeight: FontWeight.w700),
+  code: const TextStyle(
+      fontSize: 12.5, fontFamily: 'monospace', color: Color(0xFFE8E8EC)),
+  codeblockDecoration: BoxDecoration(
+    color: const Color(0xFF0F1524),
+    borderRadius: BorderRadius.circular(8),
+    border: Border.all(color: Colors.white24, width: 0.6),
+  ),
+  codeblockPadding: const EdgeInsets.all(10),
+  blockquote: const TextStyle(fontSize: 15, height: 1.45, color: Colors.white70),
+  blockquoteDecoration: const BoxDecoration(
+    color: Color(0x22FFFFFF),
+    border: Border(left: BorderSide(color: Colors.white38, width: 3)),
+  ),
+  blockquotePadding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+  listBullet: const TextStyle(fontSize: 15, height: 1.45, color: Colors.white),
+  listBulletPadding: const EdgeInsets.only(right: 6),
+  listIndent: 22,
+  tableBorder: TableBorder.all(color: Colors.white30, width: 0.7),
+  tableCellsPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+  tableHead: const TextStyle(fontSize: 14.5, color: Colors.white, fontWeight: FontWeight.w700),
+  tableBody: const TextStyle(fontSize: 14.5, height: 1.35, color: Colors.white),
+  tableColumnWidth: const FlexColumnWidth(),
+  horizontalRuleDecoration: const BoxDecoration(
+    border: Border(top: BorderSide(color: Colors.white24)),
+  ),
+  blockSpacing: 8,
+);
+
+/// 用 Markdown 渲染气泡正文（支持 GFM 表格 / 代码块 / 标题 / 加粗 / 列表）。
+class _MarkdownText extends StatelessWidget {
+  final String text;
+  const _MarkdownText({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return MarkdownBody(
+      data: text,
+      selectable: true,
+      extensionSet: md.ExtensionSet.gitHubFlavored,
+      styleSheet: _bubbleMarkdownStyle,
+    );
+  }
 }
 
 /// 气泡底部的元信息：时间（+耗时）与 token 用量。

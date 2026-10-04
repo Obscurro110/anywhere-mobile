@@ -16,6 +16,13 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
 
+  # Markdown 渲染（表格 / 代码块 / 标题 / 加粗 / 列表）。
+  # 原来气泡用 SelectableText 直出原始 Markdown，手机上看到的是
+  # "| 维度 | 现状 |"、"# 标题" 这些记号，和电脑端不一致。
+  # flutter_markdown 官方已停用，继任者是 flutter_markdown_plus（API 相同）。
+  flutter_markdown_plus: ^1.0.12
+  markdown: any
+
   # state + storage
   provider: ^6.1.2
   shared_preferences: ^2.3.2

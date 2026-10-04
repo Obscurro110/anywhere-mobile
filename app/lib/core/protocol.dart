@@ -75,6 +75,12 @@ class ChatRole {
   /// Desktop -> phone: result of delete / rename / deleteMessages.
   static const conversationActionResult = 'conversation-action-result';
 
+  /// Desktop -> phone: 电脑端会话列表发生变化（增/删/改名），请刷新列表。
+  static const conversationsChanged = 'conversations-changed';
+
+  /// Desktop -> phone: 某个会话里的消息被删除，请刷新该会话消息。
+  static const messagesChanged = 'messages-changed';
+
   /// Phone -> desktop: act on one message (re-ask / delete this).
   static const messageAction = 'message-action';
 

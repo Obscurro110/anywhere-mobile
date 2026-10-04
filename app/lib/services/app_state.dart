@@ -1066,6 +1066,27 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    // 电脑端主动通知：会话列表发生变化（增/删/改名）→ 重新拉列表
+    if (p.role == ChatRole.conversationsChanged) {
+      unawaited(requestConversations());
+      return;
+    }
+
+    // 电脑端主动通知：某个会话的消息被删除 → 刷新那个会话的消息
+    if (p.role == ChatRole.messagesChanged) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final r = (decoded['__relayMessagesChanged'] as Map?)
+                ?.cast<String, dynamic>() ??
+            {};
+        final cid = (r['conversationId']?.toString() ?? '').trim();
+        if (cid.isNotEmpty) requestConversationMessages(cid);
+      } catch (e) {
+        debugPrint('[AppState] messages-changed decode failed: $e');
+      }
+      return;
+    }
+
     // 电脑端回传某个会话的消息内容
     if (p.role == ChatRole.conversationMessages) {
       try {
