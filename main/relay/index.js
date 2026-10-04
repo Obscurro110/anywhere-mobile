@@ -111,6 +111,15 @@ let phonePromptKey = 'AI'
  */
 let phoneWindowKey = 'phone'
 
+// 为「某个电脑端会话」开过的窗口：conversationId -> windowId。
+//
+// 为什么要单独一张表：phoneWindowId 只有一个槽位，既可能指向手机聊天窗口，
+// 又可能被「打开某个会话」覆盖掉 —— 结果手机想让电脑端操作 A 会话的消息时，
+// 窗口可能已经被 B 会话占用了，只能报「会话没打开」。
+// 有了这张表，每个会话各有各的窗口引用，互不干扰。
+const convWindows = new Map()
+
+
 const CONFIG_PATH = () => join(app.getPath('userData'), 'relay.json')
 
 function readConfig() {
@@ -622,6 +631,7 @@ async function openPhoneConversation(conversationId, relayTo) {
         },
         { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
       )
+      convWindows.set(opened.descriptor.conversationId, phoneWindowId)
       return { ok: true, windowId: phoneWindowId, reused: true, title: opened.descriptor.title }
     } catch (err) {
       rwarn('[relay] reuse conversation window failed:', err?.message || err)
@@ -647,6 +657,7 @@ async function openPhoneConversation(conversationId, relayTo) {
   if (res?.ok && res.id) {
     phoneWindowId = res.id
     phoneWindowKey = reuseKey
+    convWindows.set(opened.descriptor.conversationId, res.id)
     rlog('[relay] opened conversation window:', res.id, 'conv =', opened.descriptor.conversationId)
     return { ok: true, windowId: res.id, title: opened.descriptor.title }
   }
@@ -1097,7 +1108,23 @@ async function routePhoneChat(msg) {
     // 结果「重新回答」「删除这条」永远找不到窗口（日志：no bound window）。
     // 现在改成：phone 模式的窗口一律接受；conv:<id> 模式必须 id 对得上。
     let targetWin = null
-    if (isWindowAlive(phoneWindowId)) {
+
+    // 1) 先看有没有为**这个会话**专门开着的窗口（最精确）
+    if (conversationId) {
+      const wid = convWindows.get(conversationId)
+      if (wid && isWindowAlive(wid)) {
+        targetWin = wid
+      } else if (wid) {
+        convWindows.delete(conversationId) // 窗口已关，清理掉
+      }
+    }
+
+    // 2) 再看当前这个「手机窗口」能不能用
+    //
+    // 手机聊天窗口（key='phone'）一律接受：那个窗口就是手机自己在聊的会话，
+    // 消息必然来自它。具体是不是同一条消息，由窗口自己按 messageId 查——
+    // 窗口手里有真实的 chat_show，它比主进程更有发言权。
+    if (!targetWin && isWindowAlive(phoneWindowId)) {
       if (phoneWindowKey === 'phone') {
         targetWin = phoneWindowId
       } else if (conversationId && phoneWindowKey === `conv:${conversationId}`) {
@@ -1106,6 +1133,30 @@ async function routePhoneChat(msg) {
         targetWin = phoneWindowId
       }
     }
+    // 没窗口？那就**把那个会话开起来**再操作。
+    //
+    // 以前这里直接 fail('conversation_not_open')，用户就会看到
+    // 「电脑端还没打开这个会话」—— 但手机明明能看到这条消息（从数据库读的）。
+    // 两边不一致很难用：凭什么看得到却不能删？
+    // 所以改为：自动 openWindow 打开该会话，等它初始化完再派发命令。
+    if (!targetWin && conversationId) {
+      try {
+        rlog('[relay] message-action: auto-opening conversation', conversationId)
+        const opened = await openPhoneConversation(conversationId, to)
+        const autoWin = convWindows.get(conversationId) || phoneWindowId
+        if (opened?.ok && autoWin && isWindowAlive(autoWin)) {
+          targetWin = autoWin
+          // 窗口刚建好，历史还在加载。等它 bootstrap 完成，
+          // 否则 chat_show 还是空的 -> 窗口会回 message_not_found。
+          await new Promise((r) => setTimeout(r, 1200))
+        } else {
+          rwarn('[relay] auto-open for message-action failed:', opened?.reason)
+        }
+      } catch (err) {
+        rwarn('[relay] auto-open for message-action threw:', err?.message || err)
+      }
+    }
+
     if (!targetWin) {
       rlog('[relay] message-action but no bound window; conv =', conversationId, 'key =', phoneWindowKey)
       return fail('conversation_not_open')
@@ -1276,6 +1327,22 @@ async function routePhoneChat(msg) {
     return
   }
   try {
+    // 先看能不能**复用**已有的「手机」会话。
+    //
+    // 以前这里无条件新建：每次窗口重建（切助手/重连/重启）都会多出一个
+    // 标题为「手机」的会话，手机端列表里一堆同名项、内容还各不相同。
+    // 现在优先接着上次那个「手机」会话聊。
+    const reusableId = await findReusablePhoneConversationId(phonePromptKey)
+    if (reusableId) {
+      const opened = await openPhoneConversation(reusableId, relayTo)
+      if (opened?.ok) {
+        convWindows.set(reusableId, opened.windowId)
+        rlog('[relay] routed phone chat into existing conversation:', reusableId)
+        return
+      }
+      rwarn('[relay] reuse conversation failed, creating new one:', opened?.reason)
+    }
+
     const res = await ctx.openWindow('window', {
       code: phonePromptKey,
       type: 'multiline-text',

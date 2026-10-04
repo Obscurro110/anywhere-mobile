@@ -780,6 +780,17 @@ const handleRelayCommand = async (cmd) => {
     }
   };
 
+  // 会话一致性自检：手机要求操作的会话必须就是本窗口正在显示的这个。
+  // 主进程为了「手机看得见就能操作」放宽了窗口匹配，这里补上最后一道闸门，
+  // 避免拿着 A 会话的消息去 B 会话上删（那会删错东西）。
+  const wantConv = String(cmd.conversationId || '');
+  const myConv = currentConversationStorage.value?.conversationId || '';
+  if (wantConv && myConv && wantConv !== myConv) {
+    relayWarn('[relay] command conversation mismatch. want =', wantConv, 'have =', myConv);
+    reply(false, { reason: 'conversation_mismatch' });
+    return;
+  }
+
   try {
     if (action === 'reask') {
       // 电脑端要求传 assistant 消息 id
