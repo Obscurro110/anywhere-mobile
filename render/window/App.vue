@@ -10897,6 +10897,18 @@ watch(
       // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
       // 再带上「服务商|模型名」，手机气泡上就不用写死 "Anywhere Desktop" 了。
       const assistantIndex = chat_show.value.length - 1;
+      // 消息元数据：时间 / 耗时 / token，让手机气泡和电脑端显示一致。
+      const tokenUsage = last.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
+      const startTime = Number(last.startTime) || Number(last.timestamp) || 0;
+      const endTime = Number(last.endTime) || 0;
+      const relayTokens = tokenUsage
+        ? {
+            prompt: Number(tokenUsage.prompt_tokens) || 0,
+            completion: Number(tokenUsage.completion_tokens) || 0,
+            reasoning: Number(tokenUsage.reasoning_tokens) || 0,
+            total: Number(tokenUsage.total_tokens) || 0
+          }
+        : null;
       await window.api.sendRelayChat({
         text,
         to,
@@ -10905,7 +10917,10 @@ watch(
             messageId: String(last.id ?? ''),
             index: assistantIndex,
             conversationId: currentConversationStorage.value?.conversationId || '',
-            modelTag: getCurrentAssistantDisplayName() || ''
+            modelTag: getCurrentAssistantDisplayName() || '',
+            startTime,
+            endTime,
+            ...(relayTokens ? { tokens: relayTokens } : {})
           },
           ...(relayChoice ? { __relayChoice: relayChoice } : {})
         }

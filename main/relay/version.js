@@ -6,5 +6,5 @@
  * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
  * 否则电脑端会向手机上报旧版本号。
  */
-export const RELAY_VERSION = '1.7.6';
-export const RELAY_VERSION_CODE = 26;
+export const RELAY_VERSION = '1.7.7';
+export const RELAY_VERSION_CODE = 27;

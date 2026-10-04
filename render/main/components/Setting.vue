@@ -91,8 +91,6 @@ const collapsedCards = ref({
   general: false,
   desktop: false,
 
-  networkProxy: false,
-  voice: false,
   data: false,
   webdav: false,
   relay: false
@@ -101,8 +99,6 @@ const collapsedCards = ref({
 const cardDefinitions = {
   general: { id: 'general', titleKey: 'setting.title' },
   desktop: { id: 'desktop', titleKey: 'setting.desktop.title' },
-  networkProxy: { id: 'networkProxy', titleKey: 'setting.networkProxy.title' },
-  voice: { id: 'voice', titleKey: 'setting.voice.title' },
   data: { id: 'data', titleKey: 'setting.dataManagement.title' },
   webdav: { id: 'webdav', titleKey: null, staticTitle: 'WebDAV' },
   relay: { id: 'relay', titleKey: null, staticTitle: '手机互通' }
@@ -376,8 +372,6 @@ function initCardOrder() {
     settingsCards.value = [
       cardDefinitions.general,
       cardDefinitions.desktop,
-      cardDefinitions.networkProxy,
-      cardDefinitions.voice,
       cardDefinitions.data,
       cardDefinitions.webdav,
       cardDefinitions.relay
@@ -2002,12 +1996,7 @@ async function pullSelectedCloudSkillsToLocal() {
           <template #item="{ element }">
             <div class="settings-card">
               <div class="card-header" :class="{ 'is-collapsed': collapsedCards[element.id] }" @click="toggleCard(element.id)">
-                <span v-if="element.id === 'voice'">
-                  <el-tooltip :content="t('setting.voice.description')" placement="top">
-                    <span>{{ t(element.titleKey) }}</span>
-                  </el-tooltip>
-                </span>
-                <span v-else>{{ element.titleKey ? t(element.titleKey) : element.staticTitle }}</span>
+                <span>{{ element.titleKey ? t(element.titleKey) : element.staticTitle }}</span>
                 <el-icon class="collapse-icon" :class="{ 'is-expanded': !collapsedCards[element.id] }"><ArrowRight /></el-icon>
               </div>
 
@@ -2221,59 +2210,7 @@ async function pullSelectedCloudSkillsToLocal() {
                       </div>
                     </div>
                   </div>
-                  <div v-if="element.id === 'networkProxy'" class="card-body">
-                    <div class="setting-option-item">
-                      <div class="setting-text-content">
-                        <span class="setting-option-label">{{ t('setting.networkProxy.enabled.label') }}</span>
-                        <span class="setting-option-description">{{ t('setting.networkProxy.enabled.description') }}</span>
-                      </div>
-                      <el-switch v-model="currentConfig.networkProxy.enabled" @change="handleNetworkProxyEnabledChange" />
-                    </div>
 
-                    <div class="setting-option-item network-proxy-item">
-                      <div class="setting-text-content">
-                        <span class="setting-option-label">{{ t('setting.networkProxy.server.label') }}</span>
-                        <span class="setting-option-description">{{ t('setting.networkProxy.server.description') }}</span>
-                      </div>
-                      <el-input
-                        v-model="currentConfig.networkProxy.server"
-                        :disabled="!currentConfig.networkProxy.enabled"
-                        :placeholder="t('setting.networkProxy.server.placeholder')"
-                        class="network-proxy-input"
-                        @keyup.enter="saveNetworkProxyConfig"
-                        @blur="currentConfig.networkProxy.enabled && saveNetworkProxyConfig()"
-                      />
-                    </div>
-
-                    <div class="setting-option-item no-border network-proxy-item">
-                      <div class="setting-text-content">
-                        <span class="setting-option-label">{{ t('setting.networkProxy.bypassRules.label') }}</span>
-                        <span class="setting-option-description">{{ t('setting.networkProxy.bypassRules.description') }}</span>
-                      </div>
-                      <el-input
-                        v-model="currentConfig.networkProxy.bypassRules"
-                        :disabled="!currentConfig.networkProxy.enabled"
-                        :placeholder="t('setting.networkProxy.bypassRules.placeholder')"
-                        class="network-proxy-input"
-                        @keyup.enter="saveNetworkProxyConfig"
-                        @blur="currentConfig.networkProxy.enabled && saveNetworkProxyConfig()"
-                      />
-                    </div>
-                  </div>
-
-
-
-<div v-if="element.id === 'voice'" class="card-body">
-                    <div class="voice-list-container">
-                      <el-tag v-for="voice in currentConfig.voiceList" :key="voice" closable @click="editVoice(voice)"
-                        @close="deleteVoice(voice)" class="voice-tag" size="large">
-                        {{ voice }}
-                      </el-tag>
-                      <el-button class="add-voice-button" type="primary" plain :icon="Plus" @click="addNewVoice">
-                        {{ t('setting.voice.add') }}
-                      </el-button>
-                    </div>
-                  </div>
 
                   <div v-if="element.id === 'data'" class="card-body">
                     <div class="setting-option-item">
