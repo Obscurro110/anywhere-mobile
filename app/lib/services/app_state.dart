@@ -77,6 +77,13 @@ class AppState extends ChangeNotifier {
   /// 电脑端提示「消息已排队」的提示信息（null = 没在排队）
   Map<String, dynamic>? bufferNotice;
 
+  /// 正在等待电脑端回结果的「重新回答」目标（本地消息 id）。
+  /// 用来让那颗刷新图标转圈，而不是弹一个没必要的弹窗。
+  String? reaskingLocalId;
+
+  /// 正在等待电脑端回结果的「删除这条」目标（本地消息 id）。
+  String? deletingLocalId;
+
   /// 手动压缩是否已发起（电脑端跑完会刷新能力清单）
   bool compactRunning = false;
 
@@ -435,13 +442,26 @@ class AppState extends ChangeNotifier {
   /// 复制不需要电脑端，UI 直接做。
 
   /// 让电脑端重新回答这一条（气泡上的 ↻）。
+  ///
+  /// 会记下本地这条消息的 id（reaskingLocalId），让图标转圈直到电脑端回结果；
+  /// 同时记下它是「要覆盖的那一条」，新回复回来时替换它而不是追加一条。
   bool reaskChatMessage(ChatMessage m) {
     final meta = m.desktopMeta;
     if (meta == null || !meta.isValid) return false;
     final convId = meta.conversationId.isNotEmpty
         ? meta.conversationId
         : (m.conversationId ?? _activeConversationId ?? '');
-    return reaskMessageOnDesktop(convId, meta.messageId);
+    lastMessageAction = null;
+    reaskingLocalId = m.id;
+    _reaskOverwriteLocalId = m.id;
+    notifyListeners();
+    final ok = reaskMessageOnDesktop(convId, meta.messageId);
+    if (!ok) {
+      reaskingLocalId = null;
+      _reaskOverwriteLocalId = null;
+      notifyListeners();
+    }
+    return ok;
   }
 
   /// 让电脑端删掉这一条（气泡上的 🗑）。
@@ -462,6 +482,12 @@ class AppState extends ChangeNotifier {
     }
     return ok;
   }
+
+  /// 点了「重新回答」还没等到结果时，这条消息应该显示转圈图标。
+  bool isReasking(String localMessageId) => reaskingLocalId == localMessageId;
+
+  /// 内部：本次重新回答要覆盖掉哪条本地旧回复（收到新回复后替换它）
+  String? _reaskOverwriteLocalId;
 
   // ---- 定时任务管理 ----
 
@@ -954,6 +980,13 @@ class AppState extends ChangeNotifier {
           'ok': r['ok'] == true,
           'reason': r['reason']?.toString() ?? '',
         };
+        // 电脑端已回结果 —— 不管成功失败，转圈都要停。
+        // 成功的话随后到达的新回复会覆盖旧气泡；
+        // 失败的话保持原样，由 HomeShell 弹出原因。
+        if (r['action'] == 'reask') {
+          reaskingLocalId = null;
+          if (r['ok'] != true) _reaskOverwriteLocalId = null;
+        }
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] message-action-result decode failed: $e');
@@ -992,9 +1025,84 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    // 电脑端回传「你刚发的那条消息在电脑端的位置」
+    // —— 补上之后，自己发的消息也能显示「删除这条」（以前只有 AI 回复才有）
+    if (p.role == ChatRole.userMessageMeta) {
+      try {
+        final decoded = jsonDecode(p.text) as Map<String, dynamic>;
+        final m = (decoded['__relayUserMessageMeta'] as Map?)?.cast<String, dynamic>() ?? {};
+        final clientId = m['clientMsgId']?.toString() ?? '';
+        final desktopId = m['messageId']?.toString() ?? '';
+        final index = (m['index'] as num?)?.toInt() ?? -1;
+        final convId = m['conversationId']?.toString() ?? '';
+        // 优先按手机本地消息 id 精确匹配；拿不到就退回「最后一条自己发的」
+        var at = -1;
+        if (clientId.isNotEmpty) {
+          at = messages.indexWhere((x) => x.id == clientId);
+        }
+        if (at < 0) {
+          at = messages.lastIndexWhere((x) => x.outgoing);
+        }
+        if (at >= 0 && desktopId.isNotEmpty && index >= 0) {
+          final old = messages[at];
+          messages[at] = ChatMessage(
+            id: old.id,
+            role: old.role,
+            text: old.text,
+            time: old.time,
+            outgoing: old.outgoing,
+            conversationId: convId.isNotEmpty ? convId : old.conversationId,
+            attachments: old.attachments,
+            pending: old.pending,
+            modelTag: old.modelTag,
+            desktopMeta: AssistantMeta(
+              messageId: desktopId,
+              index: index,
+              conversationId: convId,
+            ),
+          );
+          _persistHistory();
+          notifyListeners();
+        }
+      } catch (e) {
+        debugPrint('[AppState] user-message-meta decode failed: $e');
+      }
+      return;
+    }
+
     final isAssistant = p.role == ChatRole.assistant;
 
-    // Merge into the pending assistant bubble if we were waiting for one.
+    // 情况 A：这条是「重新回答」的产物
+    //   电脑端那边是「删掉旧的 assistant 气泡 → 重新生成」，
+    //   所以手机这边也必须**覆盖**原来那条，不能再追加一条（否则会出现两条回复）。
+    final overwriteId = _reaskOverwriteLocalId;
+    if (isAssistant && overwriteId != null) {
+      final idx = messages.indexWhere((m) => m.id == overwriteId);
+      final fresh = ChatMessage(
+        id: env.id,
+        role: p.role,
+        text: p.text,
+        time: DateTime.fromMillisecondsSinceEpoch(env.ts),
+        outgoing: false,
+        conversationId: p.conversationId,
+        attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+        desktopMeta: p.assistantMeta,
+        modelTag: p.assistantMeta?.modelTag ?? '',
+      );
+      if (idx >= 0) {
+        messages[idx] = fresh;
+      } else {
+        messages.add(fresh);
+      }
+      _reaskOverwriteLocalId = null;
+      reaskingLocalId = null;
+      _persistHistory();
+      notifyListeners();
+      notifications.show('Anywhere', p.text, id: env.ts.remainder(100000));
+      return;
+    }
+
+    // 情况 B：正常回复 —— 合并进 awaiting 的 pending 气泡
     if (isAssistant && messages.isNotEmpty && messages.last.pending) {
       messages[messages.length - 1] = ChatMessage(
         id: env.id,
@@ -1005,6 +1113,7 @@ class AppState extends ChangeNotifier {
         conversationId: p.conversationId,
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
         desktopMeta: p.assistantMeta,
+        modelTag: p.assistantMeta?.modelTag ?? '',
       );
     } else {
       messages.add(ChatMessage(
@@ -1016,6 +1125,7 @@ class AppState extends ChangeNotifier {
         conversationId: p.conversationId,
         attachments: (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
         desktopMeta: p.assistantMeta,
+        modelTag: p.assistantMeta?.modelTag ?? '',
       ));
     }
     _persistHistory();
@@ -1089,6 +1199,11 @@ class AppState extends ChangeNotifier {
         options: options.isEmpty ? null : options,
       ).toJson(),
     );
+
+    // 把本条消息在手机本地的 id 也带上（放在 __relayClientMsgId）。
+    // 电脑端 append 后会回传「这条在电脑端的位置」，手机靠这个 id
+    // 就能精确给对应气泡挂上「删除这条」。
+    env.payload['__relayClientMsgId'] = env.id;
 
     messages.add(ChatMessage(
       id: env.id,

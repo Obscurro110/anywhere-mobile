@@ -183,10 +183,22 @@ class _Bubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (!outgoing && msg.role == ChatRole.assistant)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 4),
-                child: Text('Anywhere Desktop',
-                    style: TextStyle(fontSize: 10, color: Colors.white38)),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.smart_toy_outlined,
+                        size: 12, color: Colors.white38),
+                    const SizedBox(width: 4),
+                    Text(
+                      // 显示「服务商|模型」，而不是笼统的 Anywhere Desktop：
+                      // 一眼能看出这条是哪个模型答的
+                      msg.modelTag.isNotEmpty ? msg.modelTag : 'Anywhere Desktop',
+                      style: const TextStyle(fontSize: 10.5, color: Colors.white38),
+                    ),
+                  ],
+                ),
               ),
             if (msg.pending)
               const Padding(
@@ -275,12 +287,19 @@ class _ActionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 「重新回答」要能定位到电脑端那条消息，而且电脑端只允许重答最后一条
-    // （reaskAI 内部对非最后一条会直接 return，所以这里也不显示，避免点了没反应）
-    final canReask =
-        !outgoing && msg.isDesktopAssistant && isLast && msg.role == ChatRole.assistant;
-    // 「删除这条」只要拿得到定位信息就行，不限位置
-    final canDelete = msg.isDesktopAssistant;
+    // 用 watch 而不是 read：重答/删除的等待状态变了要重建这个按钮（转圈）
+    final state = context.watch<AppState>();
+    final reasking = state.isReasking(msg.id);
+
+    // 「重新回答」只对电脑端回传的 AI 回复、且是最后一条时显示
+    // （电脑端的 reaskAI 内部只允许重答最后一条）
+    final canReask = !outgoing &&
+        msg.role == ChatRole.assistant &&
+        msg.isDesktopAssistant &&
+        isLast;
+    // 「删除这条」只要拿到电脑端定位就行 —— **自己发的消息也算**
+    // （电脑端 append 后会回传位置，手机据此挂上 desktopMeta）
+    final canDelete = msg.desktopMeta?.isValid ?? false;
 
     return Padding(
       padding: const EdgeInsets.only(top: 6),
@@ -297,16 +316,19 @@ class _ActionBar extends StatelessWidget {
             }
           }),
           if (canReask)
-            _act(context, Icons.refresh_rounded, '重新回答', () async {
-              final state = context.read<AppState>();
-              final ok = state.reaskChatMessage(msg);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(ok ? '已让电脑端重新回答…' : '发送失败'),
-                  duration: const Duration(seconds: 2),
-                ));
-              }
-            }),
+            // 点完就转圈，不弹任何弹窗；转圈持续到电脑端回结果（失败时由
+            // HomeShell 统一弹出原因，成功时新回复会覆盖掉这条旧的）。
+            _act(
+              context,
+              Icons.refresh_rounded,
+              reasking ? '重新回答中' : '重新回答',
+              reasking
+                  ? null
+                  : () {
+                      context.read<AppState>().reaskChatMessage(msg);
+                    },
+              busy: reasking,
+            ),
           if (canDelete)
             _act(context, Icons.delete_outline_rounded, '删除这条', () async {
               final state = context.read<AppState>();
@@ -341,9 +363,12 @@ class _ActionBar extends StatelessWidget {
     );
   }
 
+  /// 一个小操作按钮。onTap 为 null 表示不可点（busy 时转圈）。
   Widget _act(BuildContext context, IconData icon, String label,
-      VoidCallback onTap, {bool danger = false}) {
-    final color = danger ? Colors.redAccent : Colors.white54;
+      VoidCallback? onTap, {bool danger = false, bool busy = false}) {
+    final color = busy
+        ? Colors.lightBlueAccent
+        : (danger ? Colors.redAccent : Colors.white54);
     return Padding(
       padding: const EdgeInsets.only(right: 4),
       child: InkWell(
@@ -354,7 +379,17 @@ class _ActionBar extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 15, color: color),
+              if (busy)
+                SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    valueColor: AlwaysStoppedAnimation(color),
+                  ),
+                )
+              else
+                Icon(icon, size: 15, color: color),
               const SizedBox(width: 4),
               Text(label, style: TextStyle(fontSize: 11.5, color: color)),
             ],

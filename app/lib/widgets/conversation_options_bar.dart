@@ -164,7 +164,8 @@ class ConversationOptionsBar extends StatelessWidget {
   static String _modelLabel(Capabilities caps, String? value) {
     if (value == null || value.isEmpty) return '默认模型';
     final hit = caps.models.where((m) => m.value == value);
-    if (hit.isNotEmpty) return hit.first.label;
+    // 和电脑端口径一致：显示「服务商|模型名」
+    if (hit.isNotEmpty) return hit.first.displayName;
     final parts = value.split('|');
     return parts.length > 1 ? parts[1] : value;
   }
@@ -285,8 +286,10 @@ class ConversationOptionsBar extends StatelessWidget {
         const _SheetItem<String?>(value: null, label: '默认（跟随电脑端）'),
         ...caps.models.map((m) => _SheetItem<String?>(
               value: m.value,
-              label: m.label,
-              subtitle: m.provider,
+              // 主标题用「服务商|模型」，和电脑端显示口径一致；
+              // 副标题给模型原始名，方便对照。
+              label: m.displayName,
+              subtitle: m.label == m.displayName ? m.value : m.label,
             )),
       ],
       current: state.options.model,

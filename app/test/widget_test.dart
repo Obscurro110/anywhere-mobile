@@ -448,4 +448,91 @@ void main() {
       expect(back.desktopMeta?.index, 4);
     });
   });
+
+  group('模型显示名（服务商|模型）', () {
+    test('电脑端有报服务商时用「服务商|模型名」', () {
+      final m = ModelOption.fromJson({
+        'value': '1790428297454|deepseek-v4.1-flash',
+        'label': 'deepseek-v4.1-flash',
+        'provider': 'DeepSeek',
+      });
+      expect(m.providerLabel, 'DeepSeek');
+      expect(m.displayName, 'DeepSeek|deepseek-v4.1-flash');
+    });
+
+    test('电脑端没报服务商时退回 value 里的 providerId', () {
+      final m = ModelOption.fromJson({
+        'value': 'abc123|gpt-4o',
+        'label': 'gpt-4o',
+      });
+      expect(m.providerLabel, 'abc123');
+      expect(m.displayName, 'abc123|gpt-4o');
+    });
+
+    test('value 里没有分隔符时不炸', () {
+      final m = ModelOption.fromJson({'value': 'solo', 'label': 'solo'});
+      expect(m.displayName, 'solo|solo');
+    });
+  });
+
+  group('气泡上的模型标签', () {
+    test('AssistantMeta 带上 modelTag 并能往返', () {
+      final m = AssistantMeta.fromJson({
+        'messageId': '3',
+        'index': 1,
+        'conversationId': 'c',
+        'modelTag': 'Doro|claude-opus-5',
+      });
+      expect(m.modelTag, 'Doro|claude-opus-5');
+      final j = m.toJson();
+      expect(j['modelTag'], 'Doro|claude-opus-5');
+    });
+
+    test('旧版电脑端没报 modelTag 时为空（UI 有兜底）', () {
+      final m = AssistantMeta.fromJson({'messageId': '3', 'index': 1});
+      expect(m.modelTag, '');
+    });
+
+    test('ChatMessage 保留 modelTag', () {
+      final m = ChatMessage(
+        id: 'a',
+        role: 'assistant',
+        text: 'hi',
+        time: DateTime.fromMillisecondsSinceEpoch(1),
+        outgoing: false,
+        modelTag: 'Grok|grok-4',
+      );
+      expect(m.modelTag, 'Grok|grok-4');
+      final back = ChatMessage.fromJson(m.toJson());
+      expect(back.modelTag, 'Grok|grok-4');
+    });
+  });
+
+  group('自己发的消息也能删（user-message-meta）', () {
+    test('ChatRole 常量存在', () {
+      expect(ChatRole.userMessageMeta, 'user-message-meta');
+    });
+
+    test('user 消息带上 desktopMeta 后可删除', () {
+      final m = ChatMessage(
+        id: 'local-1',
+        role: 'user',
+        text: '我发的',
+        time: DateTime.fromMillisecondsSinceEpoch(1),
+        outgoing: true,
+        desktopMeta: AssistantMeta(messageId: '77', index: 5, conversationId: 'c'),
+      );
+      // 删除按钮看的是 desktopMeta.valid，与角色无关
+      expect(m.desktopMeta?.isValid, isTrue);
+      // 但「重新回答」仍然只给 AI 回复
+      expect(m.isDesktopAssistant, isFalse);
+    });
+
+    test('等待重答时能标记出是哪条（转圈用）', () {
+      // 纯数据校验：isValid 只在 id + index 都有时为真
+      expect(AssistantMeta(messageId: '1', index: 0).isValid, isTrue);
+      expect(AssistantMeta(messageId: '1', index: -1).isValid, isFalse);
+      expect(AssistantMeta(messageId: '', index: 0).isValid, isFalse);
+    });
+  });
 }

@@ -95,6 +95,10 @@ class ChatRole {
 
   /// Desktop -> phone: your message is queued (desktop is mid-generation).
   static const buffered = 'buffered';
+
+  /// Desktop -> phone: where your just-sent message landed on the desktop
+  /// (so the phone can offer 「删除这条」 on its own outgoing bubbles).
+  static const userMessageMeta = 'user-message-meta';
 }
 
 /// A single unit of data flowing over the relay.
@@ -272,10 +276,15 @@ class AssistantMeta {
   final int index;
   final String conversationId;
 
+  /// 这条回复用的「服务商|模型名」，例如「Doro|claude-opus-5」。
+  /// 电脑端旧版本可能不报，此时为空，UI 会退回默认文案。
+  final String modelTag;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
     this.conversationId = '',
+    this.modelTag = '',
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -284,12 +293,14 @@ class AssistantMeta {
         'messageId': messageId,
         'index': index,
         'conversationId': conversationId,
+        if (modelTag.isNotEmpty) 'modelTag': modelTag,
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
         messageId: j['messageId'] as String? ?? '',
         index: (j['index'] as num?)?.toInt() ?? -1,
         conversationId: j['conversationId'] as String? ?? '',
+        modelTag: j['modelTag'] as String? ?? '',
       );
 }
 
@@ -344,6 +355,17 @@ class ModelOption {
   final String provider;
 
   ModelOption({required this.value, required this.label, this.provider = ''});
+
+  /// 服务商显示名。电脑端没上报时退回 value 里的 providerId。
+  String get providerLabel {
+    if (provider.isNotEmpty) return provider;
+    final pid = value.split('|').first;
+    return pid.isEmpty ? '' : pid;
+  }
+
+  /// 「服务商|模型名」，和电脑端口径一致（如 "Doro|claude-opus-5"）。
+  String get displayName =>
+      providerLabel.isEmpty ? label : '$providerLabel|$label';
 
   factory ModelOption.fromJson(Map<String, dynamic> j) => ModelOption(
         value: j['value'] as String? ?? '',

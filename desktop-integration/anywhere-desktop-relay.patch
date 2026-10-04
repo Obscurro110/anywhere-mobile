@@ -86,10 +86,10 @@ index f63f831..dda515c 100644
    }, 800)
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..e8f350f
+index 0000000..d77bd4e
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,1482 @@
+@@ -0,0 +1,1485 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1337,6 +1337,9 @@ index 0000000..e8f350f
 +
 +  const relayFields = {
 +    relayTo,
++    // 手机本地的消息 id —— 窗口 append 后会把它原样回传，
++    // 手机就能精确把「电脑端位置」挂到对应气泡上（自己发的消息也能删）。
++    __relayClientMsgId: msg?.__relayClientMsgId || '',
 +    ...(opts ? { __relayOptions: opts } : {})
 +  }
 +
@@ -2265,7 +2268,7 @@ index 2ad1391..79987d7 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..1109ea6 100644
+index 6bb1113..4723606 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,133 @@ const normalizeWindowEventPayload = (input) => {
@@ -2402,7 +2405,43 @@ index 6bb1113..1109ea6 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -769,6 +893,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -759,6 +883,35 @@ const flushPendingWindowPayloadQueue = async () => {
+ };
+ 
+ 
++// ---------------------------------------------------------------------------
++// [anywhere-mobile] 告诉手机「你刚发的那条消息在电脑端的位置」
++//
++// 手机发来的消息会被 append 到本窗口的 chat_show，拿到一个真实 id + 下标。
++// 但手机自己不知道这回事 —— 所以它发的消息一直没法「删除这条」。
++// 这里把定位信息回传，手机就能给那条消息挂上操作按钮。
++// ---------------------------------------------------------------------------
++const notifyPhoneUserMessageMeta = (data, desktopMsgId) => {
++  if (!data?.relayTo) return;
++  try {
++    const idx = chat_show.value.findIndex((m) => String(m?.id ?? '') === String(desktopMsgId));
++    window.api?.sendRelayChat?.({
++      role: 'user-message-meta',
++      text: JSON.stringify({
++        __relayUserMessageMeta: {
++          // 手机发来的相关 id（用来在手机本地找到对应那条气泡）
++          clientMsgId: String(data.__relayClientMsgId || ''),
++          messageId: String(desktopMsgId ?? ''),
++          index: idx,
++          conversationId: currentConversationStorage.value?.conversationId || ''
++        }
++      }),
++      to: data.relayTo
++    });
++  } catch (err) {
++    relayWarn('[relay] user-message-meta failed:', err);
++  }
++};
++
+ const handleAppendMessageEvent = async (data, options = {}) => {
+   if (!data || !ensureConversationWriteAccess(true)) return;
+ 
+@@ -769,6 +922,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -2426,7 +2465,29 @@ index 6bb1113..1109ea6 100644
      return;
    }
  
-@@ -5687,7 +5828,18 @@ onMounted(async () => {
+@@ -790,7 +960,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+       shouldAutoSend = false;
+     } else {
+       appendFullHistory({ role: "user", content: multilineText });
+-      chat_show.value.push({ id: messageIdCounter.value++, role: "user", content: [{ type: "text", text: multilineText }], timestamp: nowTime });
++      const pushedId = messageIdCounter.value++;
++      chat_show.value.push({ id: pushedId, role: "user", content: [{ type: "text", text: multilineText }], timestamp: nowTime });
++      notifyPhoneUserMessageMeta(data, pushedId);
+     }
+   } else if (data.type === "over" && data.payload) {
+     const overText = String(data.payload);
+@@ -799,7 +971,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+       shouldAutoSend = false;
+     } else {
+       appendFullHistory({ role: "user", content: overText });
+-      chat_show.value.push({ id: messageIdCounter.value++, role: "user", content: [{ type: "text", text: overText }], timestamp: nowTime });
++      const pushedId = messageIdCounter.value++;
++      chat_show.value.push({ id: pushedId, role: "user", content: [{ type: "text", text: overText }], timestamp: nowTime });
++      notifyPhoneUserMessageMeta(data, pushedId);
+     }
+   } else if (data.type === "img" && data.payload) {
+     if (shouldRespectDirectSendConfig && !directSendConfig.image) {
+@@ -5687,7 +5861,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -2446,7 +2507,7 @@ index 6bb1113..1109ea6 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10356,6 +10508,137 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10541,139 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -2562,6 +2623,7 @@ index 6bb1113..1109ea6 100644
 +    try {
 +      // 带上这条 assistant 消息在 chat_show 里的 id / 下标 / 会话，
 +      // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
++      // 再带上「服务商|模型名」，手机气泡上就不用写死 "Anywhere Desktop" 了。
 +      const assistantIndex = chat_show.value.length - 1;
 +      await window.api.sendRelayChat({
 +        text,
@@ -2570,7 +2632,8 @@ index 6bb1113..1109ea6 100644
 +          __relayAssistantMeta: {
 +            messageId: String(last.id ?? ''),
 +            index: assistantIndex,
-+            conversationId: currentConversationStorage.value?.conversationId || ''
++            conversationId: currentConversationStorage.value?.conversationId || '',
++            modelTag: getCurrentAssistantDisplayName() || ''
 +          }
 +        }
 +      });

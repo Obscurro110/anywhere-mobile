@@ -39,6 +39,10 @@ class ChatMessage {
   /// 只有「电脑端回传的 assistant 回复」才有，本地消息为 null。
   final AssistantMeta? desktopMeta;
 
+  /// 这条回复是哪个模型答的，形如「服务商|模型名」（电脑端回传）。
+  /// 空字符串表示电脑端没报（旧版本），UI 会退回默认文案。
+  final String modelTag;
+
   ChatMessage({
     required this.id,
     required this.role,
@@ -49,6 +53,7 @@ class ChatMessage {
     this.attachments,
     this.pending = false,
     this.desktopMeta,
+    this.modelTag = '',
   });
 
   /// 是电脑端 AI 的回复（能重新回答 / 删除）
@@ -64,6 +69,7 @@ class ChatMessage {
         'conversationId': conversationId,
         'attachments': attachments?.map((e) => e.toJson()).toList(),
         if (desktopMeta != null) 'desktopMeta': desktopMeta!.toJson(),
+        if (modelTag.isNotEmpty) 'modelTag': modelTag,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -80,6 +86,7 @@ class ChatMessage {
             ? AssistantMeta.fromJson(
                 (j['desktopMeta'] as Map).cast<String, dynamic>())
             : null,
+        modelTag: j['modelTag'] as String? ?? '',
       );
 
   ChatMessage copyWith({String? text, bool? pending}) => ChatMessage(
@@ -92,6 +99,7 @@ class ChatMessage {
         attachments: attachments,
         pending: pending ?? this.pending,
         desktopMeta: desktopMeta,
+        modelTag: modelTag,
       );
 }
 
