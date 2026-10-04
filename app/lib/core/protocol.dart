@@ -975,6 +975,10 @@ class Capabilities {
   final ChatOptions current;
   final int fetchedAt;
 
+  /// 电脑端当前给手机用的助手（relay 的 phonePromptKey）。
+  /// 手机连上后用它对齐「对话和助手」，避免两边各说各话。
+  final String desktopPromptKey;
+
   /// 电脑端「手机互通」版本号
   final String desktopVersion;
   final int desktopVersionCode;
@@ -1001,6 +1005,7 @@ class Capabilities {
     this.desktopVersion = '',
     this.desktopVersionCode = 0,
     this.upstreamVersion = '',
+    this.desktopPromptKey = '',
     int? fetchedAt,
   }) : fetchedAt = fetchedAt ?? DateTime.now().millisecondsSinceEpoch;
 
@@ -1047,6 +1052,7 @@ class Capabilities {
         desktopVersion: j['desktopVersion'] as String? ?? '',
         desktopVersionCode: (j['desktopVersionCode'] as num?)?.toInt() ?? 0,
         upstreamVersion: j['upstreamVersion'] as String? ?? '',
+        desktopPromptKey: j['promptKey'] as String? ?? '',
       );
 
   Capabilities withTasks(List<TaskOption> next) => Capabilities(
@@ -1062,6 +1068,7 @@ class Capabilities {
         desktopVersion: desktopVersion,
         desktopVersionCode: desktopVersionCode,
         upstreamVersion: upstreamVersion,
+        desktopPromptKey: desktopPromptKey,
         fetchedAt: fetchedAt,
       );
 }

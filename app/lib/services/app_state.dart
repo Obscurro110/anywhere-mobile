@@ -300,7 +300,12 @@ class AppState extends ChangeNotifier {
   /// 所以这里一次性套用，用户之后仍可单独微调。
   ///
   /// 传 null 表示回到「默认助手」（清空助手相关预设，保留其他手动设置）。
-  void applyPrompt(String? key) {
+  /// 用户是否**手动**选过助手。
+  /// 手动选过之后，就不再被电脑端上报的默认助手覆盖。
+  bool _promptTouchedByUser = false;
+
+  void applyPrompt(String? key, {bool fromUser = true}) {
+    if (fromUser) _promptTouchedByUser = true;
     if (key == null || key.isEmpty) {
       options = options.copyWith(clearPromptKey: true);
       notifyListeners();
@@ -329,6 +334,36 @@ class AppState extends ChangeNotifier {
     if (key == null || key.isEmpty) return null;
     final hit = capabilities.prompts.where((p) => p.key == key);
     return hit.isNotEmpty ? hit.first : null;
+  }
+
+  /// 拿到电脑端能力清单后，把「手机当前助手」对齐到电脑端正在用的那个。
+  ///
+  /// 只在**用户没手动选过助手**、且手机没绑定某个电脑端会话时才对齐 ——
+  /// 否则会把用户的选择/会话自带的助手覆盖掉。
+  void _adoptDesktopPrompt(Capabilities caps) {
+    final key = caps.desktopPromptKey;
+    if (key.isEmpty) return;
+    if (_promptTouchedByUser) return;
+    if (_activeConversationId != null) return;
+    if (options.promptKey == key) return;
+    applyPrompt(key, fromUser: false);
+  }
+
+  /// 静默把手机当前聊天绑定到电脑端真实会话。
+  ///
+  /// 场景：手机在「主聊天」里发消息，电脑端其实把它路由进了某个具体会话
+  /// （比如复用的「手机」会话）。以前手机不知道这件事，于是下一条消息
+  /// 又可能被路由到别处 —— 表现就是「对话和助手没有对应」。
+  /// 这里只改绑定，不切历史（当前这些消息本来就属于那个会话）。
+  void _bindActiveConversationSilently(String convId, {String title = ''}) {
+    if (convId.isEmpty) return;
+    if (_activeConversationId == convId) return;
+    if (_activeConversationId != null) return; // 已绑定别的会话，不要抢
+    _activeConversationId = convId;
+    if (title.isNotEmpty) _activeConversationTitle = title;
+    unawaited(_persistActiveConversation());
+    unawaited(_persistHistory());
+    notifyListeners();
   }
 
   /// 拉取电脑端定时任务列表。
@@ -859,6 +894,7 @@ class AppState extends ChangeNotifier {
         capabilities = Capabilities.fromJson((raw as Map).cast<String, dynamic>());
         // 压缩跑完后电脑端会重新上报，这时候把"压缩中"标记清掉
         compactRunning = false;
+        _adoptDesktopPrompt(capabilities);
         notifyListeners();
       } catch (e) {
         debugPrint('[AppState] capabilities decode failed: $e');
@@ -1090,6 +1126,7 @@ class AppState extends ChangeNotifier {
             skills: capabilities.skills,
             prompts: capabilities.prompts,
             tasks: capabilities.tasks,
+            desktopPromptKey: capabilities.desktopPromptKey,
             compact: CompactConfig(
               model: c.model,
               autoCompactEnabled: r['enabled'] == true,
@@ -1220,6 +1257,7 @@ class AppState extends ChangeNotifier {
         if (ok && capsJson is Map) {
           capabilities = Capabilities.fromJson(capsJson.cast<String, dynamic>());
           loadingCapabilities = false;
+          _adoptDesktopPrompt(capabilities);
         }
         lastCapsEdit = {
           'op': r['op']?.toString() ?? '',
@@ -1246,6 +1284,14 @@ class AppState extends ChangeNotifier {
         final desktopId = m['messageId']?.toString() ?? '';
         final index = (m['index'] as num?)?.toInt() ?? -1;
         final convId = m['conversationId']?.toString() ?? '';
+        // 电脑端告诉我们这条消息真实落在哪个会话里 ——
+        // 手机如果还没绑定会话，就静默绑定过去（不切历史，
+        // 因为当前这些消息本来就属于那个会话）。
+        // 这样下一条消息会带上 conversationId，电脑端就不会再把它
+        // 路由到别的会话，「对话和助手」也就对得上了。
+        if (convId.isNotEmpty) {
+          _bindActiveConversationSilently(convId);
+        }
         // 优先按手机本地消息 id 精确匹配；拿不到就退回「最后一条自己发的」
         var at = -1;
         if (clientId.isNotEmpty) {
