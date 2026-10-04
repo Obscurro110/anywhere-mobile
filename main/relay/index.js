@@ -60,7 +60,7 @@ import {
   deleteMessages as storeDeleteMessages
 } from '../core/conversationStore.js'
 import { readLocalProjects } from '../core/projects.js'
-import { listSkills } from '../core/skill.js'
+import { listSkills, getSkillDetails, deleteSkill } from '../core/skill.js'
 import { getModelCompactConfig, updateModelCompactConfig } from '../core/compact.js'
 
 // ---------------------------------------------------------------------------
@@ -860,6 +860,57 @@ async function clearPhoneTaskHistory(taskId) {
   return { ok: true, cleared: count }
 }
 
+/**
+ * 找手机聊天窗口应该复用的那个「手机」会话。
+ *
+ * 为什么需要它：手机聊天窗口是电脑端自建的会话（标题就是「手机」）。
+ * 以前每次窗口重建（切换助手、重连、重启）都会**新建一个**会话，
+ * 结果目录里攒了一堆同名「手机」，手机端看着就像「多个会话内容重合」。
+ * 现在改成：优先复用最近更新的那个「手机」会话。
+ *
+ * @param {string} promptKey 手机当前选的助手（不同助手各用一个会话）
+ */
+async function findReusablePhoneConversationId(promptKey) {
+  try {
+    const dirPath = await readChatDirPath()
+    if (!dirPath) return ''
+    const all = await listLocalConversations(dirPath)
+    if (!Array.isArray(all) || !all.length) return ''
+
+    // 只看标题是「手机」的会话（电脑端新建时写死的标题）
+    const candidates = all.filter((c) => String(c?.title || '').trim() === '手机')
+    if (!candidates.length) return ''
+
+    // 按更新时间倒序，逐个验证能打开（db 文件可能已被删）
+    candidates.sort((a, b) => String(b?.updatedAt || '').localeCompare(String(a?.updatedAt || '')))
+
+    for (const c of candidates) {
+      const id = String(c?.conversationId || '').trim()
+      if (!id) continue
+      try {
+        const opened = await openConversation({ dirPath, reference: id, activeOnly: true, pageSize: 1 })
+        if (!opened?.ok) continue
+        // 助手换了就别复用旧会话（配置追不回来），除非没传 promptKey
+        const samePrompt = String(
+          opened.sessionData?.promptKey ||
+          opened.sessionData?.sessionMetadata?.promptKey ||
+          ''
+        ) === String(promptKey || '')
+        if (samePrompt || !promptKey) {
+          rlog('[relay] reuse phone conversation:', id, 'title =', c.title)
+          return id
+        }
+      } catch (err) {
+        rwarn('[relay] probe phone conversation failed:', id, err?.message || err)
+      }
+    }
+    return ''
+  } catch (err) {
+    rwarn('[relay] findReusablePhoneConversationId failed:', err?.message || err)
+    return ''
+  }
+}
+
 async function routePhoneChat(msg) {
   const role = String(msg?.role ?? 'user').toLowerCase()
   const to = msg?.from || '*'
@@ -1268,6 +1319,191 @@ async function routePhoneChat(msg) {
       }),
       { role: 'task-manage-result', to }
     )
+    return
+  }
+
+  // ---------------------------------------------------------------------------
+  // 手机端编辑电脑端能力（助手 / 模型(服务商) / MCP / Skill）
+  //
+  // 以前手机上这四类只能「看」，想改必须到电脑上操作。这里提供与电脑端
+  // 设置页等价的编辑能力，写入走 mutateConfig 队列（与电脑端同一路径）。
+  //
+  // 安全边界：API key 只写不读 —— 回执只带 hasApiKey 布尔，绝不回显明文。
+  // ---------------------------------------------------------------------------
+  if (role === 'caps-edit') {
+    const op = String(msg?.op || '').trim()
+    const body = msg?.body && typeof msg.body === 'object' ? msg.body : {}
+
+    const reply = async (ok, data) => {
+      try {
+        let caps = null
+        try { caps = await readCapabilities() } catch (_) {}
+        relay?.sendChat(
+          JSON.stringify({ __relayCapsEditResult: { op, ok, ...(data || {}), capabilities: caps } }),
+          { role: 'caps-edit-result', to }
+        )
+      } catch (err) {
+        rwarn('[relay] caps-edit reply failed:', err?.message || err)
+      }
+    }
+    const fail = (reason) => reply(false, { reason: String(reason || 'failed') })
+
+    try {
+      // ---- 助手（config.prompts）----
+      if (op === 'prompt-save') {
+        const key = String(body.key || '').trim()
+        if (!key) return fail('key_required')
+        if (!/^[\w-]{1,64}$/.test(key)) return fail('key_invalid')
+        await mutateConfig((cfg) => {
+          cfg.prompts = cfg.prompts && typeof cfg.prompts === 'object' ? cfg.prompts : {}
+          const prev = cfg.prompts[key] && typeof cfg.prompts[key] === 'object' ? cfg.prompts[key] : {}
+          const next = { ...prev }
+          if (typeof body.label === 'string' && body.label.trim()) next.name = body.label.trim()
+          if (typeof body.prompt === 'string') next.prompt = body.prompt
+          if (typeof body.model === 'string') next.model = body.model
+          if (typeof body.reasoningEffort === 'string') next.reasoning_effort = body.reasoningEffort
+          if (Array.isArray(body.mcp)) next.defaultMcpServers = body.mcp.map((x) => String(x))
+          if (Array.isArray(body.skills)) next.defaultSkills = body.skills.map((x) => String(x))
+          if (typeof body.enable === 'boolean') next.enable = body.enable
+          if (!next.type) next.type = 'general'
+          if (typeof next.stream !== 'boolean') next.stream = true
+          cfg.prompts[key] = next
+        })
+        await reply(true, { key })
+        return
+      }
+      if (op === 'prompt-delete') {
+        const key = String(body.key || '').trim()
+        if (!key) return fail('key_required')
+        if (key === 'AI') return fail('protected')
+        await mutateConfig((cfg) => {
+          if (cfg.prompts && typeof cfg.prompts === 'object') delete cfg.prompts[key]
+        })
+        await reply(true, { key })
+        return
+      }
+
+      // ---- 模型 / 服务商（config.providers + providerOrder）----
+      if (op === 'provider-save') {
+        let id = String(body.id || '').trim()
+        const name = String(body.name || '').trim()
+        const url = String(body.url || '').trim()
+        if (!name) return fail('name_required')
+        const models = Array.isArray(body.models)
+          ? body.models.map((x) => String(x).trim()).filter(Boolean)
+          : null
+        await mutateConfig((cfg) => {
+          cfg.providers = cfg.providers && typeof cfg.providers === 'object' ? cfg.providers : {}
+          if (!Array.isArray(cfg.providerOrder)) cfg.providerOrder = Object.keys(cfg.providers)
+          let pid = id
+          if (!pid || !cfg.providers[pid]) {
+            pid = String(Date.now())
+            if (!cfg.providerOrder.includes(pid)) cfg.providerOrder.push(pid)
+          }
+          const prev = cfg.providers[pid] && typeof cfg.providers[pid] === 'object' ? cfg.providers[pid] : {}
+          const next = { ...prev }
+          next.name = name
+          if (url) next.url = url
+          if (typeof body.apiKey === 'string' && body.apiKey.trim()) next.api_key = body.apiKey.trim()
+          if (typeof body.enable === 'boolean') next.enable = body.enable
+          if (models) next.modelList = models
+          if (!next.apiType) next.apiType = 'chat_completions'
+          if (typeof next.retryCount !== 'number') next.retryCount = 3
+          cfg.providers[pid] = next
+          id = pid
+        })
+        await reply(true, { id })
+        return
+      }
+      if (op === 'provider-delete') {
+        const id = String(body.id || '').trim()
+        if (!id) return fail('id_required')
+        await mutateConfig((cfg) => {
+          if (cfg.providers && typeof cfg.providers === 'object') delete cfg.providers[id]
+          if (Array.isArray(cfg.providerOrder)) {
+            cfg.providerOrder = cfg.providerOrder.filter((x) => x !== id)
+          }
+        })
+        await reply(true, { id })
+        return
+      }
+
+      // ---- MCP（config.mcpServers）----
+      if (op === 'mcp-save') {
+        const id = String(body.id || '').trim()
+        if (!id) return fail('id_required')
+        if (!/^[\w-]{1,64}$/.test(id)) return fail('id_invalid')
+        await mutateConfig((cfg) => {
+          cfg.mcpServers = cfg.mcpServers && typeof cfg.mcpServers === 'object' ? cfg.mcpServers : {}
+          const prev = cfg.mcpServers[id] && typeof cfg.mcpServers[id] === 'object' ? cfg.mcpServers[id] : {}
+          const next = { ...prev, id }
+          if (typeof body.name === 'string' && body.name.trim()) next.name = body.name.trim()
+          if (typeof body.type === 'string' && body.type) next.type = body.type
+          if (typeof body.command === 'string') next.command = body.command
+          if (Array.isArray(body.args)) next.args = body.args.map((x) => String(x))
+          if (typeof body.url === 'string') next.url = body.url
+          if (typeof body.isActive === 'boolean') next.isActive = body.isActive
+          if (!next.type) next.type = next.url ? 'sse' : 'stdio'
+          if (typeof next.timeoutSeconds !== 'number') next.timeoutSeconds = 120
+          cfg.mcpServers[id] = next
+        })
+        await reply(true, { id })
+        return
+      }
+      if (op === 'mcp-delete') {
+        const id = String(body.id || '').trim()
+        if (!id) return fail('id_required')
+        if (String(id).startsWith('builtin_')) return fail('builtin_readonly')
+        await mutateConfig((cfg) => {
+          if (cfg.mcpServers && typeof cfg.mcpServers === 'object') delete cfg.mcpServers[id]
+        })
+        await reply(true, { id })
+        return
+      }
+
+      // ---- Skill（磁盘上的 SKILL.md）----
+      if (op === 'skill-toggle' || op === 'skill-delete') {
+        const id = String(body.id || '').trim()
+        if (!id) return fail('id_required')
+        const cfgRes = await (ctx?.dataApi?.getConfig?.() || Promise.resolve(null))
+        const skillPath = cfgRes?.config?.skillPath || ''
+        if (!skillPath) return fail('skill_dir_not_configured')
+
+        if (op === 'skill-delete') {
+          const ok = deleteSkill(skillPath, id)
+          if (!ok) return fail('skill_not_found')
+          await reply(true, { id })
+          return
+        }
+
+        // skill-toggle：改 SKILL.md frontmatter 里的 disable-model-invocation
+        const details = getSkillDetails(skillPath, id)
+        if (!details?.ok) return fail('skill_not_found')
+        const mdPath = join(skillPath, id, 'SKILL.md')
+        let content = ''
+        try { content = readFileSync(mdPath, 'utf-8') } catch (_) { content = '' }
+        if (!content) return fail('skill_md_missing')
+        const disabled = body.disabled === true
+        const flag = 'disable-model-invocation'
+        const re = new RegExp('^' + flag + ':\\s*.*$', 'm')
+        let nextContent
+        if (re.test(content)) {
+          nextContent = content.replace(re, flag + ': ' + (disabled ? 'true' : 'false'))
+        } else if (content.startsWith('---')) {
+          nextContent = content.replace(/^---\r?\n/, '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n')
+        } else {
+          nextContent = '---\n' + flag + ': ' + (disabled ? 'true' : 'false') + '\n---\n' + content
+        }
+        writeFileSync(mdPath, nextContent, 'utf-8')
+        await reply(true, { id, disabled })
+        return
+      }
+
+      await fail('unknown_op')
+    } catch (err) {
+      rwarn('[relay] caps-edit failed:', op, err?.message || err)
+      await fail(String(err?.message || err))
+    }
     return
   }
 

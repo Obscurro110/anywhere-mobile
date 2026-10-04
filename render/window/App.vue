@@ -3231,7 +3231,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
 };
 
 const getCurrentAssistantDisplayName = () => {
-  return modelMap.value[model.value] || model.value.split('|')[1] || model.value || '';
+  const mv = model.value || '';
+  if (!mv) return '';
+  // 优先用 modelMap（providerName|model）；没命中时从 modelList 里按 value 找，
+  // 最后才退回裸模型名 —— 保证手机气泡上尽量显示「服务商|模型」。
+  if (modelMap.value[mv]) return modelMap.value[mv];
+  const hit = (modelList.value || []).find((m) => m?.value === mv);
+  if (hit?.label) return hit.label;
+  const parts = mv.split('|');
+  return parts.length > 1 ? parts[1] : mv;
 };
 
 const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
