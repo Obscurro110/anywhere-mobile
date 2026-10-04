@@ -883,6 +883,35 @@ const flushPendingWindowPayloadQueue = async () => {
 };
 
 
+// ---------------------------------------------------------------------------
+// [anywhere-mobile] 告诉手机「你刚发的那条消息在电脑端的位置」
+//
+// 手机发来的消息会被 append 到本窗口的 chat_show，拿到一个真实 id + 下标。
+// 但手机自己不知道这回事 —— 所以它发的消息一直没法「删除这条」。
+// 这里把定位信息回传，手机就能给那条消息挂上操作按钮。
+// ---------------------------------------------------------------------------
+const notifyPhoneUserMessageMeta = (data, desktopMsgId) => {
+  if (!data?.relayTo) return;
+  try {
+    const idx = chat_show.value.findIndex((m) => String(m?.id ?? '') === String(desktopMsgId));
+    window.api?.sendRelayChat?.({
+      role: 'user-message-meta',
+      text: JSON.stringify({
+        __relayUserMessageMeta: {
+          // 手机发来的相关 id（用来在手机本地找到对应那条气泡）
+          clientMsgId: String(data.__relayClientMsgId || ''),
+          messageId: String(desktopMsgId ?? ''),
+          index: idx,
+          conversationId: currentConversationStorage.value?.conversationId || ''
+        }
+      }),
+      to: data.relayTo
+    });
+  } catch (err) {
+    relayWarn('[relay] user-message-meta failed:', err);
+  }
+};
+
 const handleAppendMessageEvent = async (data, options = {}) => {
   if (!data || !ensureConversationWriteAccess(true)) return;
 
@@ -931,7 +960,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
       shouldAutoSend = false;
     } else {
       appendFullHistory({ role: "user", content: multilineText });
-      chat_show.value.push({ id: messageIdCounter.value++, role: "user", content: [{ type: "text", text: multilineText }], timestamp: nowTime });
+      const pushedId = messageIdCounter.value++;
+      chat_show.value.push({ id: pushedId, role: "user", content: [{ type: "text", text: multilineText }], timestamp: nowTime });
+      notifyPhoneUserMessageMeta(data, pushedId);
     }
   } else if (data.type === "over" && data.payload) {
     const overText = String(data.payload);
@@ -940,7 +971,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
       shouldAutoSend = false;
     } else {
       appendFullHistory({ role: "user", content: overText });
-      chat_show.value.push({ id: messageIdCounter.value++, role: "user", content: [{ type: "text", text: overText }], timestamp: nowTime });
+      const pushedId = messageIdCounter.value++;
+      chat_show.value.push({ id: pushedId, role: "user", content: [{ type: "text", text: overText }], timestamp: nowTime });
+      notifyPhoneUserMessageMeta(data, pushedId);
     }
   } else if (data.type === "img" && data.payload) {
     if (shouldRespectDirectSendConfig && !directSendConfig.image) {
@@ -10620,6 +10653,7 @@ watch(
     try {
       // 带上这条 assistant 消息在 chat_show 里的 id / 下标 / 会话，
       // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
+      // 再带上「服务商|模型名」，手机气泡上就不用写死 "Anywhere Desktop" 了。
       const assistantIndex = chat_show.value.length - 1;
       await window.api.sendRelayChat({
         text,
@@ -10628,7 +10662,8 @@ watch(
           __relayAssistantMeta: {
             messageId: String(last.id ?? ''),
             index: assistantIndex,
-            conversationId: currentConversationStorage.value?.conversationId || ''
+            conversationId: currentConversationStorage.value?.conversationId || '',
+            modelTag: getCurrentAssistantDisplayName() || ''
           }
         }
       });

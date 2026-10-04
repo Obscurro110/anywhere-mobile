@@ -1245,6 +1245,9 @@ async function routePhoneChat(msg) {
 
   const relayFields = {
     relayTo,
+    // 手机本地的消息 id —— 窗口 append 后会把它原样回传，
+    // 手机就能精确把「电脑端位置」挂到对应气泡上（自己发的消息也能删）。
+    __relayClientMsgId: msg?.__relayClientMsgId || '',
     ...(opts ? { __relayOptions: opts } : {})
   }
 
