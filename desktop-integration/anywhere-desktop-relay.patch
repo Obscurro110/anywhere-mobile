@@ -2845,7 +2845,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..ecd0603
+index 0000000..78d386a
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2857,8 +2857,8 @@ index 0000000..ecd0603
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.11';
-+export const RELAY_VERSION_CODE = 31;
++export const RELAY_VERSION = '1.7.12';
++export const RELAY_VERSION_CODE = 32;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3339,7 +3339,7 @@ index 2ad1391..28cb7e4 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..9d4cb0b 100644
+index 6bb1113..72d8f4a 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -3683,7 +3683,7 @@ index 6bb1113..9d4cb0b 100644
  };
  
  const clearHistory = async () => {
-@@ -10356,6 +10623,473 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10623,529 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -4025,6 +4025,57 @@ index 6bb1113..9d4cb0b 100644
 +  }
 +};
 +
++// 正文流式实时同步：AI 还在逐字输出时，节流把当前文本推给手机（就地更新）。
++// ⚠️ 绝不能写 relaySentAssistantIds —— 否则流式第一段会被当成完整回复，
++// 后续正式版不再发（v1.7.5 修过的截断 bug）。流式临时账用独立集合记录，
++// loading 结束时清掉，让 flushRelayReplies 发送最终完整版并标记已发。
++let relayLiveTextSig = '';
++let relayLiveTextAt = 0;
++const relayLiveTextSentIds = new Set();
++const RELAY_LIVE_TEXT_THROTTLE_MS = 800;
++const pushLiveTextStatus = async () => {
++  const to = relayReplyTarget.value;
++  if (!to || !loading.value) return;
++  const list = chat_show.value;
++  const last = list[list.length - 1];
++  if (!last || last.role !== 'assistant') return;
++  if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') return;
++  // 等用户交互时不推正文（走正常下发，带选项）
++  const waitingUser = Array.isArray(last.tool_calls) && last.tool_calls.some(
++    (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
++  );
++  if (waitingUser) return;
++  const id = String(last.id ?? '');
++  if (!id) return;
++  // 正式版已经发过就不必再推（正式版就是最新完整内容）
++  if (relaySentAssistantIds.has(id)) return;
++  const text = relayMessageText(last);
++  if (!text) return;
++  const sig = `${id}#${text.length}`;
++  if (sig === relayLiveTextSig) return;
++  const now = Date.now();
++  if (now - relayLiveTextAt < RELAY_LIVE_TEXT_THROTTLE_MS) return;
++  relayLiveTextSig = sig;
++  relayLiveTextAt = now;
++  relayLiveTextSentIds.add(id);
++  try {
++    const extra = buildAssistantExtra(last, list.length - 1, {
++      tools: relayToolCallsPayload(last),
++      update: true
++    });
++    await window.api.sendRelayChat({ text, to, extra });
++    relayLog('[relay] live text pushed len =', text.length);
++  } catch (err) {
++    relayWarn('[relay] live text push failed:', err);
++  }
++};
++
++// loading 结束：清掉流式临时账，正式完整版由 flushRelayReplies 发送并标记已发。
++const clearRelayLiveTextState = () => {
++  if (relayLiveTextSentIds.size) relayLiveTextSentIds.clear();
++  relayLiveTextSig = '';
++};
++
 +const flushRelayReplies = async () => {
 +  const to = relayReplyTarget.value;
 +  if (!to) return;
@@ -4148,8 +4199,13 @@ index 6bb1113..9d4cb0b 100644
 +    return `${loadingFlag}#${tail}`;
 +  },
 +  () => {
++    // 流式结束（loading 变 false）：清掉流式临时账，
++    // 让下面的 flushRelayReplies 发送最终完整版并标记已发。
++    if (!loading.value) clearRelayLiveTextState();
 +    // 工具状态实时推送（流式中途也要发，手机才能看到转圈）
 +    pushLiveToolStatus().catch((err) => relayWarn('[relay] live tool push failed:', err));
++    // 正文流式实时推送（逐字显示，update:true 走手机端就地更新）
++    pushLiveTextStatus().catch((err) => relayWarn('[relay] live text push failed:', err));
 +    // 统一走 flushRelayReplies（发送失败后的重试也复用它）
 +    flushRelayReplies().catch((err) => relayWarn('[relay] flush replies failed:', err));
 +  }

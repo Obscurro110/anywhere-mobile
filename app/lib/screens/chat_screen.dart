@@ -390,11 +390,14 @@ final MarkdownStyleSheet _bubbleMarkdownStyle = MarkdownStyleSheet(
   listBullet: const TextStyle(fontSize: 15, height: 1.45, color: Colors.white),
   listBulletPadding: const EdgeInsets.only(right: 6),
   listIndent: 22,
-  tableBorder: TableBorder.all(color: Colors.white30, width: 0.7),
-  tableCellsPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-  tableHead: const TextStyle(fontSize: 14.5, color: Colors.white, fontWeight: FontWeight.w700),
-  tableBody: const TextStyle(fontSize: 14.5, height: 1.35, color: Colors.white),
-  tableColumnWidth: const FlexColumnWidth(),
+  tableBorder: TableBorder.all(color: Colors.white24, width: 0.6),
+  // 列宽按内容自适应（内容太宽时才回退等分）。以前一律等分，会把
+  // 「2029年预计 1.4万亿美元」这种挤成 4~5 行，很难看。
+  tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+  tableHead: const TextStyle(
+      fontSize: 14, color: Colors.white, fontWeight: FontWeight.w700, height: 1.25),
+  tableBody: const TextStyle(fontSize: 14, height: 1.3, color: Colors.white),
+  tableColumnWidth: const IntrinsicColumnWidth(fallback: FlexColumnWidth()),
   horizontalRuleDecoration: const BoxDecoration(
     border: Border(top: BorderSide(color: Colors.white24)),
   ),
@@ -619,7 +622,25 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   }
 }
 
-/// 气泡底部的元信息：时间（+耗时）与 token 用量。
+/// token 用量文案（输入 x · 输出 y，有思考时中间加「思考 z」）。
+/// 没有 token 数据返回空串。现在显示在操作按钮同一行（_ActionBar），
+/// 所以 _MetaLine 不再输出它。
+String _tokenLine(ChatMessage msg) {
+  final t = msg.desktopMeta?.tokens;
+  if (t == null || t.isEmpty) return '';
+  final inT = _fmtToken(t.prompt);
+  final outT = _fmtToken(t.completion);
+  final reasonT = _fmtToken(t.reasoning);
+  return reasonT.isNotEmpty && t.reasoning > 0
+      ? '输入 $inT · 思考 $reasonT · 输出 $outT'
+      : '输入 $inT · 输出 $outT';
+}
+
+/// 气泡底部的元信息：**只给用户自己发的消息**显示时间（+耗时）。
+///
+/// assistant 的时间已经挪到「模型名下面」、token 已经挪到操作按钮同一行；
+/// ⚠️ 这里曾经是 `outgoing || meta == null`：pending 气泡（meta 还没到）会在
+/// 头部和底部各显示一次时间 —— 就是「电脑端正在处理」出现两个时间的原因。
 class _MetaLine extends StatelessWidget {
   final ChatMessage msg;
   final bool outgoing;
@@ -639,159 +660,225 @@ class _MetaLine extends StatelessWidget {
         ? _fmtDurationMs(meta.endTime - meta.startTime)
         : '';
 
-    // token
-    final t = meta?.tokens;
-    String? tokenStr;
-    if (t != null && !t.isEmpty) {
-      final inT = _fmtToken(t.prompt);
-      final outT = _fmtToken(t.completion);
-      final reasonT = _fmtToken(t.reasoning);
-      tokenStr = reasonT.isNotEmpty && t.reasoning > 0
-          ? '输入 $inT · 思考 $reasonT · 输出 $outT'
-          : '输入 $inT · 输出 $outT';
-    }
+    // 只给用户消息输出时间行；assistant 完全交给头部 + 操作栏。
+    if (!outgoing) return const SizedBox.shrink();
+    if (startMs <= 0) return const SizedBox.shrink();
 
-    final lines = <String>[];
-    // assistant 的时间已经挪到「模型名下面」（与电脑端一致），这里只留 token；
-    // 用户自己发的消息没有模型名，时间仍显示在气泡下方。
-    final showTimeHere = outgoing || meta == null;
-    if (showTimeHere && startMs > 0) {
-      lines.add(duration.isNotEmpty
-          ? '${_fmtClock(startMs)} ($duration)'
-          : _fmtClock(startMs));
-    }
-    if (tokenStr != null) lines.add(tokenStr);
-    if (lines.isEmpty) return const SizedBox.shrink();
+    final line = duration.isNotEmpty
+        ? '${_fmtClock(startMs)} ($duration)'
+        : _fmtClock(startMs);
 
     return Padding(
       padding: const EdgeInsets.only(top: 5),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final line in lines)
-            Padding(
-              padding: const EdgeInsets.only(top: 1),
-              child: Text(line,
-                  style: const TextStyle(fontSize: 10.5, color: Colors.white38)),
-            ),
-        ],
-      ),
+      child: Text(line,
+          style: const TextStyle(fontSize: 10.5, color: Colors.white38)),
     );
   }
 }
 
 /// 电脑端 ask_user_choice 提问的选项面板。
 ///
-/// 单选：点某个选项立即提交（回传 toolCallId + 选中项），
+/// 一题一屏：顶部「问题 X / N」+ 圆点翻页（点圆点直接跳题），只渲染当前题的选项。
+/// 点选项只记录选择（高亮），不立即提交；底部「上一题 / 下一题」+ 右侧「提交」。
+/// 全部选完点提交才回传电脑端（每题一条 {questionIndex,type:'select',selected:[label]}）；
 /// 提交后本地记录"已选择"，选项区隐藏，避免重复点选。
-class _ChoicePanel extends StatelessWidget {
+class _ChoicePanel extends StatefulWidget {
   final ChatMessage msg;
   const _ChoicePanel({required this.msg});
 
   @override
+  State<_ChoicePanel> createState() => _ChoicePanelState();
+}
+
+class _ChoicePanelState extends State<_ChoicePanel> {
+  /// 每题选中的 label（问题下标 -> label）。
+  final Map<int, String> _selected = {};
+
+  /// 当前显示第几题。
+  int _qi = 0;
+
+  /// 把当前题下标夹到合法范围，避免电脑端数据变化导致越界。
+  int _clampedQi(int total) {
+    if (total <= 0) return 0;
+    if (_qi < 0) return 0;
+    if (_qi >= total) return total - 1;
+    return _qi;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final msg = widget.msg;
     final choice = msg.choice;
     if (choice == null || !choice.isValid) return const SizedBox.shrink();
 
+    // 已提交：保持「已选择：xxx」展示
     final submitted = state.submittedChoiceFor(msg.id);
     if (submitted != null && submitted.isNotEmpty) {
-      return Padding(
-        padding: const EdgeInsets.only(top: 10),
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1D2438),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFF3A46C9)),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.check_circle_outline,
-                  size: 16, color: Colors.greenAccent),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text('已选择：$submitted',
-                    style: const TextStyle(fontSize: 13.5)),
-              ),
-            ],
-          ),
-        ),
-      );
+      return _submittedBox(submitted);
     }
+
+    final questions = choice.questions;
+    final total = questions.length;
+    if (total == 0) return const SizedBox.shrink();
+    final qi = _clampedQi(total);
+    final q = questions[qi];
+
+    // 只统计「有选项」的题：无选项的题不阻塞提交。
+    var hasAnyOption = false;
+    final unanswered = <int>[];
+    for (var i = 0; i < total; i++) {
+      if (questions[i].options.isEmpty) continue;
+      hasAnyOption = true;
+      final picked = _selected[i];
+      if (picked == null || picked.isEmpty) unanswered.add(i);
+    }
+    final canSubmit = hasAnyOption && unanswered.isEmpty;
 
     return Padding(
       padding: const EdgeInsets.only(top: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (var qi = 0; qi < choice.questions.length; qi++)
-            _buildQuestion(context, state, choice, qi),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildQuestion(
-      BuildContext context, AppState state, ChoiceMeta choice, int qi) {
-    final q = choice.questions[qi];
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (q.header.isNotEmpty || q.question.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Text(
-                [if (q.header.isNotEmpty) q.header, if (q.question.isNotEmpty) q.question]
-                    .join('：'),
-                style: const TextStyle(
-                    fontSize: 13.5, fontWeight: FontWeight.w600),
-              ),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1D2438),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFF3A46C9)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 顶部：问题 X / N + 圆点翻页
+            Row(
+              children: [
+                Text('问题 ${qi + 1} / $total',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white54,
+                        fontWeight: FontWeight.w600)),
+                const Spacer(),
+                if (total > 1)
+                  Row(
+                    children: [
+                      for (var i = 0; i < total; i++)
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => setState(() => _qi = i),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 3),
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: i == qi
+                                  ? Colors.lightBlueAccent
+                                  : Colors.white24,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+              ],
             ),
-          if (q.options.isEmpty)
-            const Text('（无可选项）',
-                style: TextStyle(fontSize: 12.5, color: Colors.white38))
-          else
-            ...q.options.map((o) => _optionTile(context, state, choice, qi, o)),
-        ],
+            // 题干
+            if (q.header.isNotEmpty || q.question.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 8),
+                child: Text(
+                  [
+                    if (q.header.isNotEmpty) q.header,
+                    if (q.question.isNotEmpty) q.question,
+                  ].join('：'),
+                  style: const TextStyle(
+                      fontSize: 13.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+            // 当前题的选项
+            if (q.options.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text('（无可选项）',
+                    style: TextStyle(fontSize: 12.5, color: Colors.white38)),
+              )
+            else
+              ...q.options.map((o) => _optionTile(qi, o)),
+            // 底部：上一题 / 下一题 + 提交
+            Row(
+              children: [
+                TextButton(
+                  onPressed: qi > 0 ? () => setState(() => _qi = qi - 1) : null,
+                  child: const Text('上一题'),
+                ),
+                TextButton(
+                  onPressed:
+                      qi < total - 1 ? () => setState(() => _qi = qi + 1) : null,
+                  child: const Text('下一题'),
+                ),
+                const Spacer(),
+                FilledButton(
+                  onPressed: canSubmit ? () => _submit(state, choice) : null,
+                  child: Text(canSubmit ? '提交' : '还有 ${unanswered.length} 题未选'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _optionTile(BuildContext context, AppState state, ChoiceMeta choice,
-      int qi, ChoiceOption o) {
+  /// 已提交后的展示（和旧版一致）。
+  Widget _submittedBox(String submitted) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1D2438),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFF3A46C9)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_outline,
+                size: 16, color: Colors.greenAccent),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('已选择：$submitted',
+                  style: const TextStyle(fontSize: 13.5)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 一个选项格子（选中态高亮）。
+  Widget _optionTile(int qi, ChoiceOption o) {
     final label = o.label;
+    final picked = _selected[qi] == label;
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Material(
-        color: const Color(0xFF2A3148),
+        color: picked ? const Color(0xFF3A46C9) : const Color(0xFF2A3148),
         borderRadius: BorderRadius.circular(9),
         child: InkWell(
           borderRadius: BorderRadius.circular(9),
-          onTap: () {
-            final cid = msg.conversationId ?? state.activeConversationId ?? '';
-            state.submitChoiceOnDesktop(
-              cid,
-              choice.toolCallId,
-              {
-                'responses': [
-                  {'questionIndex': qi, 'type': 'select', 'selected': [label]}
-                ],
-              },
-              messageId: msg.id,
-              displayText: label,
-            );
-          },
+          // 点选项只记录选择，不提交
+          onTap: () => setState(() => _selected[qi] = label),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.radio_button_unchecked,
-                    size: 16, color: Colors.lightBlueAccent),
+                Icon(
+                  picked
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 16,
+                  color: picked ? Colors.white : Colors.lightBlueAccent,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -813,6 +900,32 @@ class _ChoicePanel extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  /// 全部选完点提交：每题一条 responses，displayText 用 ' / ' 连接各题 label。
+  void _submit(AppState state, ChoiceMeta choice) {
+    final msg = widget.msg;
+    final cid = msg.conversationId ?? state.activeConversationId ?? '';
+    final responses = <Map<String, dynamic>>[];
+    final labels = <String>[];
+    for (var i = 0; i < choice.questions.length; i++) {
+      final picked = _selected[i];
+      if (picked == null || picked.isEmpty) continue;
+      responses.add({
+        'questionIndex': i,
+        'type': 'select',
+        'selected': [picked],
+      });
+      labels.add(picked);
+    }
+    if (responses.isEmpty) return;
+    state.submitChoiceOnDesktop(
+      cid,
+      choice.toolCallId,
+      {'responses': responses},
+      messageId: msg.id,
+      displayText: labels.join(' / '),
     );
   }
 }
@@ -848,11 +961,26 @@ class _ActionBar extends StatelessWidget {
     // （电脑端 append 后会回传位置，手机据此挂上 desktopMeta）
     final canDelete = msg.desktopMeta?.isValid ?? false;
 
+    // token 用量：和操作图标同一行，放在图标左侧（用户消息没有 token，返回空串）
+    final tokenStr = _tokenLine(msg);
+
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (tokenStr.isNotEmpty)
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: Text(
+                  tokenStr,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.white38),
+                ),
+              ),
+            ),
           _act(context, Icons.copy_rounded, '复制', () async {
             await Clipboard.setData(ClipboardData(text: msg.text));
             if (context.mounted) {
