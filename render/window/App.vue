@@ -10730,18 +10730,30 @@ const relayToolSignature = (m) => {
     .join(',');
 };
 
+/** 剥掉正文里残留的思考标记（<thinking>…</thinking> 等）：有些模型/中转
+ *  把思考直接塞进 content，不剥的话手机上会原样显示成一串代码。 */
+const stripThinkingTags = (s) => {
+  if (!s) return s;
+  return String(s)
+    .replace(/<(thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(thinking|reasoning|thought)>[\s\S]*$/gi, '')
+    .replace(/<\/(thinking|reasoning|thought)>/gi, '')
+    .replace(/<(thinking|reasoning|thought)\s*\/?>/gi, '')
+    .trim();
+};
+
 /** 正文只取 content 文本；工具调用改为结构化随 meta 下发（手机端折叠展示）。 */
 const relayMessageText = (m) => {
   if (!m) return '';
-  if (typeof m.content === 'string') return m.content.trim() ? m.content : '';
-  if (Array.isArray(m.content)) {
-    return m.content
+  let text = '';
+  if (typeof m.content === 'string') text = m.content;
+  else if (Array.isArray(m.content)) {
+    text = m.content
       .filter((p) => p && p.type === 'text')
       .map((p) => p.text || '')
-      .join('')
-      .trim();
+      .join('');
   }
-  return '';
+  return stripThinkingTags(text);
 };
 
 /** 组装 meta（选项/工具/思考/token）并转成纯对象（Vue Proxy 不能直接过 IPC）。 */

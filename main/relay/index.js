@@ -48,7 +48,7 @@
  *          / ANYWHERE_RELAY_DEVICE_NAME
  */
 import { app, ipcMain } from 'electron'
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { RelayClient } from './relay-client.js'
 import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
@@ -56,7 +56,6 @@ import { listLocalConversations, openConversation } from '../core/conversationSt
 import {
   renameConversation as storeRenameConversation,
   deleteConversation as storeDeleteConversation,
-  getConversationRequestMessages as storeGetMessages,
   deleteMessages as storeDeleteMessages
 } from '../core/conversationStore.js'
 import { readLocalProjects } from '../core/projects.js'
@@ -678,14 +677,29 @@ async function readPhoneConversationMessages(conversationId) {
     }
 }
 
+/** 剥掉正文里残留的思考标记：有些模型/中转把思考直接包成
+ *  `<thinking>...</thinking>` 塞进 content，不剥的话手机上会原样显示。
+ */
+function stripThinkingTags(s) {
+  if (!s) return s
+  return String(s)
+    .replace(/<(thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(thinking|reasoning|thought)>[\s\S]*$/gi, '')
+    .replace(/<\/(thinking|reasoning|thought)>/gi, '')
+    .replace(/<(thinking|reasoning|thought)\s*\/?>/gi, '')
+    .trim()
+}
+
 /** 从 content（字符串 / [{type:'text',text}]）里抽纯文本 */
 function extractMessageText(content) {
-  if (typeof content === 'string') return content
+  if (typeof content === 'string') return stripThinkingTags(content)
   if (Array.isArray(content)) {
-    return content
-      .filter((p) => p && p.type === 'text')
-      .map((p) => p.text || '')
-      .join('')
+    return stripThinkingTags(
+      content
+        .filter((p) => p && p.type === 'text')
+        .map((p) => p.text || '')
+        .join('')
+    )
   }
   return ''
 }
