@@ -319,6 +319,10 @@ class AssistantMeta {
   /// 手机上以折叠区展示，避免刷屏。
   final String reasoning;
 
+  /// 这条回复用到的工具调用（参数 / 结果 / 运行状态）。
+  /// 手机上渲染成折叠块，执行中显示转圈 —— 不再铺成一大段文字。
+  final List<ToolCallMeta> toolCalls;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
@@ -329,6 +333,7 @@ class AssistantMeta {
     this.endTime = 0,
     this.tokens,
     this.reasoning = '',
+    this.toolCalls = const <ToolCallMeta>[],
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -343,6 +348,8 @@ class AssistantMeta {
         if (endTime > 0) 'endTime': endTime,
         if (tokens != null) 'tokens': tokens!.toJson(),
         if (reasoning.isNotEmpty) 'reasoning': reasoning,
+        if (toolCalls.isNotEmpty)
+          'toolCalls': toolCalls.map((e) => e.toJson()).toList(),
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
@@ -359,6 +366,57 @@ class AssistantMeta {
             ? TokenUsage.fromJson((j['tokens'] as Map).cast<String, dynamic>())
             : null,
         reasoning: j['reasoning'] as String? ?? '',
+        toolCalls: (j['toolCalls'] is List)
+            ? (j['toolCalls'] as List)
+                .whereType<Map>()
+                .map((e) => ToolCallMeta.fromJson(e.cast<String, dynamic>()))
+                .toList()
+            : const <ToolCallMeta>[],
+      );
+}
+
+/// 一条工具调用的回传信息（手机端以折叠块展示，执行中显示转圈）。
+class ToolCallMeta {
+  final String id;
+  final String name;
+
+  /// waiting / approved / executing / finished / rejected / choosing
+  final String status;
+  final String statusLabel;
+  final String args;
+  final String result;
+
+  const ToolCallMeta({
+    this.id = '',
+    this.name = '',
+    this.status = '',
+    this.statusLabel = '',
+    this.args = '',
+    this.result = '',
+  });
+
+  /// 还在执行 / 等用户交互 → UI 显示转圈
+  bool get isRunning =>
+      status == 'executing' || status == 'waiting' || status == 'choosing';
+
+  bool get hasDetail => args.isNotEmpty || result.isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'status': status,
+        'statusLabel': statusLabel,
+        'args': args,
+        'result': result,
+      };
+
+  factory ToolCallMeta.fromJson(Map<String, dynamic> j) => ToolCallMeta(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        status: j['status'] as String? ?? '',
+        statusLabel: j['statusLabel'] as String? ?? '',
+        args: j['args'] as String? ?? '',
+        result: j['result'] as String? ?? '',
       );
 }
 

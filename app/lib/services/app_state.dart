@@ -1479,6 +1479,32 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    // 情况 A2：这条消息之前已经到过（电脑端工具状态/内容实时更新）→ 就地更新，
+    // 不新增气泡（否则同一条回复会出现两个气泡）。
+    if (isAssistant && (p.assistantMeta?.messageId.isNotEmpty ?? false)) {
+      final mid = p.assistantMeta!.messageId;
+      final idx = messages.indexWhere((m) => m.desktopMeta?.messageId == mid);
+      if (idx >= 0) {
+        final prev = messages[idx];
+        messages[idx] = ChatMessage(
+          id: prev.id,
+          role: p.role,
+          text: p.text,
+          time: prev.time,
+          outgoing: false,
+          conversationId: p.conversationId,
+          attachments:
+              (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+          desktopMeta: p.assistantMeta,
+          modelTag: p.assistantMeta?.modelTag ?? prev.modelTag,
+          choice: p.choice ?? p.assistantMeta?.choice ?? prev.choice,
+        );
+        _persistHistory();
+        notifyListeners();
+        return;
+      }
+    }
+
     // 情况 B：正常回复 —— 合并进**最早**那个 pending 气泡
     // （电脑端按顺序回复，所以每个回复认领最早的一条；
     //   以前只认最后一条，连续发消息时会留下永远转圈的 pending）

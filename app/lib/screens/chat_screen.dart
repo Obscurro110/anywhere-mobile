@@ -188,18 +188,36 @@ class _Bubble extends StatelessWidget {
             if (!outgoing && msg.role == ChatRole.assistant)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.smart_toy_outlined,
-                        size: 12, color: Colors.white38),
-                    const SizedBox(width: 4),
-                    Text(
-                      // 显示「服务商|模型」，而不是笼统的 Anywhere Desktop：
-                      // 一眼能看出这条是哪个模型答的
-                      msg.modelTag.isNotEmpty ? msg.modelTag : 'Anywhere Desktop',
-                      style: const TextStyle(fontSize: 10.5, color: Colors.white38),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.smart_toy_outlined,
+                            size: 12, color: Colors.white38),
+                        const SizedBox(width: 4),
+                        Text(
+                          // 显示「服务商|模型」，而不是笼统的 Anywhere Desktop：
+                          // 一眼能看出这条是哪个模型答的
+                          msg.modelTag.isNotEmpty
+                              ? msg.modelTag
+                              : 'Anywhere Desktop',
+                          style: const TextStyle(
+                              fontSize: 10.5, color: Colors.white38),
+                        ),
+                      ],
                     ),
+                    // 时间（+耗时）放在模型名下面 —— 与电脑端气泡一致
+                    if (_headerTime(msg).isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1, left: 16),
+                        child: Text(
+                          _headerTime(msg),
+                          style: const TextStyle(
+                              fontSize: 10.5, color: Colors.white38),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -225,6 +243,12 @@ class _Bubble extends StatelessWidget {
               )
             else if (msg.text.isNotEmpty)
               _MarkdownText(text: msg.text),
+            // 工具调用：折叠块，默认收起（执行中转圈）。
+            // 以前是拼成一大段文字直接铺在气泡里，手机上刷屏。
+            if (!outgoing &&
+                !msg.pending &&
+                (msg.desktopMeta?.toolCalls.isNotEmpty ?? false))
+              _ToolCallsBlock(calls: msg.desktopMeta!.toolCalls),
             // 电脑端 ask_user_choice 提问：气泡下渲染可点选的选项
             if (msg.choice?.isValid == true && !msg.pending)
               _ChoicePanel(msg: msg),
@@ -284,20 +308,38 @@ class _Bubble extends StatelessWidget {
 // ---------------------------------------------------------------------------
 // 消息元信息（时间 / 耗时 / token）—— 对齐电脑端气泡的显示
 // ---------------------------------------------------------------------------
+/// 时间统一成「2026-10-05 10:02」——与电脑端 formatTimestamp 完全一致。
 String _fmtClock(int ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
   String two(int n) => n.toString().padLeft(2, '0');
-  final hm = '${two(d.hour)}:${two(d.minute)}';
-  final now = DateTime.now();
-  final sameDay = d.year == now.year && d.month == now.month && d.day == now.day;
-  return sameDay ? hm : '${two(d.month)}-${two(d.day)} $hm';
+  return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
 }
 
+/// 气泡头部的时间行（时间 + 耗时），电脑端与手机端同一套文案。
+String _headerTime(ChatMessage msg) {
+  final meta = msg.desktopMeta;
+  final startMs = (meta != null && meta.startTime > 0)
+      ? meta.startTime
+      : msg.time.millisecondsSinceEpoch;
+  if (startMs <= 0) return '';
+  final duration =
+      (meta != null && meta.startTime > 0 && meta.endTime > meta.startTime)
+          ? _fmtDurationMs(meta.endTime - meta.startTime)
+          : '';
+  return duration.isNotEmpty
+      ? '${_fmtClock(startMs)} ($duration)'
+      : _fmtClock(startMs);
+}
+
+/// 耗时统一中文口径：0分7秒 / 1分23秒 / 1时2分3秒（电脑端同款）。
 String _fmtDurationMs(int ms) {
   if (ms <= 0) return '';
-  final sec = ms / 1000.0;
-  if (sec < 60) return '${sec.toStringAsFixed(1)} s';
-  return '${(sec / 60).toStringAsFixed(1)} min';
+  final total = (ms / 1000).round();
+  final h = total ~/ 3600;
+  final m = (total % 3600) ~/ 60;
+  final sec = total % 60;
+  if (h > 0) return '$h时$m分$sec秒';
+  return '$m分$sec秒';
 }
 
 String _fmtToken(int n) {
@@ -371,6 +413,147 @@ class _MarkdownText extends StatelessWidget {
       selectable: true,
       extensionSet: md.ExtensionSet.gitHubFlavored,
       styleSheet: _bubbleMarkdownStyle,
+    );
+  }
+}
+
+/// 工具调用折叠块（默认收起）：
+/// 收起时只显示「🔧 工具名 [状态]」，执行中显示转圈；
+/// 点一下展开看参数 / 结果（超长可滚动，不会把气泡撑爆）。
+class _ToolCallsBlock extends StatefulWidget {
+  final List<ToolCallMeta> calls;
+  const _ToolCallsBlock({required this.calls});
+
+  @override
+  State<_ToolCallsBlock> createState() => _ToolCallsBlockState();
+}
+
+class _ToolCallsBlockState extends State<_ToolCallsBlock> {
+  final Set<int> _expanded = <int>{};
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.calls.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < widget.calls.length; i++)
+            _buildOne(i, widget.calls[i]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOne(int i, ToolCallMeta c) {
+    final open = _expanded.contains(i);
+    final running = c.isRunning;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: const Color(0x14FFFFFF),
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: c.hasDetail
+              ? () => setState(() {
+                    if (open) {
+                      _expanded.remove(i);
+                    } else {
+                      _expanded.add(i);
+                    }
+                  })
+              : null,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.build_outlined,
+                        size: 13, color: Colors.amberAccent),
+                    const SizedBox(width: 5),
+                    Flexible(
+                      child: Text(
+                        c.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 11.5, color: Colors.white70),
+                      ),
+                    ),
+                    if (c.statusLabel.isNotEmpty) ...[
+                      const SizedBox(width: 5),
+                      Text(
+                        '[${c.statusLabel}]',
+                        style: TextStyle(
+                            fontSize: 11,
+                            color:
+                                running ? Colors.amberAccent : Colors.white38),
+                      ),
+                    ],
+                    if (running) ...[
+                      const SizedBox(width: 5),
+                      const SizedBox(
+                        width: 10,
+                        height: 10,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      ),
+                    ],
+                    if (c.hasDetail) ...[
+                      const SizedBox(width: 3),
+                      Icon(open ? Icons.expand_less : Icons.expand_more,
+                          size: 14, color: Colors.white38),
+                    ],
+                  ],
+                ),
+                if (open && c.hasDetail)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 240),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (c.args.isNotEmpty) ...[
+                              const Text('参数',
+                                  style: TextStyle(
+                                      fontSize: 10.5, color: Colors.white38)),
+                              SelectableText(
+                                c.args,
+                                style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white60,
+                                    height: 1.4),
+                              ),
+                            ],
+                            if (c.result.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              const Text('结果',
+                                  style: TextStyle(
+                                      fontSize: 10.5, color: Colors.white38)),
+                              SelectableText(
+                                c.result,
+                                style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white60,
+                                    height: 1.4),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -468,15 +651,17 @@ class _MetaLine extends StatelessWidget {
           : '输入 $inT · 输出 $outT';
     }
 
-    if (startMs <= 0 && (duration.isEmpty && tokenStr == null)) {
-      return const SizedBox.shrink();
-    }
-
     final lines = <String>[];
-    if (startMs > 0) {
-      lines.add(duration.isNotEmpty ? '${_fmtClock(startMs)} ($duration)' : _fmtClock(startMs));
+    // assistant 的时间已经挪到「模型名下面」（与电脑端一致），这里只留 token；
+    // 用户自己发的消息没有模型名，时间仍显示在气泡下方。
+    final showTimeHere = outgoing || meta == null;
+    if (showTimeHere && startMs > 0) {
+      lines.add(duration.isNotEmpty
+          ? '${_fmtClock(startMs)} ($duration)'
+          : _fmtClock(startMs));
     }
     if (tokenStr != null) lines.add(tokenStr);
+    if (lines.isEmpty) return const SizedBox.shrink();
 
     return Padding(
       padding: const EdgeInsets.only(top: 5),
