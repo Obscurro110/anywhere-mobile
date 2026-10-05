@@ -170,6 +170,7 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final outgoing = msg.outgoing;
     final atts = msg.attachments ?? const <FileMeta>[];
+    final reasoningText = msg.desktopMeta?.reasoning ?? '';
 
     return Align(
       alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
@@ -202,6 +203,9 @@ class _Bubble extends StatelessWidget {
                   ],
                 ),
               ),
+            // 电脑端把「思考内容」放在正文上方（折叠块），手机端保持一致
+            if (!outgoing && !msg.pending && reasoningText.trim().isNotEmpty)
+              _ThinkingBlock(text: reasoningText),
             if (msg.pending)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 2),
@@ -367,6 +371,67 @@ class _MarkdownText extends StatelessWidget {
       selectable: true,
       extensionSet: md.ExtensionSet.gitHubFlavored,
       styleSheet: _bubbleMarkdownStyle,
+    );
+  }
+}
+
+/// 思考内容折叠区（对齐电脑端气泡上方的 Thinking 块）。
+/// 默认收起，点标题行展开/收起。
+class _ThinkingBlock extends StatefulWidget {
+  final String text;
+  const _ThinkingBlock({required this.text});
+
+  @override
+  State<_ThinkingBlock> createState() => _ThinkingBlockState();
+}
+
+class _ThinkingBlockState extends State<_ThinkingBlock> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.text.trim();
+    if (t.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: const Color(0x1AFFFFFF),
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.psychology_alt_outlined,
+                        size: 13, color: Colors.white54),
+                    const SizedBox(width: 5),
+                    const Text('思考内容',
+                        style: TextStyle(fontSize: 11.5, color: Colors.white54)),
+                    const SizedBox(width: 2),
+                    Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 14, color: Colors.white38),
+                  ],
+                ),
+                if (_expanded)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: SelectableText(
+                      t,
+                      style: const TextStyle(
+                          fontSize: 12, height: 1.45, color: Colors.white60),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -315,6 +315,10 @@ class AssistantMeta {
   /// token 用量（输入/思考/输出/总计）。null = 电脑端没报。
   final TokenUsage? tokens;
 
+  /// 电脑端的「思考内容」（reasoning_content）。空 = 没报 / 该模型没思考。
+  /// 手机上以折叠区展示，避免刷屏。
+  final String reasoning;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
@@ -324,6 +328,7 @@ class AssistantMeta {
     this.startTime = 0,
     this.endTime = 0,
     this.tokens,
+    this.reasoning = '',
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -337,6 +342,7 @@ class AssistantMeta {
         if (startTime > 0) 'startTime': startTime,
         if (endTime > 0) 'endTime': endTime,
         if (tokens != null) 'tokens': tokens!.toJson(),
+        if (reasoning.isNotEmpty) 'reasoning': reasoning,
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
@@ -352,6 +358,7 @@ class AssistantMeta {
         tokens: j['tokens'] is Map
             ? TokenUsage.fromJson((j['tokens'] as Map).cast<String, dynamic>())
             : null,
+        reasoning: j['reasoning'] as String? ?? '',
       );
 }
 
