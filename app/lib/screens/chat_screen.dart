@@ -404,6 +404,29 @@ final MarkdownStyleSheet _bubbleMarkdownStyle = MarkdownStyleSheet(
   blockSpacing: 8,
 );
 
+/// 正文里残留的思考标记要清掉：有些模型/中转会把思考包成
+/// `<thinking>...</thinking>` 或 ` thinking...` 直接塞进正文，
+/// 手机端以前原样渲染，气泡开头就出现一堆 `<thinking></thinking>` 代码。
+///
+/// 只做「删标记 + 删成对内容」这一步：思考正文本身由电脑端放在
+/// 气泡上方的折叠块（desktopMeta.reasoning），不在这里重复展示。
+String _stripThinkingTags(String s) {
+  if (s.isEmpty) return s;
+  var out = s;
+  // <thinking>...</thinking> / <reasoning>...</reasoning>（含换行，非贪婪）
+  out = out.replaceAll(
+      RegExp(r'<(thinking|reasoning|thought)>[\s\S]*?</\1>', caseSensitive: false), '');
+  // 未闭合的残留：<thinking> ... 直到结尾；以及单独的孤立标签
+  out = out.replaceAll(
+      RegExp(r'<(thinking|reasoning|thought)>[\s\S]*$', caseSensitive: false), '');
+  out = out.replaceAll(
+      RegExp(r'</(thinking|reasoning|thought)>', caseSensitive: false), '');
+  out = out.replaceAll(
+      RegExp(r'<(thinking|reasoning|thought)\s*/?>', caseSensitive: false), '');
+  // 另一种常见写法：思考内容直接包在 <thinking ...> 里但无闭合 —— 上面已覆盖。
+  return out.trim();
+}
+
 /// 用 Markdown 渲染气泡正文（支持 GFM 表格 / 代码块 / 标题 / 加粗 / 列表）。
 class _MarkdownText extends StatelessWidget {
   final String text;
@@ -411,8 +434,10 @@ class _MarkdownText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final data = _stripThinkingTags(text);
+    if (data.isEmpty) return const SizedBox.shrink();
     return MarkdownBody(
-      data: text,
+      data: data,
       selectable: true,
       extensionSet: md.ExtensionSet.gitHubFlavored,
       styleSheet: _bubbleMarkdownStyle,
@@ -712,8 +737,12 @@ class _ChoicePanelState extends State<_ChoicePanel> {
     final choice = msg.choice;
     if (choice == null || !choice.isValid) return const SizedBox.shrink();
 
-    // 已提交：保持「已选择：xxx」展示
-    final submitted = state.submittedChoiceFor(msg.id);
+    // 已提交：保持「已选择：xxx」展示。
+    // 先按本地消息 id 查；查不到再按电脑端 toolCallId 兜底
+    // （消息被电脑端更新/重建后本地 id 会变，toolCallId 不会），
+    // 否则会出现「提交完回头看又变回没选」。
+    final submitted =
+        state.submittedChoiceFor(msg.id) ?? state.submittedChoiceForTool(choice.toolCallId);
     if (submitted != null && submitted.isNotEmpty) {
       return _submittedBox(submitted);
     }
@@ -961,7 +990,7 @@ class _ActionBar extends StatelessWidget {
     // （电脑端 append 后会回传位置，手机据此挂上 desktopMeta）
     final canDelete = msg.desktopMeta?.isValid ?? false;
 
-    // token 用量：和操作图标同一行，放在图标左侧（用户消息没有 token，返回空串）
+    // token 用量：和操作图标同一行，放在图标**右侧**（用户消息没有 token，返回空串）
     final tokenStr = _tokenLine(msg);
 
     return Padding(
@@ -969,20 +998,8 @@ class _ActionBar extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (tokenStr.isNotEmpty)
-            Flexible(
-              child: Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: Text(
-                  tokenStr,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10.5, color: Colors.white38),
-                ),
-              ),
-            ),
           _act(context, Icons.copy_rounded, '复制', () async {
-            await Clipboard.setData(ClipboardData(text: msg.text));
+            await Clipboard.setData(ClipboardData(text: _stripThinkingTags(msg.text)));
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('已复制'),
@@ -1033,6 +1050,19 @@ class _ActionBar extends StatelessWidget {
                 ));
               }
             }, danger: true),
+          // token 用量放在操作图标**右侧**；用 Flexible 防止长文案把气泡撑破
+          if (tokenStr.isNotEmpty)
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text(
+                  tokenStr,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.white38),
+                ),
+              ),
+            ),
         ],
       ),
     );

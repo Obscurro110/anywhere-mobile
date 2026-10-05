@@ -242,6 +242,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> init() async {
     await notifications.init();
+    await _loadSubmittedChoices();
     await _loadHistory();
     _client.connect();
   }
@@ -609,7 +610,58 @@ class AppState extends ChangeNotifier {
 
   /// 手机上已提交的选择结果：本地消息 id -> 用户选了哪个（给气泡显示"已选择"）。
   final Map<String, String> _submittedChoices = {};
+
+  /// 同样的结果，另按 toolCallId 存一份。
+  ///
+  /// 为什么需要第二份：`msg.id` 只是**本地**消息 id，电脑端在工具状态更新/
+  /// 重新回答时回传的消息可能被换成新的本地 id（见 _onEnvelope 的「情况 A」），
+  /// 那时按 id 查就查不到，面板会退回「未选择」——就是「提交完回头看又没选」。
+  /// toolCallId 是电脑端那次提问的稳定标识，不会随重建消息而变。
+  final Map<String, String> _submittedChoicesByTool = {};
+
   String? submittedChoiceFor(String messageId) => _submittedChoices[messageId];
+
+  /// 按电脑端 toolCallId 查已提交结果（本地 id 对不上时的兜底）。
+  String? submittedChoiceForTool(String toolCallId) =>
+      toolCallId.isEmpty ? null : _submittedChoicesByTool[toolCallId];
+
+  static const _submittedChoicesKey = 'submitted_choices_v1';
+
+  /// 把「已提交的选择」也落盘 —— 以前只在内存里，
+  /// 重启 App 后所有回答过的选择区都会退回去让用户重选。
+  Future<void> _persistSubmittedChoices() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+        _submittedChoicesKey,
+        jsonEncode({
+          'byId': _submittedChoices,
+          'byTool': _submittedChoicesByTool,
+        }),
+      );
+    } catch (e) {
+      debugPrint('[AppState] _persistSubmittedChoices failed: $e');
+    }
+  }
+
+  Future<void> _loadSubmittedChoices() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_submittedChoicesKey);
+      if (raw == null || raw.isEmpty) return;
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      final byId = (j['byId'] as Map?)?.cast<String, dynamic>() ?? {};
+      final byTool = (j['byTool'] as Map?)?.cast<String, dynamic>() ?? {};
+      _submittedChoices
+        ..clear()
+        ..addAll(byId.map((k, v) => MapEntry(k, v.toString())));
+      _submittedChoicesByTool
+        ..clear()
+        ..addAll(byTool.map((k, v) => MapEntry(k, v.toString())));
+    } catch (e) {
+      debugPrint('[AppState] _loadSubmittedChoices failed: $e');
+    }
+  }
 
   /// 在手机上回答电脑端 ask_user_choice 的提问。
   ///
@@ -629,6 +681,12 @@ class AppState extends ChangeNotifier {
     if (messageId != null && messageId.isNotEmpty && displayText.isNotEmpty) {
       _submittedChoices[messageId] = displayText;
     }
+    // 按 toolCallId 也记一份（稳定标识，本地消息 id 变化后也能对上），
+    // 并落盘，避免重启后「已选择」又退回成没选。
+    if (displayText.isNotEmpty) {
+      _submittedChoicesByTool[toolCallId] = displayText;
+    }
+    unawaited(_persistSubmittedChoices());
     notifyListeners();
     return _client.send(Envelope(
       type: MsgType.chat,

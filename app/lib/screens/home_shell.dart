@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/models.dart';
 import '../services/app_state.dart';
 import '../widgets/connection_badge.dart';
 import 'chat_screen.dart';
@@ -95,19 +96,14 @@ class _HomeShellState extends State<HomeShell> {
             // 与电脑端对话
             const Text('对话', style: TextStyle(fontWeight: FontWeight.w600)),
             const SizedBox(width: 8),
-            // 当前接的是哪个电脑端会话（点击可切换/退出）
-            if (state.activeConversationId != null)
-              _ConvPill(
-                title: state.activeConversationTitle.isEmpty
-                    ? '电脑端会话'
-                    : state.activeConversationTitle,
-                onTap: () => _push(context, const ConversationsPage()),
-              )
-            else
-              _TargetPill(
-                label: state.targetLabel,
-                onTap: () => _pickTarget(context, state),
-              ),
+            // 顶部胶囊：两级入口 —— 先选电脑设备，再选该设备上的会话；
+            // 已进入会话时显示会话名，点它仍可换设备 / 换会话 / 退出。
+            _SessionPill(
+              deviceLabel: state.targetLabel,
+              conversationTitle: state.activeConversationTitle,
+              inConversation: state.activeConversationId != null,
+              onTap: () => _pickDeviceThenSession(context, state),
+            ),
           ],
         ),
         actions: [
@@ -201,8 +197,12 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  /// 点标题栏的设备胶囊 = 切换发送目标
-  void _pickTarget(BuildContext context, AppState state) {
+  /// 点标题栏胶囊：两级 —— 先选电脑设备，再选该设备上的会话。
+  ///
+  /// 第一级选的是「跟哪台电脑对话」（决定后续请求的 to）；
+  /// 选到具体设备后自动进第二级「选会话」。选「所有设备（广播）」
+  /// 则只切目标、不进会话选择（广播没有单一会话可言）。
+  void _pickDeviceThenSession(BuildContext context, AppState state) {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF1B1F2B),
@@ -212,16 +212,17 @@ class _HomeShellState extends State<HomeShell> {
           children: [
             const Padding(
               padding: EdgeInsets.all(14),
-              child: Text('发送到', style: TextStyle(fontWeight: FontWeight.bold)),
+              child:
+                  Text('选择电脑设备', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
             if (state.peers.isEmpty)
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Text('暂无其他在线设备，将发送给所有设备',
+                child: Text('暂无在线电脑设备',
                     style: TextStyle(fontSize: 12, color: Colors.white38)),
               ),
             for (final opt in <_TargetOpt>[
-              const _TargetOpt(null, '所有设备', Icons.campaign_outlined),
+              const _TargetOpt(null, '所有设备（广播）', Icons.campaign_outlined),
               ...state.peers.map((d) => _TargetOpt(
                     d.deviceId,
                     '${d.deviceName} (${d.platform})',
@@ -247,6 +248,8 @@ class _HomeShellState extends State<HomeShell> {
                 onTap: () {
                   state.setTargetDevice(opt.id);
                   Navigator.pop(ctx);
+                  // 第二级：只有选定具体设备才进会话选择
+                  if (opt.id != null) _pickSession(context, state);
                 },
               ),
             const SizedBox(height: 8),
@@ -255,19 +258,40 @@ class _HomeShellState extends State<HomeShell> {
       ),
     );
   }
+
+  /// 第二级：列出该设备上的电脑端会话，选中即切换。
+  void _pickSession(BuildContext context, AppState state) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1F2B),
+      isScrollControlled: true,
+      builder: (ctx) => const _SessionSheet(),
+    );
+  }
 }
 
-/// 标题栏里的「发送到」胶囊 —— 把原先占一整行的设备条压成一个小标签。
-class _TargetPill extends StatelessWidget {
-  final String label;
+/// 标题栏里的两级入口胶囊：显示「设备」或「当前会话名」。
+/// 进入电脑端会话时用链接图标 + 蓝色，一眼能看出"正在电脑端会话里"。
+class _SessionPill extends StatelessWidget {
+  final String deviceLabel;
+  final String conversationTitle;
+  final bool inConversation;
   final VoidCallback onTap;
 
-  const _TargetPill({required this.label, required this.onTap});
+  const _SessionPill({
+    required this.deviceLabel,
+    required this.conversationTitle,
+    required this.inConversation,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final label = (inConversation && conversationTitle.isNotEmpty)
+        ? conversationTitle
+        : deviceLabel;
     return Material(
-      color: const Color(0xFF232838),
+      color: inConversation ? const Color(0xFF1D2A3A) : const Color(0xFF232838),
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
@@ -277,10 +301,14 @@ class _TargetPill extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.north_east, size: 12, color: Colors.white54),
+              Icon(
+                inConversation ? Icons.link : Icons.north_east,
+                size: 12,
+                color: inConversation ? Colors.lightBlueAccent : Colors.white54,
+              ),
               const SizedBox(width: 4),
               ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 110),
+                constraints: const BoxConstraints(maxWidth: 120),
                 child: Text(
                   label,
                   maxLines: 1,
@@ -304,44 +332,168 @@ class _TargetOpt {
   const _TargetOpt(this.id, this.label, this.icon);
 }
 
-/// 标题栏里显示「当前接的是电脑端哪个会话」。
-/// 与 _TargetPill 区分开：这个用的是链接图标 + 蓝色，一眼能看出"正在电脑端会话里"。
-class _ConvPill extends StatelessWidget {
-  final String title;
-  final VoidCallback onTap;
+/// 第二级面板：列出当前设备上的电脑端会话，点一条即切到该会话。
+///
+/// 切换成功后底部「助手/模型/思考」会跟随该会话的助手
+/// （由 AppState 处理 conversationOpenResult 时 applyPrompt 完成）。
+class _SessionSheet extends StatefulWidget {
+  const _SessionSheet();
 
-  const _ConvPill({required this.title, required this.onTap});
+  @override
+  State<_SessionSheet> createState() => _SessionSheetState();
+}
+
+class _SessionSheetState extends State<_SessionSheet> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<AppState>().requestConversations();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFF1D2A3A),
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.link, size: 12, color: Colors.lightBlueAccent),
-              const SizedBox(width: 4),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 120),
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: Colors.white),
+    final state = context.watch<AppState>();
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.6,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 6, 6),
+              child: Row(
+                children: [
+                  const Text('选择会话',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: '刷新',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    onPressed: state.requestConversations,
+                  ),
+                ],
+              ),
+            ),
+            if (state.activeConversationId != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.link,
+                        size: 14, color: Colors.lightBlueAccent),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        state.activeConversationTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white70),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        state.leaveDesktopConversation();
+                        Navigator.of(context).pop();
+                      },
+                      child: const Text('退出'),
+                    ),
+                  ],
                 ),
               ),
-              const Icon(Icons.expand_more, size: 14, color: Colors.white38),
-            ],
-          ),
+            Flexible(
+              child: (state.loadingConversations && state.conversations.isEmpty)
+                  ? const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  : state.conversations.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('该电脑暂无会话',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.white38)),
+                        )
+                      : ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final c in state.conversations)
+                              ListTile(
+                                dense: true,
+                                leading: Icon(
+                                  c.id == state.activeConversationId
+                                      ? Icons.chat_bubble
+                                      : Icons.chat_bubble_outline,
+                                  size: 20,
+                                  color: c.id == state.activeConversationId
+                                      ? Colors.lightBlueAccent
+                                      : Colors.white38,
+                                ),
+                                title: Text(
+                                  c.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: c.assistantName.isNotEmpty
+                                    ? Text('助手：${c.assistantName}',
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.amberAccent))
+                                    : null,
+                                trailing: c.id == state.activeConversationId
+                                    ? const Icon(Icons.check,
+                                        size: 18,
+                                        color: Colors.lightBlueAccent)
+                                    : null,
+                                onTap: () => _open(context, state, c),
+                              ),
+                            const SizedBox(height: 8),
+                          ],
+                        ),
+            ),
+          ],
         ),
       ),
     );
+  }
+
+  Future<void> _open(
+      BuildContext context, AppState state, ConversationOption c) async {
+    // 先抓 messenger：pop 之后本 sheet 的 context 会失效，再 `of(context)` 会崩。
+    final messenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+    if (!state.client.isConnected) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('未连接到中继服务器')),
+      );
+      return;
+    }
+    final sent = state.openConversationOnDesktop(c.id);
+    if (!sent) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('发送失败')),
+      );
+      return;
+    }
+    nav.pop();
+    // 等电脑端确认切到该会话；助手会随 conversationOpenResult 自动跟随。
+    for (var i = 0; i < 12; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      if (state.activeConversationId == c.id) return;
+      final res = state.lastConversationOpen;
+      if (res != null && res['ok'] != true) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('打开失败：${res['reason']}')),
+        );
+        return;
+      }
+    }
   }
 }
 
