@@ -397,7 +397,7 @@ final MarkdownStyleSheet _bubbleMarkdownStyle = MarkdownStyleSheet(
   tableHead: const TextStyle(
       fontSize: 14, color: Colors.white, fontWeight: FontWeight.w700, height: 1.25),
   tableBody: const TextStyle(fontSize: 14, height: 1.3, color: Colors.white),
-  tableColumnWidth: const IntrinsicColumnWidth(fallback: FlexColumnWidth()),
+  tableColumnWidth: const IntrinsicColumnWidth(),
   horizontalRuleDecoration: const BoxDecoration(
     border: Border(top: BorderSide(color: Colors.white24)),
   ),
