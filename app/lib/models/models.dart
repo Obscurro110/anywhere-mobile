@@ -18,6 +18,7 @@ export '../core/protocol.dart'
         ConvMessage,
         CompactConfig,
         AssistantMeta,
+        ToolCallMeta,
         ChoiceMeta,
         ChoiceQuestion,
         ChoiceOption,
