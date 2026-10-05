@@ -10961,6 +10961,57 @@ const pushLiveToolStatus = async () => {
   }
 };
 
+// 正文流式实时同步：AI 还在逐字输出时，节流把当前文本推给手机（就地更新）。
+// ⚠️ 绝不能写 relaySentAssistantIds —— 否则流式第一段会被当成完整回复，
+// 后续正式版不再发（v1.7.5 修过的截断 bug）。流式临时账用独立集合记录，
+// loading 结束时清掉，让 flushRelayReplies 发送最终完整版并标记已发。
+let relayLiveTextSig = '';
+let relayLiveTextAt = 0;
+const relayLiveTextSentIds = new Set();
+const RELAY_LIVE_TEXT_THROTTLE_MS = 800;
+const pushLiveTextStatus = async () => {
+  const to = relayReplyTarget.value;
+  if (!to || !loading.value) return;
+  const list = chat_show.value;
+  const last = list[list.length - 1];
+  if (!last || last.role !== 'assistant') return;
+  if (last.isPreparing === true || last.status === 'preparing' || last.status === 'compacting') return;
+  // 等用户交互时不推正文（走正常下发，带选项）
+  const waitingUser = Array.isArray(last.tool_calls) && last.tool_calls.some(
+    (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
+  );
+  if (waitingUser) return;
+  const id = String(last.id ?? '');
+  if (!id) return;
+  // 正式版已经发过就不必再推（正式版就是最新完整内容）
+  if (relaySentAssistantIds.has(id)) return;
+  const text = relayMessageText(last);
+  if (!text) return;
+  const sig = `${id}#${text.length}`;
+  if (sig === relayLiveTextSig) return;
+  const now = Date.now();
+  if (now - relayLiveTextAt < RELAY_LIVE_TEXT_THROTTLE_MS) return;
+  relayLiveTextSig = sig;
+  relayLiveTextAt = now;
+  relayLiveTextSentIds.add(id);
+  try {
+    const extra = buildAssistantExtra(last, list.length - 1, {
+      tools: relayToolCallsPayload(last),
+      update: true
+    });
+    await window.api.sendRelayChat({ text, to, extra });
+    relayLog('[relay] live text pushed len =', text.length);
+  } catch (err) {
+    relayWarn('[relay] live text push failed:', err);
+  }
+};
+
+// loading 结束：清掉流式临时账，正式完整版由 flushRelayReplies 发送并标记已发。
+const clearRelayLiveTextState = () => {
+  if (relayLiveTextSentIds.size) relayLiveTextSentIds.clear();
+  relayLiveTextSig = '';
+};
+
 const flushRelayReplies = async () => {
   const to = relayReplyTarget.value;
   if (!to) return;
@@ -11084,8 +11135,13 @@ watch(
     return `${loadingFlag}#${tail}`;
   },
   () => {
+    // 流式结束（loading 变 false）：清掉流式临时账，
+    // 让下面的 flushRelayReplies 发送最终完整版并标记已发。
+    if (!loading.value) clearRelayLiveTextState();
     // 工具状态实时推送（流式中途也要发，手机才能看到转圈）
     pushLiveToolStatus().catch((err) => relayWarn('[relay] live tool push failed:', err));
+    // 正文流式实时推送（逐字显示，update:true 走手机端就地更新）
+    pushLiveTextStatus().catch((err) => relayWarn('[relay] live text push failed:', err));
     // 统一走 flushRelayReplies（发送失败后的重试也复用它）
     flushRelayReplies().catch((err) => relayWarn('[relay] flush replies failed:', err));
   }
