@@ -150,10 +150,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..5a9acaf
+index 0000000..29cec8c
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2360 @@
+@@ -0,0 +1,2374 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -204,7 +204,7 @@ index 0000000..5a9acaf
 + *          / ANYWHERE_RELAY_DEVICE_NAME
 + */
 +import { app, ipcMain } from 'electron'
-+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, appendFileSync } from 'node:fs'
++import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs'
 +import { join } from 'node:path'
 +import { RelayClient } from './relay-client.js'
 +import { RELAY_VERSION, RELAY_VERSION_CODE } from './version.js'
@@ -212,7 +212,6 @@ index 0000000..5a9acaf
 +import {
 +  renameConversation as storeRenameConversation,
 +  deleteConversation as storeDeleteConversation,
-+  getConversationRequestMessages as storeGetMessages,
 +  deleteMessages as storeDeleteMessages
 +} from '../core/conversationStore.js'
 +import { readLocalProjects } from '../core/projects.js'
@@ -834,14 +833,29 @@ index 0000000..5a9acaf
 +    }
 +}
 +
++/** 剥掉正文里残留的思考标记：有些模型/中转把思考直接包成
++ *  `<thinking>...</thinking>` 塞进 content，不剥的话手机上会原样显示。
++ */
++function stripThinkingTags(s) {
++  if (!s) return s
++  return String(s)
++    .replace(/<(thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi, '')
++    .replace(/<(thinking|reasoning|thought)>[\s\S]*$/gi, '')
++    .replace(/<\/(thinking|reasoning|thought)>/gi, '')
++    .replace(/<(thinking|reasoning|thought)\s*\/?>/gi, '')
++    .trim()
++}
++
 +/** 从 content（字符串 / [{type:'text',text}]）里抽纯文本 */
 +function extractMessageText(content) {
-+  if (typeof content === 'string') return content
++  if (typeof content === 'string') return stripThinkingTags(content)
 +  if (Array.isArray(content)) {
-+    return content
-+      .filter((p) => p && p.type === 'text')
-+      .map((p) => p.text || '')
-+      .join('')
++    return stripThinkingTags(
++      content
++        .filter((p) => p && p.type === 'text')
++        .map((p) => p.text || '')
++        .join('')
++    )
 +  }
 +  return ''
 +}
@@ -2845,7 +2859,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..78d386a
+index 0000000..5ff08fa
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2857,8 +2871,8 @@ index 0000000..78d386a
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.12';
-+export const RELAY_VERSION_CODE = 32;
++export const RELAY_VERSION = '1.7.13';
++export const RELAY_VERSION_CODE = 33;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3339,7 +3353,7 @@ index 2ad1391..28cb7e4 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..72d8f4a 100644
+index 6bb1113..931a2b9 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -3683,7 +3697,7 @@ index 6bb1113..72d8f4a 100644
  };
  
  const clearHistory = async () => {
-@@ -10356,6 +10623,529 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10356,6 +10623,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -3794,18 +3808,30 @@ index 6bb1113..72d8f4a 100644
 +    .join(',');
 +};
 +
++/** 剥掉正文里残留的思考标记（<thinking>…</thinking> 等）：有些模型/中转
++ *  把思考直接塞进 content，不剥的话手机上会原样显示成一串代码。 */
++const stripThinkingTags = (s) => {
++  if (!s) return s;
++  return String(s)
++    .replace(/<(thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi, '')
++    .replace(/<(thinking|reasoning|thought)>[\s\S]*$/gi, '')
++    .replace(/<\/(thinking|reasoning|thought)>/gi, '')
++    .replace(/<(thinking|reasoning|thought)\s*\/?>/gi, '')
++    .trim();
++};
++
 +/** 正文只取 content 文本；工具调用改为结构化随 meta 下发（手机端折叠展示）。 */
 +const relayMessageText = (m) => {
 +  if (!m) return '';
-+  if (typeof m.content === 'string') return m.content.trim() ? m.content : '';
-+  if (Array.isArray(m.content)) {
-+    return m.content
++  let text = '';
++  if (typeof m.content === 'string') text = m.content;
++  else if (Array.isArray(m.content)) {
++    text = m.content
 +      .filter((p) => p && p.type === 'text')
 +      .map((p) => p.text || '')
-+      .join('')
-+      .trim();
++      .join('');
 +  }
-+  return '';
++  return stripThinkingTags(text);
 +};
 +
 +/** 组装 meta（选项/工具/思考/token）并转成纯对象（Vue Proxy 不能直接过 IPC）。 */
