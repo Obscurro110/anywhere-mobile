@@ -178,6 +178,25 @@ node test-e2e.mjs
 
 > APK 构建产物在对应运行页面的 **Artifacts** 区下载（`anywhere-mobile-apk`）。
 
+## 版本 / 更新记录
+
+版本号以仓库根 [`version.json`](version.json) 为准（App 与桌面端共用同一版本号），发版时改它即可，CI 自动构建发布。
+
+### v1.7.13（当前）
+
+- **顶部胶囊「设备 → 会话」两级选择**：先选电脑设备，再选该设备上的会话；切换后底部助手/模型/思考跟随该会话的助手。
+- **修复正文开头出现 `<thinking></thinking>` 代码**：手机端渲染前剥掉残留思考标记，桌面中继同步处理。
+- **token 挪到操作图标右侧**：「输入 x · 输出 y」改到复制/重试/删除右侧。
+- **修复选项提交后回看仍显示「未选择」**：提交结果按 `toolCallId` 兜底查找并落盘，重启 / 消息重建后不再丢失。
+
+### v1.7.12
+
+- Markdown 表格列宽自适应。
+- 修复「电脑端正在处理」重复显示两个时间。
+- `ask_user_choice` 多题面板重写（一题一屏 + 圆点翻页 + 提交）。
+- token 与操作按钮同一行。
+- 电脑端回复流式逐字显示。
+
 ## 说明
 
 - 本项目面向 [Komorebi-yaodong/anywheredesktop](https://github.com/Komorebi-yaodong/anywheredesktop) 做互通扩展。
