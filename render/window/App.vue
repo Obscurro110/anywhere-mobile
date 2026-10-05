@@ -10248,6 +10248,12 @@ const deleteMessage = (index) => {
     }
     fullHistory.value.splice(fullStartIndex, fullDeleteCount);
   }
+  // 记录被删掉的 chat_show 消息 id：手机端据此把 live 列表里对应气泡也移除，
+  // 否则会出现「电脑端删了、手机还显示」的不同步。
+  const deletedShowIds = chat_show.value
+    .slice(show_start_idx, show_start_idx + show_delete_count)
+    .map((m) => String(m?.id ?? ''))
+    .filter(Boolean);
   chat_show.value.splice(show_start_idx, show_delete_count);
   markOutermostCanRestore();
   syncHistoryFromFullHistory();
@@ -10271,7 +10277,7 @@ const deleteMessage = (index) => {
     const convId = currentConversationStorage.value?.conversationId || '';
     if (convId) {
       window.api?.sendRelayChat?.({
-        text: JSON.stringify({ __relayMessagesChanged: { conversationId: convId } }),
+        text: JSON.stringify({ __relayMessagesChanged: { conversationId: convId, deletedIds: deletedShowIds } }),
         to: '*',
         role: 'messages-changed'
       });
@@ -10832,6 +10838,153 @@ window.api?.onWindowEvent?.((env) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// 回传手机的核心：把所有「已完成且没发过」的 assistant 消息下发给手机。
+//
+// 历史坑（都已修）：
+//  1) 以前只发最后一条 —— 一轮里多条回复（思考+工具调用+最终回答）中间的
+//     那条在手机上完全看不到；
+//  2) __relayChoice.questions 是 Vue 响应式 Proxy，直接塞进 IPC 会抛
+//     "An object could not be cloned"，整条消息（含 ask_user_choice 选项）
+//     发不出去 → 手机永远停在「电脑端正在处理…」。现在统一 JSON 深拷贝成纯对象；
+//  3) 失败后不重试 → 永久卡住。现在带上有限次重试。
+// ---------------------------------------------------------------------------
+let relayRetryTimer = null;
+let relayRetryCount = 0;
+
+const scheduleRelayRetry = () => {
+  if (relayRetryTimer) return;
+  if (relayRetryCount >= 6) {
+    relayWarn('[relay] reply retry limit reached; giving up');
+    return;
+  }
+  relayRetryCount += 1;
+  relayRetryTimer = setTimeout(() => {
+    relayRetryTimer = null;
+    flushRelayReplies().catch(() => {});
+  }, 1500);
+};
+
+const flushRelayReplies = async () => {
+  const to = relayReplyTarget.value;
+  if (!to) return;
+
+  // 是否"正在等用户交互"（工具在等用户选择 / 批准）—— 这种必须发出去，
+  // 否则用户根本不知道 AI 在问他什么。
+  const tail = chat_show.value[chat_show.value.length - 1];
+  const waitingUser = Array.isArray(tail?.tool_calls) && tail.tool_calls.some(
+    (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
+  );
+
+  // ⚠️ AI 整轮还没跑完（流式输出 / 工具执行中）时**绝不发送**，
+  // 否则流式第一个片段会被当成完整回复发出去（硬截断）。
+  if (loading.value && !waitingUser) {
+    relayLog('[relay] turn still running (loading); defer sending');
+    return;
+  }
+
+  // 收集所有「已完成且没发过」的 assistant 消息（一轮里可能有多条）
+  const pending = [];
+  chat_show.value.forEach((m, idx) => {
+    if (!m || m.role !== 'assistant') return;
+    if (m.isPreparing === true || m.status === 'preparing' || m.status === 'compacting') return;
+    const id = String(m.id ?? '');
+    if (!id || relaySentAssistantIds.has(id)) return;
+    const t = relayMessageText(m).trim();
+    if (!t) return;
+    pending.push({ m, idx, id, text: t });
+  });
+  if (!pending.length) return;
+
+  // 已发送 id 集合的修剪：只丢弃「已不在 chat_show 里」的 id。
+  // ⚠️ 绝不能整体 clear() —— 那会让下一轮把所有历史消息当"没发过"重发一遍，
+  // 手机上出现整段重复。
+  if (relaySentAssistantIds.size > 800) {
+    const alive = new Set();
+    for (const m of chat_show.value) {
+      if (m?.role === 'assistant') alive.add(String(m?.id ?? ''));
+    }
+    for (const id of Array.from(relaySentAssistantIds)) {
+      if (!alive.has(id)) relaySentAssistantIds.delete(id);
+    }
+  }
+
+  for (const item of pending) {
+    const { m: last, idx: assistantIndex, id: mid, text } = item;
+    // 若这条消息正在等用户选择（ask_user_choice），把选项结构化传给手机，
+    // 手机气泡下可以直接渲染可点选的选项按钮（提交走 choiceSubmit 命令）。
+    let relayChoice = null;
+    if (Array.isArray(last.tool_calls)) {
+      const pendingChoice = last.tool_calls.find(
+        (tc) =>
+          tc &&
+          tc.approvalStatus === 'choosing' &&
+          tc.choiceData &&
+          Array.isArray(tc.choiceData.questions) &&
+          tc.choiceData.questions.length > 0
+      );
+      if (pendingChoice) {
+        relayChoice = {
+          toolCallId: String(pendingChoice.id ?? ''),
+          questions: pendingChoice.choiceData.questions
+        };
+      }
+    }
+    // 消息元数据：时间 / 耗时 / token，让手机气泡和电脑端显示一致。
+    const tokenUsage = last.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
+    const startTime = Number(last.startTime) || Number(last.timestamp) || 0;
+    const endTime = Number(last.endTime) || 0;
+    const relayTokens = tokenUsage
+      ? {
+          prompt: Number(tokenUsage.prompt_tokens) || 0,
+          completion: Number(tokenUsage.completion_tokens) || 0,
+          reasoning: Number(tokenUsage.reasoning_tokens) || 0,
+          total: Number(tokenUsage.total_tokens) || 0
+        }
+      : null;
+
+    const extra = {
+      __relayAssistantMeta: {
+        messageId: mid,
+        index: assistantIndex,
+        conversationId: currentConversationStorage.value?.conversationId || '',
+        modelTag: getCurrentAssistantDisplayName() || '',
+        startTime,
+        endTime,
+        ...(relayTokens ? { tokens: relayTokens } : {})
+      },
+      ...(relayChoice ? { __relayChoice: relayChoice } : {})
+    };
+    // ⚠️ 必须转成纯对象再发：relayChoice.questions 是 Vue 响应式 Proxy，
+    // 直接走 IPC 会抛 "An object could not be cloned"。
+    let plainExtra;
+    try {
+      plainExtra = JSON.parse(JSON.stringify(extra));
+    } catch (err) {
+      relayWarn('[relay] extra serialize failed:', err);
+      plainExtra = {};
+    }
+
+    relayLog('[relay] replying to phone. to =', to, 'idx =', assistantIndex, 'len =', text.length);
+    try {
+      await window.api.sendRelayChat({ text, to, extra: plainExtra });
+      relayLog('[relay] reply sent ok');
+      relaySentAssistantIds.add(mid);
+      relayLastSentAssistantId = mid;
+    } catch (err) {
+      // 发送失败：不要标记已发，安排重试（否则手机永远停在「电脑端正在处理…」）
+      relayWarn('[relay] reply send failed:', err);
+      relaySentAssistantIds.delete(mid);
+      scheduleRelayRetry();
+      return;
+    }
+  }
+
+  relayRetryCount = 0;
+  // 只有队列里没有别的手机消息在等，才解绑回传目标
+  settleRelayReply();
+};
+
 // 助手回复完成 → 回传手机
 // 注意：assistant 气泡先以 isPreparing:true 入列，流式填充 content，
 // 完成后由 finalize* 删除 isPreparing 字段（不是设成 false）。
@@ -10849,104 +11002,9 @@ watch(
       .join('|');
     return `${loadingFlag}#${tail}`;
   },
-  async () => {
-    const to = relayReplyTarget.value;
-    if (!to) return;
-    // 是否"正在等用户交互"（工具在等用户选择 / 批准）—— 这种必须发出去，
-    // 否则用户根本不知道 AI 在问他什么。
-    const tail = chat_show.value[chat_show.value.length - 1];
-    const waitingUser = Array.isArray(tail?.tool_calls) && tail.tool_calls.some(
-      (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
-    );
-
-    // ⚠️ AI 整轮还没跑完（流式输出 / 工具执行中）时**绝不发送**，
-    // 否则流式第一个片段会被当成完整回复发出去（硬截断）。
-    if (loading.value && !waitingUser) {
-      relayLog('[relay] turn still running (loading); defer sending');
-      return;
-    }
-
-    // ⚠️ 核心修复：一轮里可能有**多条** assistant 消息（每次模型迭代 /
-    // 工具调用都会 push 一条新的），之前只发最后一条 —— 中间那些在手机上
-    // 完全看不到（「部分消息不显示」）。现在把"已完成且没发过"的全部补发。
-    const pending = [];
-    chat_show.value.forEach((m, idx) => {
-      if (!m || m.role !== 'assistant') return;
-      if (m.isPreparing === true || m.status === 'preparing' || m.status === 'compacting') return;
-      const id = String(m.id ?? '');
-      if (!id || relaySentAssistantIds.has(id)) return;
-      const t = relayMessageText(m).trim();
-      if (!t) return;
-      pending.push({ m, idx, id, text: t });
-    });
-    if (!pending.length) return;
-    if (relaySentAssistantIds.size > 500) relaySentAssistantIds.clear();
-
-    for (const item of pending) {
-      const { m: last, idx: assistantIndex, id: mid, text } = item;
-      // 若这条消息正在等用户选择（ask_user_choice），把选项结构化传给手机，
-      // 手机气泡下可以直接渲染可点选的选项按钮。
-      let relayChoice = null;
-      if (Array.isArray(last.tool_calls)) {
-        const pendingChoice = last.tool_calls.find(
-          (tc) =>
-            tc &&
-            tc.approvalStatus === 'choosing' &&
-            tc.choiceData &&
-            Array.isArray(tc.choiceData.questions) &&
-            tc.choiceData.questions.length > 0
-        );
-        if (pendingChoice) {
-          relayChoice = {
-            toolCallId: String(pendingChoice.id ?? ''),
-            questions: pendingChoice.choiceData.questions
-          };
-        }
-      }
-      // 消息元数据：时间 / 耗时 / token，让手机气泡和电脑端显示一致。
-      const tokenUsage = last.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
-      const startTime = Number(last.startTime) || Number(last.timestamp) || 0;
-      const endTime = Number(last.endTime) || 0;
-      const relayTokens = tokenUsage
-        ? {
-            prompt: Number(tokenUsage.prompt_tokens) || 0,
-            completion: Number(tokenUsage.completion_tokens) || 0,
-            reasoning: Number(tokenUsage.reasoning_tokens) || 0,
-            total: Number(tokenUsage.total_tokens) || 0
-          }
-        : null;
-
-      relaySentAssistantIds.add(mid);
-      relayLastSentAssistantId = mid;
-      relayLog('[relay] replying to phone. to =', to, 'idx =', assistantIndex, 'len =', text.length);
-      try {
-        // 带上这条 assistant 消息在 chat_show 里的 id / 下标 / 会话，
-        // 手机端气泡才能显示「重新回答 / 删除这条」并正确指回电脑端。
-        await window.api.sendRelayChat({
-          text,
-          to,
-          extra: {
-            __relayAssistantMeta: {
-              messageId: mid,
-              index: assistantIndex,
-              conversationId: currentConversationStorage.value?.conversationId || '',
-              modelTag: getCurrentAssistantDisplayName() || '',
-              startTime,
-              endTime,
-              ...(relayTokens ? { tokens: relayTokens } : {})
-            },
-            ...(relayChoice ? { __relayChoice: relayChoice } : {})
-          }
-        });
-        relayLog('[relay] reply sent ok');
-      } catch (err) {
-        relayWarn('[relay] reply send failed:', err);
-        relaySentAssistantIds.delete(mid);
-        return;
-      }
-    }
-    // 只有队列里没有别的手机消息在等，才解绑回传目标
-    settleRelayReply();
+  () => {
+    // 统一走 flushRelayReplies（发送失败后的重试也复用它）
+    flushRelayReplies().catch((err) => relayWarn('[relay] flush replies failed:', err));
   }
 );
 </script>
