@@ -96,6 +96,16 @@ const tokenUsageDisplay = computed(() => {
 });
 
 
+// 耗时统一中文口径：7秒 -> 0分7秒 / 83秒 -> 1分23秒 / 3723秒 -> 1时2分3秒
+const formatDurationCn = (ms) => {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}时${m}分${s}秒`;
+  return `${m}分${s}秒`;
+};
+
 const timeDisplay = computed(() => {
   const msg = props.message;
   // 获取开始时间：优先取 startTime (AI)，其次取 timestamp (User/AI旧数据)
@@ -106,15 +116,8 @@ const timeDisplay = computed(() => {
 
   // 如果是 AI 消息且有结束时间，追加耗时
   if (msg.role === 'assistant' && msg.endTime && msg.startTime) {
-    const duration = (msg.endTime - msg.startTime) / 1000;
-    let durationStr = '';
-    if (duration < 60) {
-        durationStr = `${duration.toFixed(1)} s`;
-    } else {
-        durationStr = `${(duration / 60).toFixed(1)} min`;
-    }
-    // 格式：2023-01-01 12:00 (3.5 s)
-    return `${formattedStart} (${durationStr})`;
+    // 格式：2026-10-05 10:02 (0分7秒) —— 与手机端同一套中文耗时口径
+    return `${formattedStart} (${formatDurationCn(msg.endTime - msg.startTime)})`;
   }
 
   return formattedStart;

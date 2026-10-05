@@ -10689,73 +10689,114 @@ const relayToolStatusLabel = (s) => {
  * 手机端完全看不到（比如 ask_user_choice 的选项卡片、content 为空只有
  * 工具调用的消息整条消失）。这里把 tool_calls 转成可读文本一并回传。
  */
-const relayToolCallsText = (m) => {
+const relayToolCallsPayload = (m) => {
   const calls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
-  const parts = [];
+  const out = [];
   for (const tc of calls) {
     if (!tc || typeof tc !== 'object') continue;
-    const name = tc?.function?.name || tc?.name || 'tool';
-    const statusLabel = relayToolStatusLabel(tc?.approvalStatus);
-    const lines = [`🔧 调用工具 ${name}${statusLabel ? ` [${statusLabel}]` : ''}`];
-    let args = null;
+    const name = String(tc?.function?.name || tc?.name || 'tool');
     // ⚠️ chat_show 里 tool_calls 项的结构是 { id, name, args, result, approvalStatus }
     //（见 sendAI 里的 map）—— 参数在**顶层 args**，不在 function.arguments！
-    // 之前只读 function.arguments，拿到 undefined，选项/问题全部丢失，
-    // 手机上只剩「🔧 调用工具 ask_user_choice + 结果」。
     const rawArgs = tc?.function?.arguments ?? tc?.args;
-    if (rawArgs != null) {
-      if (typeof rawArgs === 'string') {
-        try { args = JSON.parse(rawArgs); } catch { args = null; }
-      } else if (typeof rawArgs === 'object') {
-        args = rawArgs;
-      }
+    let argsText = '';
+    if (typeof rawArgs === 'string') argsText = rawArgs;
+    else if (rawArgs != null) {
+      try { argsText = JSON.stringify(rawArgs, null, 2); } catch (_) { argsText = ''; }
     }
-    if (name === 'ask_user_choice' && args && Array.isArray(args.questions)) {
-      for (const q of args.questions) {
-        if (!q) continue;
-        if (q.question) lines.push(`问题: ${q.question}`);
-        if (Array.isArray(q.options)) {
-          for (const o of q.options) {
-            if (!o) continue;
-            const label = o.label ? String(o.label) : '';
-            const desc = o.description ? ` — ${String(o.description)}` : '';
-            const line = `  • ${label}${desc}`.trimEnd();
-            lines.push(line.length > RELAY_TOOL_TEXT_LIMIT ? line.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : line);
-          }
-        }
-      }
-    } else if (args && typeof args === 'object' && Object.keys(args).length > 0) {
-      let argStr = '';
-      try { argStr = JSON.stringify(args); } catch { argStr = ''; }
-      if (argStr) {
-        lines.push(`参数: ${argStr.length > RELAY_TOOL_TEXT_LIMIT ? argStr.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : argStr}`);
-      }
+    let resultText = '';
+    if (typeof tc.result === 'string') resultText = tc.result;
+    else if (tc.result != null) {
+      try { resultText = JSON.stringify(tc.result, null, 2); } catch (_) { resultText = String(tc.result); }
     }
-    const result = typeof tc.result === 'string' ? tc.result.trim() : '';
-    if (result) {
-      const r = result.length > RELAY_TOOL_TEXT_LIMIT ? result.slice(0, RELAY_TOOL_TEXT_LIMIT) + '…' : result;
-      lines.push(`结果: ${r}`);
-    }
-    parts.push(lines.join('\n'));
+    const status = String(tc?.approvalStatus || '');
+    const cap = (t) => (t.length > RELAY_TOOL_TEXT_LIMIT ? t.slice(0, RELAY_TOOL_TEXT_LIMIT) + '\n…（已截断）' : t);
+    out.push({
+      id: String(tc.id || ''),
+      name,
+      status,
+      statusLabel: relayToolStatusLabel(status),
+      args: cap(argsText),
+      result: cap(resultText)
+    });
   }
-  return parts.join('\n\n');
+  return out;
 };
 
+/** 只含「状态」的工具签名（用于执行中实时同步的变更判断，不含大段参数/结果） */
+const relayToolSignature = (m) => {
+  const calls = Array.isArray(m?.tool_calls) ? m.tool_calls : [];
+  return calls
+    .map((tc) => `${tc?.id || ''}:${tc?.approvalStatus || ''}:${tc?.result ? 1 : 0}`)
+    .join(',');
+};
+
+/** 正文只取 content 文本；工具调用改为结构化随 meta 下发（手机端折叠展示）。 */
 const relayMessageText = (m) => {
   if (!m) return '';
-  const parts = [];
-  if (typeof m.content === 'string') {
-    if (m.content.trim()) parts.push(m.content);
-  } else if (Array.isArray(m.content)) {
-    const t = m.content
+  if (typeof m.content === 'string') return m.content.trim() ? m.content : '';
+  if (Array.isArray(m.content)) {
+    return m.content
       .filter((p) => p && p.type === 'text')
       .map((p) => p.text || '')
-      .join('');
-    if (t.trim()) parts.push(t);
+      .join('')
+      .trim();
   }
-  const toolText = relayToolCallsText(m);
-  if (toolText) parts.push(toolText);
-  return parts.join('\n\n');
+  return '';
+};
+
+/** 组装 meta（选项/工具/思考/token）并转成纯对象（Vue Proxy 不能直接过 IPC）。 */
+const buildAssistantExtra = (last, assistantIndex, { tools = null, update = false } = {}) => {
+  let relayChoice = null;
+  if (Array.isArray(last?.tool_calls)) {
+    const pendingChoice = last.tool_calls.find(
+      (tc) =>
+        tc &&
+        tc.approvalStatus === 'choosing' &&
+        tc.choiceData &&
+        Array.isArray(tc.choiceData.questions) &&
+        tc.choiceData.questions.length > 0
+    );
+    if (pendingChoice) {
+      relayChoice = {
+        toolCallId: String(pendingChoice.id ?? ''),
+        questions: pendingChoice.choiceData.questions
+      };
+    }
+  }
+  const tokenUsage = last?.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
+  const relayTokens = tokenUsage
+    ? {
+        prompt: Number(tokenUsage.prompt_tokens) || 0,
+        completion: Number(tokenUsage.completion_tokens) || 0,
+        reasoning: Number(tokenUsage.reasoning_tokens) || 0,
+        total: Number(tokenUsage.total_tokens) || 0
+      }
+    : null;
+  const extra = {
+    __relayAssistantMeta: {
+      messageId: String(last?.id ?? ''),
+      index: assistantIndex,
+      conversationId: currentConversationStorage.value?.conversationId || '',
+      modelTag: getCurrentAssistantDisplayName() || '',
+      reasoning: typeof last?.reasoning_content === 'string'
+          ? last.reasoning_content.slice(0, 8000)
+          : '',
+      ...(tools && tools.length ? { toolCalls: tools } : {}),
+      ...(update ? { update: true } : {}),
+      startTime: Number(last?.startTime) || Number(last?.timestamp) || 0,
+      endTime: Number(last?.endTime) || 0,
+      ...(relayTokens ? { tokens: relayTokens } : {})
+    },
+    ...(relayChoice ? { __relayChoice: relayChoice } : {})
+  };
+  // ⚠️ 必须转成纯对象再发：questions/toolCalls 是 Vue 响应式 Proxy，
+  // 直接走 IPC 会抛 "An object could not be cloned"。
+  try {
+    return JSON.parse(JSON.stringify(extra));
+  } catch (err) {
+    relayWarn('[relay] extra serialize failed:', err);
+    return {};
+  }
 };
 
 /** 收到手机消息时，记下"本轮回复要回传给谁" */
@@ -10886,6 +10927,40 @@ const scheduleRelayRetry = () => {
   }, 1500);
 };
 
+// 工具调用「执行中/等待」的实时同步：不等整轮跑完就先把状态推给手机，
+// 手机端显示转圈；节流避免刷屏。
+let relayLiveToolSig = '';
+let relayLiveToolAt = 0;
+const pushLiveToolStatus = async () => {
+  const to = relayReplyTarget.value;
+  if (!to || !loading.value) return;
+  const list = chat_show.value;
+  const last = list[list.length - 1];
+  if (!last || last.role !== 'assistant') return;
+  if (!Array.isArray(last.tool_calls) || !last.tool_calls.length) return;
+  const waitingUser = last.tool_calls.some(
+    (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
+  );
+  // 等用户交互时走正常下发（带选项），这里不重复推
+  if (waitingUser) return;
+  const sig = `${last.id}#${relayToolSignature(last)}`;
+  if (sig === relayLiveToolSig) return;
+  const now = Date.now();
+  if (now - relayLiveToolAt < 700) return;
+  relayLiveToolSig = sig;
+  relayLiveToolAt = now;
+  try {
+    const extra = buildAssistantExtra(last, list.length - 1, {
+      tools: relayToolCallsPayload(last),
+      update: true
+    });
+    await window.api.sendRelayChat({ text: relayMessageText(last), to, extra });
+    relayLog('[relay] live tool status pushed');
+  } catch (err) {
+    relayWarn('[relay] live tool status failed:', err);
+  }
+};
+
 const flushRelayReplies = async () => {
   const to = relayReplyTarget.value;
   if (!to) return;
@@ -10912,8 +10987,10 @@ const flushRelayReplies = async () => {
     const id = String(m.id ?? '');
     if (!id || relaySentAssistantIds.has(id)) return;
     const t = relayMessageText(m).trim();
-    if (!t) return;
-    pending.push({ m, idx, id, text: t });
+    const tools = relayToolCallsPayload(m);
+    // 正文为空但有工具调用（纯工具轮次）也要下发，否则手机看不到
+    if (!t && !tools.length) return;
+    pending.push({ m, idx, id, text: t, tools });
   });
   if (!pending.length) {
     // 兜底：本轮已跑完，却没有任何可发送的 assistant 文本（例如 AI 返回空回复）。
@@ -10931,16 +11008,7 @@ const flushRelayReplies = async () => {
           await window.api.sendRelayChat({
             text: placeholder,
             to,
-            extra: {
-              __relayAssistantMeta: {
-                messageId: lastId,
-                index: chat_show.value.length - 1,
-                conversationId: currentConversationStorage.value?.conversationId || '',
-                modelTag: getCurrentAssistantDisplayName() || '',
-                startTime: Number(lastMsg.startTime) || 0,
-                endTime: Number(lastMsg.endTime) || 0
-              }
-            }
+            extra: buildAssistantExtra(lastMsg, chat_show.value.length - 1)
           });
           relaySentAssistantIds.add(lastId);
           relayLastSentAssistantId = lastId;
@@ -10970,63 +11038,7 @@ const flushRelayReplies = async () => {
 
   for (const item of pending) {
     const { m: last, idx: assistantIndex, id: mid, text } = item;
-    // 若这条消息正在等用户选择（ask_user_choice），把选项结构化传给手机，
-    // 手机气泡下可以直接渲染可点选的选项按钮（提交走 choiceSubmit 命令）。
-    let relayChoice = null;
-    if (Array.isArray(last.tool_calls)) {
-      const pendingChoice = last.tool_calls.find(
-        (tc) =>
-          tc &&
-          tc.approvalStatus === 'choosing' &&
-          tc.choiceData &&
-          Array.isArray(tc.choiceData.questions) &&
-          tc.choiceData.questions.length > 0
-      );
-      if (pendingChoice) {
-        relayChoice = {
-          toolCallId: String(pendingChoice.id ?? ''),
-          questions: pendingChoice.choiceData.questions
-        };
-      }
-    }
-    // 消息元数据：时间 / 耗时 / token，让手机气泡和电脑端显示一致。
-    const tokenUsage = last.tokenUsage && typeof last.tokenUsage === 'object' ? last.tokenUsage : null;
-    const startTime = Number(last.startTime) || Number(last.timestamp) || 0;
-    const endTime = Number(last.endTime) || 0;
-    const relayTokens = tokenUsage
-      ? {
-          prompt: Number(tokenUsage.prompt_tokens) || 0,
-          completion: Number(tokenUsage.completion_tokens) || 0,
-          reasoning: Number(tokenUsage.reasoning_tokens) || 0,
-          total: Number(tokenUsage.total_tokens) || 0
-        }
-      : null;
-
-    const extra = {
-      __relayAssistantMeta: {
-        messageId: mid,
-        index: assistantIndex,
-        conversationId: currentConversationStorage.value?.conversationId || '',
-        modelTag: getCurrentAssistantDisplayName() || '',
-        reasoning: typeof last.reasoning_content === 'string'
-            ? last.reasoning_content.slice(0, 8000)
-            : '',
-        startTime,
-        endTime,
-        ...(relayTokens ? { tokens: relayTokens } : {})
-      },
-      ...(relayChoice ? { __relayChoice: relayChoice } : {})
-    };
-    // ⚠️ 必须转成纯对象再发：relayChoice.questions 是 Vue 响应式 Proxy，
-    // 直接走 IPC 会抛 "An object could not be cloned"。
-    let plainExtra;
-    try {
-      plainExtra = JSON.parse(JSON.stringify(extra));
-    } catch (err) {
-      relayWarn('[relay] extra serialize failed:', err);
-      plainExtra = {};
-    }
-
+    const plainExtra = buildAssistantExtra(last, assistantIndex, { tools: item.tools });
     relayLog('[relay] replying to phone. to =', to, 'idx =', assistantIndex, 'len =', text.length);
     try {
       await window.api.sendRelayChat({ text, to, extra: plainExtra });
@@ -11043,6 +11055,7 @@ const flushRelayReplies = async () => {
   }
 
   relayRetryCount = 0;
+  relayLiveToolSig = '';
   // 只有队列里没有别的手机消息在等，才解绑回传目标
   settleRelayReply();
 };
@@ -11071,6 +11084,8 @@ watch(
     return `${loadingFlag}#${tail}`;
   },
   () => {
+    // 工具状态实时推送（流式中途也要发，手机才能看到转圈）
+    pushLiveToolStatus().catch((err) => relayWarn('[relay] live tool push failed:', err));
     // 统一走 flushRelayReplies（发送失败后的重试也复用它）
     flushRelayReplies().catch((err) => relayWarn('[relay] flush replies failed:', err));
   }
