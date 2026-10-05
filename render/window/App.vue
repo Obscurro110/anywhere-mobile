@@ -10849,6 +10849,27 @@ window.api?.onWindowEvent?.((env) => {
 //     发不出去 → 手机永远停在「电脑端正在处理…」。现在统一 JSON 深拷贝成纯对象；
 //  3) 失败后不重试 → 永久卡住。现在带上有限次重试。
 // ---------------------------------------------------------------------------
+// 廉价的消息变更签名：只读 content 文本长度 + 工具状态，不做 JSON 序列化。
+// 以前 watch 源对**每条** assistant 消息都跑 relayMessageText（含 tool args 的
+// JSON.stringify），流式输出每来一个 token 就把整段历史序列化一遍，长会话会卡。
+const relayMessageSignature = (m) => {
+  let textLen = 0;
+  if (typeof m?.content === 'string') {
+    textLen = m.content.length;
+  } else if (Array.isArray(m?.content)) {
+    for (const part of m.content) {
+      if (part && part.type === 'text') textLen += String(part.text || '').length;
+    }
+  }
+  let toolSig = '';
+  if (Array.isArray(m?.tool_calls)) {
+    toolSig = m.tool_calls
+      .map((tc) => `${tc?.id || ''}:${tc?.approvalStatus || ''}:${tc?.result ? 1 : 0}:${tc?.choiceData ? 1 : 0}`)
+      .join(',');
+  }
+  return `${m.id}:${m.isPreparing ? 1 : 0}:${m.status || ''}:${textLen}:${toolSig}`;
+};
+
 let relayRetryTimer = null;
 let relayRetryCount = 0;
 
@@ -10894,7 +10915,45 @@ const flushRelayReplies = async () => {
     if (!t) return;
     pending.push({ m, idx, id, text: t });
   });
-  if (!pending.length) return;
+  if (!pending.length) {
+    // 兜底：本轮已跑完，却没有任何可发送的 assistant 文本（例如 AI 返回空回复）。
+    // 手机端靠「收到 assistant 消息」清掉处理中气泡，什么都不发就会一直转圈。
+    if (!loading.value && relayPendingPhoneReplies > 0) {
+      const lastMsg = chat_show.value[chat_show.value.length - 1];
+      const lastId = String(lastMsg?.id ?? '');
+      const complete = lastMsg?.role === 'assistant' &&
+        lastMsg.isPreparing !== true &&
+        lastMsg.status !== 'preparing' &&
+        lastMsg.status !== 'compacting';
+      if (lastId && complete && !relaySentAssistantIds.has(lastId)) {
+        const placeholder = '（本轮没有可显示的文本回复）';
+        try {
+          await window.api.sendRelayChat({
+            text: placeholder,
+            to,
+            extra: {
+              __relayAssistantMeta: {
+                messageId: lastId,
+                index: chat_show.value.length - 1,
+                conversationId: currentConversationStorage.value?.conversationId || '',
+                modelTag: getCurrentAssistantDisplayName() || '',
+                startTime: Number(lastMsg.startTime) || 0,
+                endTime: Number(lastMsg.endTime) || 0
+              }
+            }
+          });
+          relaySentAssistantIds.add(lastId);
+          relayLastSentAssistantId = lastId;
+          relayLog('[relay] empty reply -> placeholder sent');
+          settleRelayReply();
+        } catch (err) {
+          relayWarn('[relay] placeholder send failed:', err);
+          scheduleRelayRetry();
+        }
+      }
+    }
+    return;
+  }
 
   // 已发送 id 集合的修剪：只丢弃「已不在 chat_show 里」的 id。
   // ⚠️ 绝不能整体 clear() —— 那会让下一轮把所有历史消息当"没发过"重发一遍，
@@ -10949,6 +11008,9 @@ const flushRelayReplies = async () => {
         index: assistantIndex,
         conversationId: currentConversationStorage.value?.conversationId || '',
         modelTag: getCurrentAssistantDisplayName() || '',
+        reasoning: typeof last.reasoning_content === 'string'
+            ? last.reasoning_content.slice(0, 8000)
+            : '',
         startTime,
         endTime,
         ...(relayTokens ? { tokens: relayTokens } : {})
@@ -10993,12 +11055,18 @@ watch(
     // ⚠️ 必须把 loading 也纳入依赖：AI 整轮处理中/结束时 loading 会翻转，
     // 但 chat_show 不一定同时变化；只监听 chat_show 会漏掉"最终回答"。
     const loadingFlag = loading.value ? 1 : 0;
+    // 只要最近 ~8 条算完整签名；更早的用廉价签名即可。
+    // flushRelayReplies 发送时一律按「未发送全集」取，所以触发信号少算一点
+    // 不会漏消息：loading 翻转为 0 本身就是一个稳定触发器。
+    const KEEP_SIGNATURE = 8;
     const tail = chat_show.value
-      .map((m) =>
-        m?.role === 'assistant'
-          ? `${m.id}:${m.isPreparing ? 1 : 0}:${m.status || ''}:${relayMessageText(m).length}`
-          : ''
-      )
+      .map((m, i) => {
+        if (!m || m.role !== 'assistant') return '';
+        if (i < chat_show.value.length - KEEP_SIGNATURE) {
+          return `${m.id}:${m.isPreparing ? 1 : 0}:${m.status || ''}`;
+        }
+        return relayMessageSignature(m);
+      })
       .join('|');
     return `${loadingFlag}#${tail}`;
   },
