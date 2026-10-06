@@ -234,10 +234,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..d0c030b
+index 0000000..e66cfb1
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2505 @@
+@@ -0,0 +1,2512 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1787,6 +1787,13 @@ index 0000000..d0c030b
 +          // 窗口刚建好，历史还在加载。等它 bootstrap 完成，
 +          // 否则 chat_show 还是空的 -> 窗口会回 message_not_found。
 +          await new Promise((r) => setTimeout(r, 1200))
++          // ⚠️ 这 1200ms 里窗口可能已被关闭/替换（用户手动关、或另一条消息
++          // 触发了切窗）。派发前必须重新确认它还活着，否则命令会发给已销毁
++          // 的窗口 —— 表现就是「重新回答 / 删除这条」点了没反应。
++          if (!isWindowAlive(targetWin)) {
++            rwarn('[relay] auto-opened window disappeared before dispatch; conv =', conversationId)
++            targetWin = null
++          }
 +        } else {
 +          rwarn('[relay] auto-open for message-action failed:', opened?.reason)
 +        }
