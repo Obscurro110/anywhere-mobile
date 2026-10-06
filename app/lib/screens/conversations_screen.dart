@@ -239,7 +239,7 @@ class _ConversationsPageState extends State<ConversationsPage> {
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  c.assistantName,
+                  '助手 · ${c.assistantName}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 10.5, color: Colors.amberAccent),
@@ -253,7 +253,7 @@ class _ConversationsPageState extends State<ConversationsPage> {
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  c.promptKey,
+                  '助手 · ${c.promptKey}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 10.5, color: Colors.white54),

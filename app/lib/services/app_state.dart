@@ -348,6 +348,25 @@ class AppState extends ChangeNotifier {
 
   void applyPrompt(String? key, {bool fromUser = true}) {
     if (fromUser) _promptTouchedByUser = true;
+
+    // ⚠️⚠️ 关键规则：**助手属于「会话」，不属于「参数」**。
+    //
+    // 在已经绑定某个电脑端会话的情况下换助手，必须**先解绑**（回到
+    // 「新会话」状态）—— 否则下一条消息仍然带着旧 conversationId，
+    // 电脑端会把新助手的预设（模型 / MCP / Skill）灌进**旧会话**，
+    // 而旧会话自己的助手并不会变 —— 于是出现
+    // 「这个会话的助手是 A，参数却是 B 的」这种不伦不类的状态，
+    // 也就是用户说的「会话和助手绑定不严格 / 会错乱」。
+    //
+    // 正确语义：**换助手 = 开新会话**。
+    if (fromUser && _activeConversationId != null) {
+      final changed = (key ?? '') != (options.promptKey ?? '');
+      if (changed) {
+        _leftConversationManually = true; // 阻止电脑端把会话 id 自动绑回来
+        _setActiveConversation(null, '');
+      }
+    }
+
     if (key == null || key.isEmpty) {
       options = options.copyWith(clearPromptKey: true);
       notifyListeners();
@@ -367,6 +386,11 @@ class AppState extends ChangeNotifier {
       mcp: (p != null && p.mcp.isNotEmpty) ? p.mcp : options.mcp,
       skills: (p != null && p.skills.isNotEmpty) ? p.skills : options.skills,
     );
+    // 打开会话时是「先 setActiveConversation，再 applyPrompt(会话自带助手)」，
+    // 所以这里要补一次持久化，否则存进磁盘的还是切换前的助手。
+    if (_activeConversationId != null) {
+      unawaited(_persistActiveConversation());
+    }
     notifyListeners();
   }
 
@@ -1860,6 +1884,15 @@ class AppState extends ChangeNotifier {
     if (convId != null && convId.isNotEmpty) {
       _activeConversationId = convId;
       _activeConversationTitle = p.getString('active_conversation_title') ?? '';
+      // ⚠️ 助手跟着会话一起恢复：会话的助手是这个会话自己的属性，
+      // 不恢复的话重启后手机显示的助手会空掉或被电脑端默认助手顶掉 ——
+      // 用户看到的就是「会话和助手对不上」。
+      final pk = p.getString('active_conversation_prompt');
+      if (pk != null && pk.isNotEmpty) {
+        options = options.copyWith(promptKey: pk);
+        // 视为「用户已选定」，避免 _adoptDesktopPrompt 用电脑端默认助手覆盖它
+        _promptTouchedByUser = true;
+      }
     }
 
     await _switchHistoryTo(_activeConversationId);
@@ -1881,9 +1914,19 @@ class AppState extends ChangeNotifier {
     if (id == null || id.isEmpty) {
       await p.remove('active_conversation_id');
       await p.remove('active_conversation_title');
+      await p.remove('active_conversation_prompt');
     } else {
       await p.setString('active_conversation_id', id);
       await p.setString('active_conversation_title', _activeConversationTitle);
+      // ⚠️ 助手必须跟着会话一起存：以前只存 id/title，重启后手机不知道
+      // 当前会话用的是哪个助手 —— 要么显示空助手、要么被电脑端默认助手
+      // 顶掉，看起来就是「会话和助手对不上」。
+      final pk = options.promptKey;
+      if (pk == null || pk.isEmpty) {
+        await p.remove('active_conversation_prompt');
+      } else {
+        await p.setString('active_conversation_prompt', pk);
+      }
     }
   }
 

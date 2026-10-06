@@ -239,6 +239,8 @@ class ConversationOptionsBar extends StatelessWidget {
       _needCapabilities(context, state);
       return;
     }
+    // 切换前是否已经绑定着某个电脑端会话 —— 决定提示语要不要说明「会开新会话」
+    final boundBefore = state.activeConversationId;
     _singleSheet<String?>(
       context,
       title: '选择快捷助手',
@@ -257,14 +259,23 @@ class ConversationOptionsBar extends StatelessWidget {
       ],
       current: state.options.promptKey,
       onPicked: (v) {
-        final applied = state.activePrompt;
         state.applyPrompt(v);
+        // ⚠️ 必须在 applyPrompt **之后**再取 activePrompt：以前是先取后切，
+        // 提示里显示的是**上一个**助手的预设摘要（张冠李戴）。
+        final applied = state.activePrompt;
         if (!context.mounted) return;
-        final msg = v == null
-            ? '已切回电脑端默认助手（下一条消息起生效）'
-            : applied != null && applied.hasPreset
-                ? '已切换到「${applied.label}」，并套用其预设：${applied.presetSummary}'
-                : '已切换到「$v」（下一条消息会开新会话）';
+        final label = v == null ? '电脑端默认助手' : (applied?.label ?? v);
+        final String msg;
+        if (boundBefore != null) {
+          // 规则：助手属于会话，换助手 = 开新会话，不去改当前已打开的会话
+          msg = '已切到「$label」并退出当前会话：下一条消息会用它开一个新会话';
+        } else if (v == null) {
+          msg = '已切回电脑端默认助手（下一条消息起生效）';
+        } else if (applied != null && applied.hasPreset) {
+          msg = '已切换到「$label」，并套用其预设：${applied.presetSummary}';
+        } else {
+          msg = '已切换到「$label」（下一条消息会开新会话）';
+        }
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(msg),
           duration: const Duration(seconds: 2),

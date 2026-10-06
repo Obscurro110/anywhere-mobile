@@ -191,6 +191,8 @@ class _HomeShellState extends State<HomeShell> {
         children: [
           // 电脑端正在生成时发的消息会进「缓冲区」，这里明确告诉用户没丢
           _BufferBanner(),
+          // 「当前会话 + 助手」绑定条：让「我在哪个会话、用的哪个助手」一眼可见
+          _ConversationBindingBar(),
           Expanded(child: ChatScreen()),
         ],
       ),
@@ -461,7 +463,12 @@ class _SessionSheetState extends State<_SessionSheet> {
     }
     rows.add(const SizedBox(height: 8));
 
-    return ListView(shrinkWrap: true, children: rows);
+    return ListView(
+      shrinkWrap: true,
+      // 会话现在是卡片，左右要留白，否则卡片会贴边显得像一条条色块
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      children: rows,
+    );
   }
 
   Widget _projectHeader(String name, int count, {bool muted = false}) {
@@ -490,26 +497,82 @@ class _SessionSheetState extends State<_SessionSheet> {
 
   Widget _tile(BuildContext context, AppState state, ConversationOption c) {
     final isActive = c.id == state.activeConversationId;
-    return ListTile(
-      dense: true,
-      leading: Icon(
-        isActive ? Icons.chat_bubble : Icons.chat_bubble_outline,
-        size: 20,
-        color: isActive ? Colors.lightBlueAccent : Colors.white38,
+    // ⚠️ 以前是 dense ListTile 直接摞在一起，没有外边距也没有分隔线：
+    // 相邻会话挨得太近，看起来像一坨，分不清「哪一行属于哪个会话」，
+    // 助手/时间这些小字又挤在一起。现在每个会话一张卡片 + 明确间隔。
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: isActive ? const Color(0xFF1D2A3A) : const Color(0xFF1B1F2B),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isActive ? Colors.lightBlueAccent.withAlpha(140) : const Color(0xFF2A3040),
+        ),
       ),
-      title: Text(
-        c.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+      child: ListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.fromLTRB(12, 2, 8, 2),
+        leading: Icon(
+          isActive ? Icons.chat_bubble : Icons.chat_bubble_outline,
+          size: 20,
+          color: isActive ? Colors.lightBlueAccent : Colors.white38,
+        ),
+        title: Text(
+          c.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (c.updatedLabel.isNotEmpty)
+                Text(c.updatedLabel,
+                    style: const TextStyle(fontSize: 10.5, color: Colors.white38)),
+              // 助手：会话的核心属性，用醒目的标签单独标出来
+              if (c.assistantName.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF262C3D),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '助手 · ${c.assistantName}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10.5, color: Colors.amberAccent),
+                  ),
+                )
+              else if (c.promptKey.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF262C3D),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '助手 · ${c.promptKey}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10.5, color: Colors.white54),
+                  ),
+                ),
+              if (isActive)
+                const Text('对话中',
+                    style: TextStyle(fontSize: 10.5, color: Colors.lightBlueAccent)),
+            ],
+          ),
+        ),
+        trailing: isActive
+            ? const Icon(Icons.check_circle, size: 18, color: Colors.lightBlueAccent)
+            : null,
+        onTap: () => _open(context, state, c),
       ),
-      subtitle: c.assistantName.isNotEmpty
-          ? Text('助手：${c.assistantName}',
-              style: const TextStyle(fontSize: 11, color: Colors.amberAccent))
-          : null,
-      trailing: isActive
-          ? const Icon(Icons.check, size: 18, color: Colors.lightBlueAccent)
-          : null,
-      onTap: () => _open(context, state, c),
     );
   }
 
@@ -596,6 +659,88 @@ class _BufferBanner extends StatelessWidget {
               const Icon(Icons.close, size: 16, color: Colors.white38),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 「当前会话 ↔ 助手」绑定条。
+///
+/// 用户反馈「会话和助手绑定不严格」—— 根子之一是**看不出来**：
+/// 聊天页只有消息列表，没有地方告诉你「现在挂在哪个会话上、
+/// 这个会话用的是哪个助手」。这里把绑定关系显式画出来；
+/// 没绑定时明确写「下一条消息会创建新会话」。
+class _ConversationBindingBar extends StatelessWidget {
+  const _ConversationBindingBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final convId = state.activeConversationId;
+    final inConv = convId != null && convId.isNotEmpty;
+    final title = state.activeConversationTitle;
+    final prompt = state.activePrompt;
+    final key = state.options.promptKey ?? '';
+    final promptLabel = prompt != null
+        ? prompt.label
+        : (key.isEmpty ? '默认（跟随电脑端）' : key);
+
+    return Material(
+      color: const Color(0xFF141821),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+        child: Row(
+          children: [
+            Icon(inConv ? Icons.link : Icons.add_circle_outline,
+                size: 15,
+                color: inConv ? Colors.lightBlueAccent : Colors.white38),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                inConv ? '会话：${title.isEmpty ? convId : title}' : '新会话（下一条消息创建）',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 11.5,
+                    color: inConv ? Colors.lightBlueAccent : Colors.white54),
+              ),
+            ),
+            // 助手标签：当前生效的助手
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF262C3D),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.auto_awesome,
+                      size: 11, color: Colors.amberAccent),
+                  const SizedBox(width: 4),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 110),
+                    child: Text(promptLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 10.5, color: Colors.amberAccent)),
+                  ),
+                ],
+              ),
+            ),
+            if (inConv)
+              IconButton(
+                tooltip: '退出会话（回到新会话）',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                icon: const Icon(Icons.link_off, size: 15, color: Colors.white38),
+                onPressed: () =>
+                    context.read<AppState>().leaveDesktopConversation(),
+              ),
+          ],
         ),
       ),
     );
