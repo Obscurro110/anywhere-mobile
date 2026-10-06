@@ -419,46 +419,97 @@ class _SessionSheetState extends State<_SessionSheet> {
                               style: TextStyle(
                                   fontSize: 12, color: Colors.white38)),
                         )
-                      : ListView(
-                          shrinkWrap: true,
-                          children: [
-                            for (final c in state.conversations)
-                              ListTile(
-                                dense: true,
-                                leading: Icon(
-                                  c.id == state.activeConversationId
-                                      ? Icons.chat_bubble
-                                      : Icons.chat_bubble_outline,
-                                  size: 20,
-                                  color: c.id == state.activeConversationId
-                                      ? Colors.lightBlueAccent
-                                      : Colors.white38,
-                                ),
-                                title: Text(
-                                  c.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: c.assistantName.isNotEmpty
-                                    ? Text('助手：${c.assistantName}',
-                                        style: const TextStyle(
-                                            fontSize: 11,
-                                            color: Colors.amberAccent))
-                                    : null,
-                                trailing: c.id == state.activeConversationId
-                                    ? const Icon(Icons.check,
-                                        size: 18,
-                                        color: Colors.lightBlueAccent)
-                                    : null,
-                                onTap: () => _open(context, state, c),
-                              ),
-                            const SizedBox(height: 8),
-                          ],
-                        ),
+                      : _buildGroupedList(context, state),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  /// 第二级会话列表：按「项目」分组（复用电脑端 projects 顺序，其余归「未归类」），
+  /// 与「电脑端对话」列表页（ConversationsPage）一致，避免项目层级在两级胶囊里丢失。
+  Widget _buildGroupedList(BuildContext context, AppState state) {
+    final grouped = <String, List<ConversationOption>>{};
+    for (final p in state.conversationProjects) {
+      grouped[p] = [];
+    }
+    final ungrouped = <ConversationOption>[];
+    for (final c in state.conversations) {
+      if (c.projectName.isNotEmpty && grouped.containsKey(c.projectName)) {
+        grouped[c.projectName]!.add(c);
+      } else if (c.projectName.isNotEmpty) {
+        grouped.putIfAbsent(c.projectName, () => []).add(c);
+      } else {
+        ungrouped.add(c);
+      }
+    }
+    grouped.removeWhere((_, v) => v.isEmpty);
+
+    final rows = <Widget>[];
+    for (final entry in grouped.entries) {
+      rows.add(_projectHeader(entry.key, entry.value.length));
+      for (final c in entry.value) {
+        rows.add(_tile(context, state, c));
+      }
+    }
+    if (ungrouped.isNotEmpty) {
+      rows.add(_projectHeader('未归类', ungrouped.length, muted: true));
+      for (final c in ungrouped) {
+        rows.add(_tile(context, state, c));
+      }
+    }
+    rows.add(const SizedBox(height: 8));
+
+    return ListView(shrinkWrap: true, children: rows);
+  }
+
+  Widget _projectHeader(String name, int count, {bool muted = false}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 14, 6, 6),
+      child: Row(
+        children: [
+          Icon(Icons.folder_outlined,
+              size: 14, color: muted ? Colors.white24 : Colors.amberAccent),
+          const SizedBox(width: 6),
+          Text(
+            name,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: muted ? Colors.white38 : Colors.white70,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text('$count',
+              style: const TextStyle(fontSize: 11, color: Colors.white24)),
+        ],
+      ),
+    );
+  }
+
+  Widget _tile(BuildContext context, AppState state, ConversationOption c) {
+    final isActive = c.id == state.activeConversationId;
+    return ListTile(
+      dense: true,
+      leading: Icon(
+        isActive ? Icons.chat_bubble : Icons.chat_bubble_outline,
+        size: 20,
+        color: isActive ? Colors.lightBlueAccent : Colors.white38,
+      ),
+      title: Text(
+        c.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: c.assistantName.isNotEmpty
+          ? Text('助手：${c.assistantName}',
+              style: const TextStyle(fontSize: 11, color: Colors.amberAccent))
+          : null,
+      trailing: isActive
+          ? const Icon(Icons.check, size: 18, color: Colors.lightBlueAccent)
+          : null,
+      onTap: () => _open(context, state, c),
     );
   }
 

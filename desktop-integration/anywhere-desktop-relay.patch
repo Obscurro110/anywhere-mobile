@@ -150,10 +150,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..29cec8c
+index 0000000..f0cb5b3
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2374 @@
+@@ -0,0 +1,2375 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1412,6 +1412,7 @@ index 0000000..29cec8c
 +      relay?.sendChat(
 +        JSON.stringify({
 +          __relayConversations: res.conversations || [],
++          projects: res.projects || [],
 +          ok: res.ok,
 +          reason: res.reason || '',
 +          dirPath: res.dirPath || ''
@@ -2859,7 +2860,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..5ff08fa
+index 0000000..7d2b499
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2871,8 +2872,8 @@ index 0000000..5ff08fa
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.13';
-+export const RELAY_VERSION_CODE = 33;
++export const RELAY_VERSION = '1.7.14';
++export const RELAY_VERSION_CODE = 34;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
