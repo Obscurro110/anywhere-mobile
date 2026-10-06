@@ -362,7 +362,12 @@ class AppState extends ChangeNotifier {
     if (fromUser && _activeConversationId != null) {
       final changed = (key ?? '') != (options.promptKey ?? '');
       if (changed) {
-        _leftConversationManually = true; // 阻止电脑端把会话 id 自动绑回来
+        // ⚠️ 这里只解绑，**不能**设 _leftConversationManually：
+        // 发出去的消息会在电脑端开一个新会话，回传的 user-message-meta
+        // 需要能把手机绑到**新会话**上；一旦标记"用户主动退出"，
+        // _bindActiveConversationSilently 会拒绝绑定 → 每轮都开新会话，
+        // 永远接不上。解绑本身已足够（_activeConversationId 为 null 时
+        // 就不会再被旧会话的迟到响应命中）。
         _setActiveConversation(null, '');
       }
     }
