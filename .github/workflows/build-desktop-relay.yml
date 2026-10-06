@@ -56,7 +56,10 @@ jobs:
           }
           Set-Location upstream
           git log --oneline -1
-          Write-Host "UPSTREAM_SHA=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_ENV
+          # ⚠️ 必须直接输出字符串，不能用 Write-Host —— Write-Host 写的是
+          # PowerShell 的「信息流」，**不会**被 >> 重定向到文件，导致
+          # $env:GITHUB_ENV 根本没写入、后续 step 的 UPSTREAM_SHA 全是空。
+          "UPSTREAM_SHA=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_ENV
 
       - name: 应用互通补丁
         shell: pwsh

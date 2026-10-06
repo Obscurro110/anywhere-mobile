@@ -1756,10 +1756,47 @@ class AppState extends ChangeNotifier {
     final dir = await getApplicationDocumentsDirectory();
     final saveDir = Directory('${dir.path}/AnywhereDownloads');
     if (!await saveDir.exists()) await saveDir.create(recursive: true);
-    final path = '${saveDir.path}/${meta.name}';
+    // ⚠️ 文件名来自电脑端，绝不能直接拼进路径：
+    //   · `../..` 之类可以写到 AnywhereDownloads 之外（路径穿越）；
+    //   · 含 `/` `\` `:` 等字符在 Windows 上会直接抛异常；
+    //   · 同名文件直接覆盖会悄悄丢掉上一次下载的内容。
+    final safeName = _sanitizeFileName(meta.name);
+    final path = _uniqueFilePath(saveDir.path, safeName);
     final f = await _client.downloadFile(meta.id, path);
     notifyListeners();
     return f;
+  }
+
+  /// 把来自外部的文件名收敛成一个安全的单层文件名。
+  static String _sanitizeFileName(String? raw) {
+    var name = (raw ?? '').trim();
+    // 只取最后一段，砍掉任何目录部分
+    name = name.split(RegExp(r'[\\/]+')).last;
+    // 去掉 Windows 非法字符与控制字符
+    name = name.replaceAll(RegExp(r'[<>:"|?*\x00-\x1f]'), '_');
+    // '.' / '..' 之类无意义名字兜底
+    if (name.isEmpty || name == '.' || name == '..') name = 'download';
+    // 过长的文件名（含扩展名）做截断，避免超出文件系统上限
+    if (name.length > 120) {
+      final dot = name.lastIndexOf('.');
+      final ext = (dot > 0 && name.length - dot <= 10) ? name.substring(dot) : '';
+      name = '${name.substring(0, 120 - ext.length)}$ext';
+    }
+    return name;
+  }
+
+  /// 在 [dirPath] 下找一个不冲突的路径：同名时追加 ` (1)`、` (2)`…
+  static String _uniqueFilePath(String dirPath, String fileName) {
+    var candidate = '$dirPath${Platform.pathSeparator}$fileName';
+    if (!File(candidate).existsSync()) return candidate;
+    final dot = fileName.lastIndexOf('.');
+    final stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+    final ext = dot > 0 ? fileName.substring(dot) : '';
+    for (var i = 1; i < 1000; i++) {
+      candidate = '$dirPath${Platform.pathSeparator}$stem ($i)$ext';
+      if (!File(candidate).existsSync()) return candidate;
+    }
+    return '$dirPath${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_$fileName';
   }
 
   // ---- persistence ----
