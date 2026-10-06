@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
@@ -120,6 +121,25 @@ class UpdateService {
     }
     final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
     final tag = (j['tag_name'] as String?) ?? '';
+
+    // 2a) 优先读该 Release 上的 version.json —— 里面有 sha256，
+    //     缺了它下载会被安全校验拒绝（见 download()）。
+    if (tag.isNotEmpty) {
+      try {
+        final vj = await http
+            .get(Uri.parse(
+                'https://github.com/$owner/$repo/releases/download/$tag/version.json'))
+            .timeout(_timeout);
+        if (vj.statusCode == 200) {
+          final info = ReleaseInfo.fromJson(
+              jsonDecode(utf8.decode(vj.bodyBytes)) as Map<String, dynamic>);
+          if (info.versionName.isNotEmpty) return info;
+        }
+      } catch (e) {
+        debugPrint('[UpdateService] fallback version.json failed: $e');
+      }
+    }
+
     final assets = (j['assets'] as List?) ?? [];
     String url = '';
     int size = 0;
@@ -211,7 +231,38 @@ class UpdateService {
     } finally {
       await sink.close();
     }
+
+    // ⚠️ 安全：必须校验 sha256。
+    // 否则中继/GitHub 账号/镜像任一被攻破，都能下发一个被篡改的 APK，
+    // 而本应用会直接把它交给系统安装器 —— 等于手机端远程代码执行。
+    // sha256 由 CI 生成并随 Release 一起发布；这里为空时退化为「拒绝安装」，
+    // 宁可用不了也不装来路不明的包。
+    if (info.sha256.isEmpty) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw Exception('安装包缺少 sha256 校验值，已拒绝下载（请更新到带校验的版本）');
+    }
+    final actual = await _sha256OfFile(file);
+    if (actual.toLowerCase() != info.sha256.trim().toLowerCase()) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw Exception('安装包校验失败（可能被篡改），已删除。期望 ${info.sha256}，实际 $actual');
+    }
+
     return file;
+  }
+
+  /// 流式计算文件 sha256（避免把整个 APK 读进内存）。
+  static Future<String> _sha256OfFile(File file) async {
+    final sink = _DigestAccumulator();
+    final input = sha256.startChunkedConversion(sink);
+    await for (final chunk in file.openRead()) {
+      input.add(chunk);
+    }
+    input.close();
+    return sink.value.toString();
   }
 
   /// 唤起系统安装器。
@@ -227,4 +278,16 @@ class UpdateService {
       );
     }
   }
+}
+
+/// 只收集最后一个 Digest 的 Sink（避免额外引入 package:convert）。
+class _DigestAccumulator implements Sink<Digest> {
+  late Digest value;
+  @override
+  void add(Digest data) {
+    value = data;
+  }
+
+  @override
+  void close() {}
 }

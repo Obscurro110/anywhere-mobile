@@ -33,6 +33,8 @@ dependencies:
 
   # utils
   uuid: ^4.5.1
+  # 校验下载到的 APK 的 sha256（防止中继/镜像/账号被攻破后下发被篡改的安装包）
+  crypto: ^3.0.3
   # intl 版本交给 flutter_localizations 决定（两者必须匹配，否则运行时崩）。
   # DateFormat 的 API 在 0.19 / 0.20 完全一致，用 any 让 pub 解析到兼容版本。
   intl: any
