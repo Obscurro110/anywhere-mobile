@@ -91,6 +91,84 @@ index 4cb7363..ee61e97 100644
      })
    } finally { db.close() }
  }
+diff --git a/main/core/skill.js b/main/core/skill.js
+index 5449460..211ea39 100644
+--- a/main/core/skill.js
++++ b/main/core/skill.js
+@@ -287,11 +287,28 @@ export function listSkills(skillRootPath) {
+   return skills
+ }
+ 
++/**
++ * 把 skillId 安全地解析到 skillRootPath 之内，防止路径穿越。
++ *
++ * ⚠️ 安全：skillId 可能来自远端（手机端 relay 的 caps-edit / skill-save / skill-delete）。
++ * 以前直接用 path.join(skillRootPath, skillId)，传入 "../../foo" 就能读写/递归删除
++ * skill 目录之外的任意路径。现在强制解析后的绝对路径必须落在 skillRootPath 内，
++ * 否则抛错。
++ */
++function resolveSkillDirWithin(skillRootPath, skillId) {
++  const root = path.resolve(String(skillRootPath || ''))
++  const target = path.resolve(root, String(skillId ?? ''))
++  if (target !== root && !target.startsWith(root + path.sep)) {
++    throw new Error(`Invalid skill id: ${skillId}`)
++  }
++  return target
++}
++
+ /**
+  * 获取单个 Skill 详情
+  */
+ export function getSkillDetails(skillRootPath, skillId) {
+-  const skillDir = path.join(skillRootPath, skillId)
++  const skillDir = resolveSkillDirWithin(skillRootPath, skillId)
+   const skillMdPath = path.join(skillDir, 'SKILL.md')
+ 
+   if (!fs.existsSync(skillMdPath)) {
+@@ -547,7 +564,7 @@ export async function resolveSkillInvocation(skillRootPath, skillName, toolArgsO
+  * 保存/创建 Skill
+  */
+ export function saveSkill(skillRootPath, skillId, content) {
+-  const skillDir = path.join(skillRootPath, skillId)
++  const skillDir = resolveSkillDirWithin(skillRootPath, skillId)
+   if (!fs.existsSync(skillDir)) {
+     fs.mkdirSync(skillDir, { recursive: true })
+   }
+@@ -561,7 +578,12 @@ export function saveSkill(skillRootPath, skillId, content) {
+  * 删除 Skill
+  */
+ export function deleteSkill(skillRootPath, skillId) {
+-  const skillDir = path.join(skillRootPath, skillId)
++  let skillDir
++  try {
++    skillDir = resolveSkillDirWithin(skillRootPath, skillId)
++  } catch (_) {
++    return false
++  }
+   if (!fs.existsSync(skillDir)) {
+     return false
+   }
+@@ -660,7 +682,7 @@ function addSkillDirectoryToZip(zip, sourceDir, options = {}) {
+ export function exportSkillToPackage(skillRootPath, skillId, outputDir, options = {}) {
+   return new Promise((resolve, reject) => {
+     try {
+-      const skillDir = path.join(skillRootPath, skillId)
++      const skillDir = resolveSkillDirWithin(skillRootPath, skillId)
+       if (!fs.existsSync(skillDir)) {
+         reject(new Error(`Skill directory not found: ${skillDir}`))
+         return
+@@ -669,7 +691,10 @@ export function exportSkillToPackage(skillRootPath, skillId, outputDir, options
+       const zip = new AdmZip()
+       addSkillDirectoryToZip(zip, skillDir, options)
+ 
+-      const outputFilename = `${skillId}.skill`
++      // ⚠️ 安全：skillId 可能含 "../"，拼进文件名会写到 outputDir 之外。
++      // 用取 basename 的方式强制落到 outputDir 内。
++      const safeId = path.basename(String(skillId || '')).replace(/[\\/:*?"<>|]/g, '-') || 'skill'
++      const outputFilename = `${safeId}.skill`
+       const outputPath = path.join(outputDir, outputFilename)
+ 
+       zip.writeZip(outputPath)
 diff --git a/main/index.js b/main/index.js
 index f63f831..dda515c 100644
 --- a/main/index.js
@@ -150,10 +228,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..f0cb5b3
+index 0000000..ae85163
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2375 @@
+@@ -0,0 +1,2386 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -2013,6 +2091,17 @@ index 0000000..f0cb5b3
 +      if (op === 'skill-toggle' || op === 'skill-delete' || op === 'skill-save') {
 +        const id = String(body.id || '').trim()
 +        if (!id) return fail('id_required')
++        // ⚠️ 安全：id 来自手机，绝不允许路径分隔符 / 上跳，防止目录穿越
++        // （底层 getSkillDetails/deleteSkill/saveSkill 也已做 resolve 前缀校验，
++        //  这里是更早、更明确的一道防线）
++        if (
++          id.length > 64 ||
++          /[\/\\]/.test(id) ||
++          id.includes('..') ||
++          /[\u0000-\u001f]/.test(id)
++        ) {
++          return fail('id_invalid')
++        }
 +        const cfgRes = await (ctx?.dataApi?.getConfig?.() || Promise.resolve(null))
 +        const skillPath = cfgRes?.config?.skillPath || ''
 +        if (!skillPath) return fail('skill_dir_not_configured')
@@ -2860,7 +2949,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..7d2b499
+index 0000000..c5d301e
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -2872,8 +2961,8 @@ index 0000000..7d2b499
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.14';
-+export const RELAY_VERSION_CODE = 34;
++export const RELAY_VERSION = '1.7.15';
++export const RELAY_VERSION_CODE = 35;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3063,6 +3152,43 @@ index 71669d3..46c305c 100644
    onWindowEvent: (callback) => {
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
+diff --git a/render/main/App.vue b/render/main/App.vue
+index e3c6cea..393b671 100644
+--- a/render/main/App.vue
++++ b/render/main/App.vue
+@@ -732,7 +732,13 @@ const fetchAndParseDoc = async (filename) => {
+       return `![${alt}](${imgBaseUrl}${encodeURIComponent(imgFilename)})`;
+     });
+ 
+-    currentDocContent.value = marked.parse(text);
++    // ⚠️ 安全：文档内容来自远端（raw.githubusercontent / gitee），
++    // 用 marked 解析后若直接 v-html 渲染，一旦远端内容被篡改就是 XSS
++    // （配合 contextIsolation:false 可直接调用 window.api 特权通道）。
++    // 这里与 release notes 一样先过 DOMPurify 再落地。
++    currentDocContent.value = DOMPurify.sanitize(marked.parse(text), {
++      USE_PROFILES: { html: true },
++    });
+ 
+     // 等待 DOM 更新后，将滚动条回到顶部
+     nextTick(() => {
+diff --git a/render/main/components/Prompts.vue b/render/main/components/Prompts.vue
+index 7ded1c4..b72f44b 100644
+--- a/render/main/components/Prompts.vue
++++ b/render/main/components/Prompts.vue
+@@ -961,8 +961,11 @@ async function refreshPromptsConfig() {
+                   :title="t('prompts.deletePrompt')" />
+               </div>
+             </div>
+-            <div class="prompt-description-container" @click="prepareEditPrompt(item.key, activeTabName)"
+-              v-html="formatDescription(item.prompt)"></div>
++            <!-- ⚠️ 安全：description 是纯文本，绝不能用 v-html。
++                 prompt 字段可由手机端 relay（caps-edit/prompt-save）写入，
++                 用 v-html 会导致存储型 XSS。改用文本插值。 -->
++            <div class="prompt-description-container" @click="prepareEditPrompt(item.key, activeTabName)">{{
++              formatDescription(item.prompt) }}</div>
+           </div>
+         </div>
+       </div>
 diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
 index 2ad1391..28cb7e4 100644
 --- a/render/main/components/Setting.vue
