@@ -15,20 +15,24 @@ class RelaySettingsScreen extends StatefulWidget {
 }
 
 class _RelaySettingsScreenState extends State<RelaySettingsScreen> {
-  late TextEditingController _server;
-  late TextEditingController _token;
-  late TextEditingController _userId;
-  late TextEditingController _deviceName;
+  // ⚠️ 不用 late：一旦 initState 里 context.read<AppState>() 抛异常，
+  // 这四个字段就停留在「未初始化」，而 dispose() 里的 _server.dispose()
+  // 会抛 LateInitializationError —— 在 dispose 阶段抛异常会让框架报错。
+  // 直接给默认实例，永远可安全 dispose。
+  final TextEditingController _server = TextEditingController();
+  final TextEditingController _token = TextEditingController();
+  final TextEditingController _userId = TextEditingController();
+  final TextEditingController _deviceName = TextEditingController();
   bool _showToken = false;
 
   @override
   void initState() {
     super.initState();
     final c = context.read<AppState>().config;
-    _server = TextEditingController(text: c.serverUrl);
-    _token = TextEditingController(text: c.token);
-    _userId = TextEditingController(text: c.userId);
-    _deviceName = TextEditingController(text: c.deviceName);
+    _server.text = c.serverUrl;
+    _token.text = c.token;
+    _userId.text = c.userId;
+    _deviceName.text = c.deviceName;
   }
 
   @override

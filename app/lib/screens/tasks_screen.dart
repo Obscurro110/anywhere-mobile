@@ -417,30 +417,35 @@ class _TasksPageState extends State<TasksPage> {
   Future<String?> _askName(BuildContext context,
       {required String title, String initial = ''}) async {
     final ctrl = TextEditingController(text: initial);
-    final res = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: '例如：每天早上总结新闻',
-            helperText: '不能包含 \\ / : * ? " < > |',
-            helperMaxLines: 2,
+    String? res;
+    try {
+      res = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: '例如：每天早上总结新闻',
+              helperText: '不能包含 \\ / : * ? " < > |',
+              helperMaxLines: 2,
+            ),
           ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('确定'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('确定'),
-          ),
-        ],
-      ),
-    );
-    ctrl.dispose();
+      );
+    } finally {
+      // ⚠️ 用 finally：showDialog 抛异常时也要释放，否则控制器泄漏
+      ctrl.dispose();
+    }
     if (res == null || res.isEmpty) return null;
     if (RegExp(r'[\\/:*?"<>|]').hasMatch(res)) {
       if (context.mounted) {

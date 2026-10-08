@@ -75,22 +75,26 @@ async function handleHttp(req, res) {
       return json(res, 405, { ok: false, error: 'method_not_allowed' });
     }
     const token = url.searchParams.get('token');
-    if (!token || !isValidToken(token)) {
+    const user = token ? userForToken(tokens, token) : null;
+    if (!user) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
     }
-    return fileStore.serve(fileMatch[1], req, res);
+    // 传 user：只允许下载自己上传的文件（详见 fileStore.owns）
+    return fileStore.serve(fileMatch[1], req, res, user);
   }
 
   // upload a file (used for large files instead of ws chunks):
   // POST /upload?token=...&name=...  (raw body)
   if (url.pathname === '/upload' && req.method === 'POST') {
     const token = url.searchParams.get('token');
-    if (!token || !isValidToken(token)) {
+    const user = token ? userForToken(tokens, token) : null;
+    if (!user) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
     }
     const name = url.searchParams.get('name') || 'file.bin';
     try {
-      const meta = await fileStore.saveStream(req, name);
+      // 记录 owner，供下载时做归属校验
+      const meta = await fileStore.saveStream(req, name, undefined, user);
       return json(res, 200, { ok: true, file: meta });
     } catch (err) {
       // 不要把内部错误信息原样抛给客户端（可能暴露路径/实现细节）
@@ -102,11 +106,6 @@ async function handleHttp(req, res) {
   }
 
   return json(res, 404, { ok: false, error: 'not_found' });
-}
-
-// ⚠️ 时序安全：不要用 `v === t` 提前短路比较，否则能用响应耗时逐字节爆破 token。
-function isValidToken(t) {
-  return userForToken(tokens, t) !== null;
 }
 
 // 统一安全响应头（对公网服务尤其重要）

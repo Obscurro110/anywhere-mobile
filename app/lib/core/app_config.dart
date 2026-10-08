@@ -72,7 +72,16 @@ class AppConfig {
     } catch (_) {
       // 探测失败就用兜底名
     }
-    return Platform.isAndroid ? 'Android Device' : Platform.localHostname;
+    // ⚠️ 这一行在 try/catch **之外**：Platform.localHostname 在个别平台
+    // 会抛（无主机名/权限受限），一旦抛出会冒泡到 AppConfig.load → main()，
+    // 启动流程中断。这里再兜一层。
+    if (Platform.isAndroid) return 'Android Device';
+    try {
+      final host = Platform.localHostname;
+      return host.isNotEmpty ? host : 'Desktop';
+    } catch (_) {
+      return 'Desktop';
+    }
   }
 
   static Future<AppConfig> load(String deviceId) async {

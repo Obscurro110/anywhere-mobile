@@ -13,7 +13,7 @@
  *   allow:<正则>          命中即放行（白名单）
  *   # 注释行会被忽略
  */
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -80,7 +80,13 @@ for (const file of staged) {
 
   let content = ''
   try {
-    content = execSync(`git show :"${file}"`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    // ⚠️ 必须用 execFileSync（数组参数、不经 shell）：以前是
+    // execSync(`git show :"${file}"`)，文件名一旦包含引号 / $(…) / 反引号
+    // （git 允许这类文件名），提交时就会被 shell 解释执行 —— 命令注入。
+    content = execFileSync('git', ['show', `:${file}`], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
   } catch { continue }
 
   if (content.includes('\u0000')) continue // 二进制

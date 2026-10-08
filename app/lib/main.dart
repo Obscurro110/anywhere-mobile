@@ -10,11 +10,32 @@ import 'screens/home_shell.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final deviceId = const Uuid().v4();
-  final config = await AppConfig.load(deviceId);
+
+  // ⚠️ 初始化任何一步抛异常都必须兜住：以前这里是裸 await，只要
+  // AppConfig.load / state.init / loadAppVersion 里有一个抛（例如
+  // 读机型失败、SharedPreferences 打不开），runApp 就永远不执行 ——
+  // 用户看到的是**纯白屏**，且没有任何提示。
+  AppConfig? config;
+  try {
+    config = await AppConfig.load(deviceId);
+  } catch (e) {
+    debugPrint('[main] AppConfig.load failed: $e');
+    config = AppConfig.defaults(deviceId);
+  }
+
   final state = AppState(config);
-  await state.init();
-  // 版本号读一次，设置页状态卡要用
-  await state.loadAppVersion();
+  try {
+    await state.init();
+  } catch (e) {
+    debugPrint('[main] state.init failed: $e');
+  }
+  try {
+    // 版本号读一次，设置页状态卡要用
+    await state.loadAppVersion();
+  } catch (e) {
+    debugPrint('[main] loadAppVersion failed: $e');
+  }
+
   runApp(
     ChangeNotifierProvider<AppState>.value(
       value: state,

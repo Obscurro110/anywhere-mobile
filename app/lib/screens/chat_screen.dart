@@ -441,6 +441,53 @@ class _MarkdownText extends StatelessWidget {
       selectable: true,
       extensionSet: md.ExtensionSet.gitHubFlavored,
       styleSheet: _bubbleMarkdownStyle,
+      // ⚠️ 默认会把 ![](http://…) 渲染成 Image.network，也就是**手机直接去
+      // 请求任意远端地址** —— 谁给气泡里塞一条图片链接，谁就能拿到你的 IP、
+      // 判断你是否在线、做追踪像素。这里改成不联网：只显示一个占位块，
+      // 把地址（截断）显示出来，需要看图时用户自己决定。
+      imageBuilder: (uri, title, alt) => _blockedImage(context, uri, alt),
+    );
+  }
+
+  /// 被屏蔽的远端图片占位（不发起任何网络请求）。
+  Widget _blockedImage(BuildContext context, Uri uri, String? alt) {
+    final shown = uri.toString();
+    final brief = shown.length > 60 ? '${shown.substring(0, 60)}…' : shown;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1B1F2B),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF2A3040)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.image_not_supported_outlined,
+              size: 15, color: Colors.white38),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('已屏蔽外部图片（防止链接被用来追踪你的 IP）',
+                    style: TextStyle(fontSize: 11.5, color: Colors.white54)),
+                if (alt != null && alt.trim().isNotEmpty)
+                  Text(alt.trim(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: Colors.white38)),
+                Text(brief,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10.5, color: Colors.white24)),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

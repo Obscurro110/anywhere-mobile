@@ -9,13 +9,15 @@ import { Readable } from 'node:stream';
  * Files are content-addressed by a random id and auto-purged after ttlMs.
  */
 /**
- * 清洗文件名：去掉换行/控制字符，防止 CRLF 注入到 Content-Disposition 头。
+ * 清洗文件名：去掉换行/控制字符（防 CRLF 注入到 Content-Disposition 头），
+ * 去掉路径分隔符与 `..` 片段（防下载方按这个名字落盘时被穿越），
  * 顺便限长并给空名兜底。
  */
 function sanitizeName(name, fallback = 'file.bin') {
   const cleaned = String(name ?? '')
-    .replace(/[\r\n\0\t]/g, '')
-    .replace(/["\\]/g, '_')
+    .replace(/[\r\n\0\t]/g, '')      // 控制字符
+    .replace(/["\\/]/g, '_')          // 引号 + 路径分隔符（含 Windows 的 \ ）
+    .replace(/\.{2,}/g, '_')          // .. 片段（保留普通扩展名的单个点）
     .trim();
   if (!cleaned) return fallback;
   return cleaned.slice(0, 180);
@@ -25,7 +27,7 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
   const baseDir = resolve(dir);
   mkdirSync(baseDir, { recursive: true });
 
-  const index = new Map(); // id -> { id, name, size, mime, createdAt, path }
+  const index = new Map(); // id -> { id, name, size, mime, createdAt, path, owner }
 
   /**
    * 启动时从磁盘重建索引。
@@ -50,7 +52,7 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
         const p = dataPath(id);
         if (meta && meta.id && existsSync(p)) {
           const st = statSync(p);
-          index.set(id, { id, name: meta.name || 'file.bin', size: st.size, mime: meta.mime, createdAt: meta.createdAt || st.mtimeMs, path: p });
+          index.set(id, { id, name: meta.name || 'file.bin', size: st.size, mime: meta.mime, createdAt: meta.createdAt || st.mtimeMs, path: p, owner: meta.owner || null });
           metaIds.add(id);
         }
       } catch {}
@@ -74,12 +76,12 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
 
   function persistMeta(meta) {
     try {
-      writeFileSync(metaPath(meta.id), JSON.stringify({ id: meta.id, name: meta.name, mime: meta.mime, createdAt: meta.createdAt }), 'utf8');
+      writeFileSync(metaPath(meta.id), JSON.stringify({ id: meta.id, name: meta.name, mime: meta.mime, createdAt: meta.createdAt, owner: meta.owner || null }), 'utf8');
     } catch {}
   }
 
   // Save from a raw http request stream
-  async function saveStream(stream, name, mime = 'application/octet-stream') {
+  async function saveStream(stream, name, mime = 'application/octet-stream', owner = null) {
     const id = randomUUID();
     const safeName = sanitizeName(name);
     const outPath = dataPath(id);
@@ -96,14 +98,14 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
       try { if (existsSync(outPath)) unlinkSync(outPath); } catch {}
       throw err;
     }
-    const meta = { id, name: safeName, size, mime, createdAt: Date.now(), path: outPath };
+    const meta = { id, name: safeName, size, mime, createdAt: Date.now(), path: outPath, owner };
     index.set(id, meta);
     persistMeta(meta);
     return publicMeta(meta);
   }
 
   // Save from an in-memory base64 payload (used for small ws chunked transfers)
-  async function saveBase64(base64, name, mime = 'application/octet-stream') {
+  async function saveBase64(base64, name, mime = 'application/octet-stream', owner = null) {
     let buf;
     try {
       buf = Buffer.from(base64, 'base64');
@@ -119,7 +121,7 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
       try { if (existsSync(outPath)) unlinkSync(outPath); } catch {}
       throw err;
     }
-    const meta = { id, name: sanitizeName(name), size: buf.length, mime, createdAt: Date.now(), path: outPath };
+    const meta = { id, name: sanitizeName(name), size: buf.length, mime, createdAt: Date.now(), path: outPath, owner };
     index.set(id, meta);
     persistMeta(meta);
     return publicMeta(meta);
@@ -129,9 +131,24 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
     return index.get(id) || null;
   }
 
-  async function serve(id, req, res) {
+  /**
+   * ⚠️ 归属校验：/file/:id 以前只校验「token 有效」，不校验这个文件是不是
+   * 你的 —— 任何账号只要拿到别人的 fileId（file_share 消息里就有），就能
+   * 下载别人的文件。现在要求 owner 匹配。
+   *
+   * requesterUser 为 null（老文件没记 owner）时不拦，保持向后兼容。
+   */
+  function owns(meta, requesterUser) {
+    if (!meta) return false;
+    if (!meta.owner) return true; // 历史文件 / 未记录归属
+    if (!requesterUser) return false;
+    return meta.owner === requesterUser;
+  }
+
+  async function serve(id, req, res, requesterUser = null) {
     const meta = index.get(id);
-    if (!meta || !existsSync(meta.path)) {
+    // 归属不符时返回 404（而不是 403）：不向调用方确认"这个 id 存在"
+    if (!meta || !existsSync(meta.path) || !owns(meta, requesterUser)) {
       res.writeHead(404, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' });
       res.end(JSON.stringify({ ok: false, error: 'not_found' }));
       return;
