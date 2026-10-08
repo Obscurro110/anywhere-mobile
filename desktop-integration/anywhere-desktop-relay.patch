@@ -426,10 +426,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..3f1abc1
+index 0000000..d6376a2
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2598 @@
+@@ -0,0 +1,2599 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1083,7 +1083,7 @@ index 0000000..3f1abc1
 +        index,
 +        pending: waiting,
 +        id: String(m.id ?? ''),
-+        storageId: String(m.storageId || ''),
++        storageId: String(m.storageId || m.message_uuid || ''),
 +        uiStorageId: String(m.uiStorageId || ''),
 +        role,
 +        text: waiting ? '' : text,
@@ -2066,6 +2066,7 @@ index 0000000..3f1abc1
 +            reqId,
 +            relayTo: to,
 +            messageId: msg?.messageId,
++            storageId: msg?.storageId,
 +            index: msg?.index,
 +            // choiceSubmit（手机上点 ask_user_choice 的选项）要透传这两个
 +            toolCallId: msg?.toolCallId,
@@ -3368,7 +3369,7 @@ index 0000000..1206e2b
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..d17ace9
+index 0000000..19f1799
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -3380,8 +3381,8 @@ index 0000000..d17ace9
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.20';
-+export const RELAY_VERSION_CODE = 40;
++export const RELAY_VERSION = '1.7.21';
++export const RELAY_VERSION_CODE = 41;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3998,10 +3999,10 @@ index b0935a1..e6f02e4 100644
          >
            <div class="tile-icon-wrap">
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 2118ef2..854559a 100644
+index 2118ef2..17abc82 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
+@@ -741,9 +741,199 @@ const normalizeWindowEventPayload = (input) => {
      return input.payload;
    }
  
@@ -4058,9 +4059,15 @@ index 2118ef2..854559a 100644
 +  try {
 +    if (action === 'reask') {
 +      // 电脑端要求传 assistant 消息 id
-+      const targetId = Number(cmd.messageId);
-+      if (!Number.isFinite(targetId)) {
-+        reply(false, { reason: 'messageId_required' });
++      const requestedId = String(cmd.messageId ?? '');
++      const requestedStorageId = String(cmd.storageId ?? '');
++      const targetMessage = chat_show.value.findLast((m) =>
++        (requestedId && (String(m?.id ?? '') === requestedId || String(m?.uiStorageId ?? '') === requestedId || String(m?.storageId ?? '') === requestedId))
++        || (requestedStorageId && (String(m?.storageId ?? '') === requestedStorageId || String(m?.uiStorageId ?? '') === requestedStorageId))
++      );
++      const targetId = Number(targetMessage?.id);
++      if (!targetMessage || !Number.isFinite(targetId)) {
++        reply(false, { reason: 'message_not_found' });
 +        return;
 +      }
 +      // reaskAI 内部只会对「最后一条可见消息」生效（其它情况它只弹个
@@ -4074,7 +4081,7 @@ index 2118ef2..854559a 100644
 +        return;
 +      }
 +      const lastVisible = chat_show.value[lastVisibleIdx];
-+      if (lastVisible?.role !== 'assistant' || String(lastVisible?.id ?? '') !== String(targetId)) {
++      if (lastVisible?.role !== 'assistant' || lastVisible !== targetMessage) {
 +        relayLog('[relay] reask rejected: target is not the last assistant message. target =', targetId, 'last =', lastVisible?.id, lastVisible?.role);
 +        reply(false, { reason: 'not_last_message' });
 +        return;
@@ -4117,9 +4124,13 @@ index 2118ef2..854559a 100644
 +      const wantId = cmd.messageId === undefined || cmd.messageId === null
 +        ? ''
 +        : String(cmd.messageId);
++      const requestedStorageId = String(cmd.storageId ?? '');
 +      let idx = -1;
-+      if (wantId) {
-+        idx = chat_show.value.findIndex((m) => String(m?.id ?? '') === wantId);
++      if (wantId || requestedStorageId) {
++        idx = chat_show.value.findIndex((m) =>
++          (wantId && (String(m?.id ?? '') === wantId || String(m?.uiStorageId ?? '') === wantId || String(m?.storageId ?? '') === wantId))
++          || (requestedStorageId && (String(m?.storageId ?? '') === requestedStorageId || String(m?.uiStorageId ?? '') === requestedStorageId))
++        );
 +      }
 +      if (idx < 0) {
 +        // 回退：用手机给的下标，但要确认它落在本窗口范围内
@@ -4191,7 +4202,7 @@ index 2118ef2..854559a 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -759,6 +939,35 @@ const flushPendingWindowPayloadQueue = async () => {
+@@ -759,6 +949,35 @@ const flushPendingWindowPayloadQueue = async () => {
  };
  
  
@@ -4227,7 +4238,7 @@ index 2118ef2..854559a 100644
  const handleAppendMessageEvent = async (data, options = {}) => {
    if (!data || !ensureConversationWriteAccess(true)) return;
  
-@@ -769,6 +978,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -769,6 +988,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -4251,7 +4262,7 @@ index 2118ef2..854559a 100644
      return;
    }
  
-@@ -790,7 +1016,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -790,7 +1026,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: multilineText });
@@ -4262,7 +4273,7 @@ index 2118ef2..854559a 100644
      }
    } else if (data.type === "over" && data.payload) {
      const overText = String(data.payload);
-@@ -799,7 +1027,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -799,7 +1037,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: overText });
@@ -4273,7 +4284,7 @@ index 2118ef2..854559a 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -2575,8 +2805,6 @@ const fileList = ref([]);
+@@ -2575,8 +2815,6 @@ const fileList = ref([]);
  const zoomLevel = ref(1);
  const collapsedMessages = ref(new Set());
  const defaultConversationName = ref("");
@@ -4282,7 +4293,7 @@ index 2118ef2..854559a 100644
  const currentConversationStorage = ref(null);
  const conversationReadOnly = ref(false);
  const conversationLeasePending = ref(false);
-@@ -2839,25 +3067,6 @@ const normalizeSessionTimestamp = (value) => {
+@@ -2839,25 +3077,6 @@ const normalizeSessionTimestamp = (value) => {
    return Number.isNaN(date.getTime()) || date.getTime() <= 0 ? '' : date.toISOString();
  };
  
@@ -4308,7 +4319,7 @@ index 2118ef2..854559a 100644
  const getConversationDisplayName = () => {
    const normalizedTitle = typeof defaultConversationName.value === 'string' ? defaultConversationName.value.trim() : '';
    if (normalizedTitle) return normalizedTitle;
-@@ -2878,13 +3087,8 @@ const getConversationDisplayName = () => {
+@@ -2878,13 +3097,8 @@ const getConversationDisplayName = () => {
  };
  
  const getSessionMetadata = () => {
@@ -4323,7 +4334,7 @@ index 2118ef2..854559a 100644
    };
  };
  
-@@ -3072,7 +3276,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3072,7 +3286,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -4340,7 +4351,7 @@ index 2118ef2..854559a 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5244,6 +5456,7 @@ onMounted(async () => {
+@@ -5244,6 +5466,7 @@ onMounted(async () => {
  
    window.__AGENT_API__ = {
      isBusy: () => loading.value || compacting.value,
@@ -4348,7 +4359,7 @@ index 2118ef2..854559a 100644
  
      getChatLength: () => chat_show.value.length,
  
-@@ -5713,7 +5926,18 @@ onMounted(async () => {
+@@ -5713,7 +5936,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -4368,7 +4379,7 @@ index 2118ef2..854559a 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -6853,7 +7077,7 @@ const getSessionDataAsObject = (options = {}) => {
+@@ -6853,7 +7087,7 @@ const getSessionDataAsObject = (options = {}) => {
    return {
      anywhere_history: true, CODE: CODE.value, basic_msg: basic_msg.value, isInit: isInit.value,
      autoCloseOnBlur: autoCloseOnBlur.value, model: model.value,
@@ -4377,7 +4388,7 @@ index 2118ef2..854559a 100644
      currentPromptConfig: currentPromptConfig,
      fullHistory: fullHistory.value,
      history: historyToSave,
-@@ -8129,7 +8353,6 @@ const handleSaveAction = async () => {
+@@ -8129,7 +8363,6 @@ const handleSaveAction = async () => {
  
  const loadSession = async (jsonData) => {
    loading.value = true;
@@ -4385,7 +4396,7 @@ index 2118ef2..854559a 100644
    isRestoringSessionSnapshot = true;
    collapsedMessages.value.clear();
    messageRefs.clear();
-@@ -10026,6 +10249,12 @@ const deleteMessage = (index) => {
+@@ -10026,6 +10259,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -4398,7 +4409,7 @@ index 2118ef2..854559a 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10043,6 +10272,18 @@ const deleteMessage = (index) => {
+@@ -10043,6 +10282,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4417,7 +4428,7 @@ index 2118ef2..854559a 100644
  };
  
  const clearHistory = async () => {
-@@ -10383,6 +10624,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10383,6 +10634,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };

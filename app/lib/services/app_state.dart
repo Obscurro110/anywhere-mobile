@@ -676,7 +676,7 @@ class AppState extends ChangeNotifier {
   ///
   /// 要求该会话**已经在电脑端打开**（列表里点过「在电脑端打开」），
   /// 否则电脑端没有承载窗口可执行，会回 conversation_not_open。
-  bool reaskMessageOnDesktop(String conversationId, String messageId) {
+  bool reaskMessageOnDesktop(String conversationId, String messageId, {String storageId = ''}) {
     if (!_client.isConnected) return false;
     if (messageId.isEmpty) return false;
     lastMessageAction = null;
@@ -691,6 +691,7 @@ class AppState extends ChangeNotifier {
         'action': 'reask',
         'conversationId': conversationId,
         'messageId': messageId,
+        if (storageId.isNotEmpty) 'storageId': storageId,
       },
     ));
   }
@@ -701,7 +702,7 @@ class AppState extends ChangeNotifier {
   /// 因为手机拿到的 index 来自数据库分页读取，和窗口内存里的下标可能不一致。
   /// index 只作为查不到 id 时的回退。
   bool deleteMessageOnDesktop(String conversationId, int index,
-      {String messageId = ''}) {
+      {String messageId = '', String storageId = ''}) {
     if (!_client.isConnected) return false;
     if (index < 0 && messageId.isEmpty) return false;
     lastMessageAction = null;
@@ -717,6 +718,7 @@ class AppState extends ChangeNotifier {
         'conversationId': conversationId,
         'index': index,
         if (messageId.isNotEmpty) 'messageId': messageId,
+        if (storageId.isNotEmpty) 'storageId': storageId,
       },
     ));
   }

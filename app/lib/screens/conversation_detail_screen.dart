@@ -437,7 +437,11 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
       _warnNotOpen();
       return;
     }
-    final sent = state.reaskMessageOnDesktop(widget.conversation.id, m.id);
+    final sent = state.reaskMessageOnDesktop(
+      widget.conversation.id,
+      m.id,
+      storageId: m.storageId,
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -477,7 +481,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
     // 不会因为索引/压缩导致删错行。没开窗口才退回直接改数据。
     if (state.activeConversationId == widget.conversation.id) {
       final sent = state.deleteMessageOnDesktop(widget.conversation.id, m.index,
-          messageId: m.id);
+          messageId: m.id, storageId: m.storageId);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
