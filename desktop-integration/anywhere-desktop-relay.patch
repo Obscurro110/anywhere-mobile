@@ -426,10 +426,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..477b69d
+index 0000000..3f1abc1
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2557 @@
+@@ -0,0 +1,2598 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1055,7 +1055,43 @@ index 0000000..477b69d
 + * 电脑端 `deleteMessage(index)` 就是按这个下标删的。
 + * `messageId` 是 assistant 气泡的 id，手机端「重新回答」要回传它。
 + */
++async function readLiveConversationMessages(conversationId) {
++  pruneConvWindows()
++  const windowId = convWindows.get(String(conversationId || '').trim())
++  if (!isWindowAlive(windowId)) return null
++  const win = ctx.getWindowByRef(windowId)
++  if (!win?.webContents?.executeJavaScript) return null
++  const snapshot = await win.webContents.executeJavaScript(`(() => {
++    const show = Array.isArray(window.__AGENT_API__?.chatShow?.()) ? window.__AGENT_API__.chatShow() : []
++    return { busy: Boolean(window.__AGENT_API__?.isBusy?.()), messages: show }
++  })()`, true).catch(() => null)
++  return snapshot && Array.isArray(snapshot.messages) ? snapshot : null
++}
++
 +async function readPhoneConversationMessages(conversationId) {
++  const live = await readLiveConversationMessages(conversationId).catch(() => null)
++  if (live) {
++    const messages = []
++    live.messages.forEach((m, index) => {
++      if (!m || typeof m !== 'object') return
++      const role = String(m.role || '')
++      if (role !== 'user' && role !== 'assistant' && role !== 'system') return
++      const text = extractMessagePlainText(m)
++      const waiting = role === 'assistant' && !text && Boolean(live.busy && index === live.messages.length - 1)
++      if (!text && !waiting) return
++      messages.push({
++        index,
++        pending: waiting,
++        id: String(m.id ?? ''),
++        storageId: String(m.storageId || ''),
++        uiStorageId: String(m.uiStorageId || ''),
++        role,
++        text: waiting ? '' : text,
++        time: formatMessageTime(m)
++      })
++    })
++    return { ok: true, messages, count: messages.length }
++  }
 +  const dirPath = await readChatDirPath()
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured', messages: [] }
 +
@@ -1079,7 +1115,7 @@ index 0000000..477b69d
 +    if (role !== 'user' && role !== 'assistant' && role !== 'system') return
 +    // 用增强版：content + tool_calls 一起转成手机可读文本
 +    const text = extractMessagePlainText(m)
-+    const waiting = role === 'assistant' && !text && (m.pending === true || m.streaming === true)
++    const waiting = role === 'assistant' && !text && index === chatShow.length - 1 && ['preparing', 'thinking'].includes(String(m.status || ''))
 +    if (!text && !waiting) return
 +    messages.push({
 +      index,
@@ -1092,15 +1128,10 @@ index 0000000..477b69d
 +      uiStorageId: String(m.uiStorageId || ''),
 +      role,
 +      text,
-+      time: m.createdAt || m.timestamp || m.completedTimestamp || ''
++      time: formatMessageTime(m)
 +    })
 +  })
-+  messages.sort((a, b) => {
-+    const left = Date.parse(a.time)
-+    const right = Date.parse(b.time)
-+    if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return left - right
-+    return a.index - b.index
-+  })
++  messages.sort((a, b) => a.index - b.index)
 +  const promptKey =
 +      opened.sessionData?.promptKey ||
 +      opened.sessionData?.sessionMetadata?.promptKey ||
@@ -1124,6 +1155,16 @@ index 0000000..477b69d
 +/** 剥掉正文里残留的思考标记：有些模型/中转把思考直接包成
 + *  `<thinking>...</thinking>` 塞进 content，不剥的话手机上会原样显示。
 + */
++function formatMessageTime(m) {
++  const value = m?.timestamp || m?.createdAt || m?.startTime || m?.completedTimestamp || ''
++  if (typeof value === 'number' && Number.isFinite(value)) {
++    const date = new Date(value)
++    const pad = (n) => String(n).padStart(2, '0')
++    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
++  }
++  return String(value || '')
++}
++
 +function stripThinkingTags(s) {
 +  if (!s) return s
 +  return String(s)
@@ -3327,7 +3368,7 @@ index 0000000..1206e2b
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..6f8b45b
+index 0000000..d17ace9
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -3339,8 +3380,8 @@ index 0000000..6f8b45b
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.19';
-+export const RELAY_VERSION_CODE = 39;
++export const RELAY_VERSION = '1.7.20';
++export const RELAY_VERSION_CODE = 40;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3957,7 +3998,7 @@ index b0935a1..e6f02e4 100644
          >
            <div class="tile-icon-wrap">
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 2118ef2..931a2b9 100644
+index 2118ef2..854559a 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -4299,7 +4340,15 @@ index 2118ef2..931a2b9 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5713,7 +5925,18 @@ onMounted(async () => {
+@@ -5244,6 +5456,7 @@ onMounted(async () => {
+ 
+   window.__AGENT_API__ = {
+     isBusy: () => loading.value || compacting.value,
++    chatShow: () => chat_show.value,
+ 
+     getChatLength: () => chat_show.value.length,
+ 
+@@ -5713,7 +5926,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -4319,7 +4368,7 @@ index 2118ef2..931a2b9 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -6853,7 +7076,7 @@ const getSessionDataAsObject = (options = {}) => {
+@@ -6853,7 +7077,7 @@ const getSessionDataAsObject = (options = {}) => {
    return {
      anywhere_history: true, CODE: CODE.value, basic_msg: basic_msg.value, isInit: isInit.value,
      autoCloseOnBlur: autoCloseOnBlur.value, model: model.value,
@@ -4328,7 +4377,7 @@ index 2118ef2..931a2b9 100644
      currentPromptConfig: currentPromptConfig,
      fullHistory: fullHistory.value,
      history: historyToSave,
-@@ -8129,7 +8352,6 @@ const handleSaveAction = async () => {
+@@ -8129,7 +8353,6 @@ const handleSaveAction = async () => {
  
  const loadSession = async (jsonData) => {
    loading.value = true;
@@ -4336,7 +4385,7 @@ index 2118ef2..931a2b9 100644
    isRestoringSessionSnapshot = true;
    collapsedMessages.value.clear();
    messageRefs.clear();
-@@ -10026,6 +10248,12 @@ const deleteMessage = (index) => {
+@@ -10026,6 +10249,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -4349,7 +4398,7 @@ index 2118ef2..931a2b9 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10043,6 +10271,18 @@ const deleteMessage = (index) => {
+@@ -10043,6 +10272,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4368,7 +4417,7 @@ index 2118ef2..931a2b9 100644
  };
  
  const clearHistory = async () => {
-@@ -10383,6 +10623,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10383,6 +10624,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
