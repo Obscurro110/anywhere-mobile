@@ -1548,6 +1548,7 @@ class AppState extends ChangeNotifier {
     // 电脑端回传「你刚发的那条消息在电脑端的位置」
     // —— 补上之后，自己发的消息也能显示「删除这条」（以前只有 AI 回复才有）
     if (p.role == ChatRole.userMessageMeta) {
+      await () async {
       try {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final m = (decoded['__relayUserMessageMeta'] as Map?)?.cast<String, dynamic>() ?? {};
@@ -1614,6 +1615,7 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         debugPrint('[AppState] user-message-meta decode failed: $e');
       }
+      }();
       return;
     }
 
