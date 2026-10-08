@@ -268,7 +268,9 @@ class AppState extends ChangeNotifier {
   ) async {
     if (messageId.isEmpty) return;
     final key = _historyKey(conversationId);
-    await (_historyWrites[key] ?? Future<void>.value());
+    while (_historyWrites.containsKey(key)) {
+      await _historyWrites[key];
+    }
     final stored = _decodeHistory((await SharedPreferences.getInstance()).getString(key));
     final index = stored.indexWhere((message) => message.id == messageId);
     if (index < 0) return;
@@ -1556,13 +1558,31 @@ class AppState extends ChangeNotifier {
         final desktopId = m['messageId']?.toString() ?? '';
         final index = (m['index'] as num?)?.toInt() ?? -1;
         final convId = m['conversationId']?.toString() ?? '';
-        if (_detachedConversationIds.contains(convId)) return;
         if (desktopId.isEmpty || index < 0) return;
+        if (_detachedConversationIds.contains(convId)) {
+          await _updateStoredMessage(convId, clientId, (old) => ChatMessage(
+            id: old.id,
+            role: old.role,
+            text: old.text,
+            time: old.time,
+            outgoing: old.outgoing,
+            conversationId: convId,
+            attachments: old.attachments,
+            pending: old.pending,
+            modelTag: old.modelTag,
+            desktopMeta: AssistantMeta(
+              messageId: desktopId,
+              index: index,
+              conversationId: convId,
+            ),
+          ));
+          return;
+        }
         final targetId = convId.isEmpty ? _activeConversationId : convId;
         if (_activeConversationId == null && convId.isNotEmpty) {
           _bindActiveConversationSilently(convId);
         }
-        if (targetId == null || targetId != _activeConversationId) {
+        if (targetId != null && targetId != _activeConversationId) {
           await _updateStoredMessage(targetId, clientId, (old) => ChatMessage(
             id: old.id,
             role: old.role,
