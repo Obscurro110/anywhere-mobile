@@ -48,8 +48,10 @@ jobs:
         shell: pwsh
         run: |
           $ref = "${{ github.event.inputs.upstream_ref }}"
-          git clone https://github.com/Komorebi-yaodong/anywheredesktop.git upstream
-          if ($ref -ne '') {
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'v1.3.1' }
+          git clone --branch $ref --depth 1 https://github.com/Komorebi-yaodong/anywheredesktop.git upstream
+          if ($LASTEXITCODE -ne 0) {
+            git clone https://github.com/Komorebi-yaodong/anywheredesktop.git upstream
             Set-Location upstream
             git fetch --all --tags
             git checkout $ref
