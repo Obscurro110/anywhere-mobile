@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -22,19 +24,28 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
   /// 选择模式下已勾选的消息 id
   final _selected = <String>{};
   bool _selecting = false;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        context.read<AppState>().requestConversationMessages(widget.conversation.id);
-      }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted || _selecting) return;
+      final messages = context.read<AppState>().messagesOf(widget.conversation.id);
+      if (messages.isNotEmpty && messages.last.pending) _refresh();
     });
+  }
+
+  void _refresh() {
+    if (mounted) {
+      context.read<AppState>().requestConversationMessages(widget.conversation.id);
+    }
   }
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     // 告诉 AppState 不再查看这个会话，避免它退出后还把
     // 「当前查看会话」指向这里（会影响到别的页面读到的列表/loading）。
     _state?.stopViewingConversation(widget.conversation.id);
@@ -266,12 +277,22 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
           ),
           const SizedBox(height: 6),
           if (m.pending)
-            const SizedBox(
-              width: 28,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          else
+            const Padding(
+              padding: EdgeInsets.only(bottom: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 8),
+                  Text('正在生成…', style: TextStyle(fontSize: 13, color: Colors.white70)),
+                ],
+              ),
+            ),
+          if (!m.pending || m.text.isNotEmpty)
           // 正文：长会话也完整显示（可选中复制）
           SelectableText(
             m.text,

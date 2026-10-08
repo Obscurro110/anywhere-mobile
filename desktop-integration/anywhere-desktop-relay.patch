@@ -426,10 +426,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..d6376a2
+index 0000000..2db9879
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2599 @@
+@@ -0,0 +1,2630 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1063,8 +1063,27 @@ index 0000000..d6376a2
 +  if (!win?.webContents?.executeJavaScript) return null
 +  const snapshot = await win.webContents.executeJavaScript(`(() => {
 +    const show = Array.isArray(window.__AGENT_API__?.chatShow?.()) ? window.__AGENT_API__.chatShow() : []
-+    return { busy: Boolean(window.__AGENT_API__?.isBusy?.()), messages: show }
-+  })()`, true).catch(() => null)
++    const busy = Boolean(window.__AGENT_API__?.isBusy?.())
++    return JSON.stringify({
++      busy,
++      messages: show.map((m) => ({
++        id: m?.id,
++        role: m?.role,
++        content: m?.content,
++        tool_calls: Array.isArray(m?.tool_calls) ? m.tool_calls.map((tc) => ({ name: tc?.name })) : [],
++        status: m?.status,
++        storageId: m?.storageId,
++        uiStorageId: m?.uiStorageId,
++        timestamp: m?.timestamp,
++        createdAt: m?.createdAt,
++        startTime: m?.startTime,
++        completedTimestamp: m?.completedTimestamp,
++        endTime: m?.endTime
++      }))
++    })
++  })()`, true).then((raw) => {
++    try { return JSON.parse(raw) } catch { return null }
++  }).catch(() => null)
 +  return snapshot && Array.isArray(snapshot.messages) ? snapshot : null
 +}
 +
@@ -1077,7 +1096,7 @@ index 0000000..d6376a2
 +      const role = String(m.role || '')
 +      if (role !== 'user' && role !== 'assistant' && role !== 'system') return
 +      const text = extractMessagePlainText(m)
-+      const waiting = role === 'assistant' && !text && Boolean(live.busy && index === live.messages.length - 1)
++      const waiting = role === 'assistant' && Boolean(live.busy && index === live.messages.length - 1)
 +      if (!text && !waiting) return
 +      messages.push({
 +        index,
@@ -1086,10 +1105,22 @@ index 0000000..d6376a2
 +        storageId: String(m.storageId || m.message_uuid || ''),
 +        uiStorageId: String(m.uiStorageId || ''),
 +        role,
-+        text: waiting ? '' : text,
++        text: waiting && !text ? '' : text,
 +        time: formatMessageTime(m)
 +      })
 +    })
++    if (live.busy && messages.at(-1)?.role !== 'assistant') {
++      messages.push({
++        index: live.messages.length,
++        pending: true,
++        id: 'live-pending',
++        storageId: '',
++        uiStorageId: '',
++        role: 'assistant',
++        text: '',
++        time: ''
++      })
++    }
 +    return { ok: true, messages, count: messages.length }
 +  }
 +  const dirPath = await readChatDirPath()
@@ -3369,7 +3400,7 @@ index 0000000..1206e2b
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..19f1799
+index 0000000..e9d1707
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -3381,8 +3412,8 @@ index 0000000..19f1799
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.21';
-+export const RELAY_VERSION_CODE = 41;
++export const RELAY_VERSION = '1.7.22';
++export const RELAY_VERSION_CODE = 42;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644

@@ -182,9 +182,9 @@ class AppState extends ChangeNotifier {
   ///
   /// **必须同时换掉 messages** —— 每个会话的聊天记录是分开存的，
   /// 不换就会出现「切了会话但还显示上一个会话内容」的重合问题。
-  void _setActiveConversation(String? id, String title) {
+  void _setActiveConversation(String? id, String title, {bool startBlank = false}) {
     final changed = (id ?? '') != (_activeConversationId ?? '');
-    if (!changed) {
+    if (!changed && !startBlank) {
       _activeConversationTitle = title;
       unawaited(_persistActiveConversation());
       notifyListeners();
@@ -215,6 +215,8 @@ class AppState extends ChangeNotifier {
       // 旧会话的记录用**快照 + 旧 key** 落盘（此时 _activeConversationId 已变）
       await _persistMessagesTo(oldId, snapshot);
       if (switchGeneration != _conversationSwitchGeneration || _activeConversationId != id) return;
+      // 新会话必须从空白开始。未绑定记录共用一个 key，重新加载会把上一条会话带回来。
+      if (startBlank) return;
       await _switchHistoryTo(id, switchGeneration);
       // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
       notifyListeners();
@@ -447,7 +449,7 @@ class AppState extends ChangeNotifier {
         // 新助手必须开启新的电脑端会话，而不是复用旧手机窗口。
         _forceNewConversationOnNextMessage = true;
         _detachedConversationIds.add(_activeConversationId!);
-        _setActiveConversation(null, '');
+        _setActiveConversation(null, '', startBlank: true);
       }
     }
 
@@ -588,7 +590,7 @@ class AppState extends ChangeNotifier {
     _leftConversationManually = true;
     if (_activeConversationId != null) _detachedConversationIds.add(_activeConversationId!);
     _forceNewConversationOnNextMessage = true;
-    _setActiveConversation(null, '');
+    _setActiveConversation(null, '', startBlank: true);
   }
 
   // ---- 电脑端会话管理 ----
