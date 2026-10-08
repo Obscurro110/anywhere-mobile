@@ -1,6 +1,7 @@
 # ---- Anywhere Relay Server ----
 # 多阶段构建：保持镜像精简，并以非 root 用户运行（降低被攻破后的影响面）
-FROM node:20-alpine AS base
+# 固定 node:20-alpine 的多架构索引，避免浮动标签在重建时换成另一套系统。
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS base
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -19,6 +20,7 @@ RUN mkdir -p /app/data/files && chown -R node:node /app/data
 ENV PORT=8787
 ENV HOST=0.0.0.0
 ENV FILE_DIR=/app/data/files
+ENV NODE_OPTIONS=--max-old-space-size=512
 
 EXPOSE 8787
 

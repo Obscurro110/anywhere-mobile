@@ -9,18 +9,36 @@ import { parseTokens, validateTokenConfig, userForToken } from './auth.js';
 // ---- tiny .env loader (no dependency) ----
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.resolve(__dirname, '..', '.env');
+function parseEnvValue(raw) {
+  let value = raw.trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value;
+}
+
 if (existsSync(envPath)) {
   for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const m = trimmed.match(/^([A-Z0-9_]+)\s*=\s*(.*)$/i);
+    if (m && !process.env[m[1]]) process.env[m[1]] = parseEnvValue(m[2]);
   }
 }
 
-const PORT = parseInt(process.env.PORT || '8787', 10);
+function positiveInt(name, fallback) {
+  const value = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const PORT = positiveInt('PORT', 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const FILE_DIR = process.env.FILE_DIR || './data/files';
-const MAX_FILE_MB = parseInt(process.env.MAX_FILE_MB || '512', 10);
-const FILE_TTL_HOURS = parseInt(process.env.FILE_TTL_HOURS || '72', 10);
+const MAX_FILE_MB = positiveInt('MAX_FILE_MB', 512);
+const FILE_TTL_HOURS = positiveInt('FILE_TTL_HOURS', 72);
+const MAX_HTTP_CONNECTIONS = positiveInt('MAX_HTTP_CONNECTIONS', 100);
+const HEADERS_TIMEOUT_MS = positiveInt('HEADERS_TIMEOUT_MS', 20_000);
+const REQUEST_TIMEOUT_MS = positiveInt('REQUEST_TIMEOUT_MS', 5 * 60 * 1000);
 
 const tokens = parseTokens(process.env.AUTH_TOKENS || 'default-user:CHANGE_ME_TOKEN');
 const tokenCheck = validateTokenConfig(tokens);
@@ -43,6 +61,9 @@ const fileStore = createFileStore({
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (server.activeConnections > MAX_HTTP_CONNECTIONS) {
+      return json(res, 503, { ok: false, error: 'too_many_connections' }, { 'retry-after': '1' });
+    }
     await handleHttp(req, res);
   } catch (err) {
     // 不把 err 细节返回给客户端，避免泄露内部路径/栈
@@ -80,7 +101,7 @@ async function handleHttp(req, res) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
     }
     // 传 user：只允许下载自己上传的文件（详见 fileStore.owns）
-    return fileStore.serve(fileMatch[1], req, res, user);
+    return fileStore.serve(fileMatch[1], req, res, user, tokens.size === 1);
   }
 
   // upload a file (used for large files instead of ws chunks):
@@ -125,6 +146,24 @@ function json(res, code, obj, extraHeaders = {}) {
   });
   res.end(body);
 }
+
+server.maxHeadersCount = 50;
+server.headersTimeout = HEADERS_TIMEOUT_MS;
+server.requestTimeout = REQUEST_TIMEOUT_MS;
+server.timeout = REQUEST_TIMEOUT_MS;
+server.keepAliveTimeout = 10_000;
+server.activeConnections = 0;
+server.on('connection', (socket) => {
+  server.activeConnections++;
+  const release = () => {
+    if (socket.__relayCounted) {
+      socket.__relayCounted = false;
+      server.activeConnections = Math.max(0, server.activeConnections - 1);
+    }
+  };
+  socket.__relayCounted = true;
+  socket.once('close', release);
+});
 
 // ---- WebSocket hub ----
 const { wss } = createWss({ server, tokens, fileStore });

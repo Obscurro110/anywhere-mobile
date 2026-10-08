@@ -136,19 +136,19 @@ export function createFileStore({ dir, maxBytes, ttlMs }) {
    * 你的 —— 任何账号只要拿到别人的 fileId（file_share 消息里就有），就能
    * 下载别人的文件。现在要求 owner 匹配。
    *
-   * requesterUser 为 null（老文件没记 owner）时不拦，保持向后兼容。
+   * 没有 owner 的历史文件只在服务端只配置了一个账号时放行。多账号时拒绝，
+   * 避免旧文件被其他有效账号凭 fileId 下载。
    */
-  function owns(meta, requesterUser) {
-    if (!meta) return false;
-    if (!meta.owner) return true; // 历史文件 / 未记录归属
-    if (!requesterUser) return false;
+  function owns(meta, requesterUser, singleUserMode) {
+    if (!meta || !requesterUser) return false;
+    if (!meta.owner) return singleUserMode;
     return meta.owner === requesterUser;
   }
 
-  async function serve(id, req, res, requesterUser = null) {
+  async function serve(id, req, res, requesterUser = null, singleUserMode = false) {
     const meta = index.get(id);
     // 归属不符时返回 404（而不是 403）：不向调用方确认"这个 id 存在"
-    if (!meta || !existsSync(meta.path) || !owns(meta, requesterUser)) {
+    if (!meta || !existsSync(meta.path) || !owns(meta, requesterUser, singleUserMode)) {
       res.writeHead(404, { 'content-type': 'application/json', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' });
       res.end(JSON.stringify({ ok: false, error: 'not_found' }));
       return;
