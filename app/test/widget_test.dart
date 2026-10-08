@@ -488,7 +488,8 @@ void main() {
 
     test('value 里没有分隔符时不炸', () {
       final m = ModelOption.fromJson({'value': 'solo', 'label': 'solo'});
-      expect(m.displayName, 'solo|solo');
+      // label 与服务商回退名相同时，保持原值，避免显示成「solo|solo」。
+      expect(m.displayName, 'solo');
     });
   });
 
