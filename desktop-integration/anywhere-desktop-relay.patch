@@ -426,10 +426,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..8a7be65
+index 0000000..477b69d
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2543 @@
+@@ -0,0 +1,2557 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1079,9 +1079,11 @@ index 0000000..8a7be65
 +    if (role !== 'user' && role !== 'assistant' && role !== 'system') return
 +    // 用增强版：content + tool_calls 一起转成手机可读文本
 +    const text = extractMessagePlainText(m)
-+    if (!text) return
++    const waiting = role === 'assistant' && !text && (m.pending === true || m.streaming === true)
++    if (!text && !waiting) return
 +    messages.push({
 +      index,
++      pending: waiting,
 +      id: String(m.id ?? ''), // chat_show 展示 id（窗口内删除/重新回答用）
 +      // storageId = messages.message_uuid：批量删除时电脑端用这个删。
 +      // 注意：不能拿 id 当 storageId —— id 是展示层的，删不中会静默失败
@@ -1090,8 +1092,14 @@ index 0000000..8a7be65
 +      uiStorageId: String(m.uiStorageId || ''),
 +      role,
 +      text,
-+      time: m.completedTimestamp || m.timestamp || ''
++      time: m.createdAt || m.timestamp || m.completedTimestamp || ''
 +    })
++  })
++  messages.sort((a, b) => {
++    const left = Date.parse(a.time)
++    const right = Date.parse(b.time)
++    if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return left - right
++    return a.index - b.index
 +  })
 +  const promptKey =
 +      opened.sessionData?.promptKey ||
@@ -1132,9 +1140,15 @@ index 0000000..8a7be65
 +  if (Array.isArray(content)) {
 +    return stripThinkingTags(
 +      content
-+        .filter((p) => p && p.type === 'text')
-+        .map((p) => p.text || '')
-+        .join('')
++        .map((part) => {
++          if (!part || typeof part !== 'object') return ''
++          if (part.type === 'text') return part.text || ''
++          if (part.type === 'image' || part.type === 'image_url') return '[图片]'
++          if (part.type === 'file' || part.type === 'document') return `[文件${part.name ? ` ${part.name}` : ''}]`
++          return ''
++        })
++        .filter(Boolean)
++        .join('\n')
 +    )
 +  }
 +  return ''
@@ -3355,36 +3369,30 @@ index 2096f34..eaed491 100644
  }
  
 diff --git a/package.json b/package.json
-index e60ec30..801fa56 100644
+index e60ec30..49416a6 100644
 --- a/package.json
 +++ b/package.json
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  {
 -  "name": "anywhere-desktop",
+-  "version": "1.3.1",
 +  "name": "anywhere-desktop-relay",
-   "version": "1.3.1",
++  "version": "1.2.6",
    "description": "AI Anywhere Desktop",
    "main": "./out/main/index.js",
-@@ -18,6 +18,7 @@
+   "author": {
+@@ -17,7 +17,9 @@
+     "dev": "electron-vite dev",
      "build": "electron-vite build",
      "test:conversation-lease": "node tests/conversation-lease.test.mjs",
-     "test:conversation-time": "node tests/conversation-time.test.mjs",
+-    "test:conversation-time": "node tests/conversation-time.test.mjs",
 +    "test:relay-routing": "node tests/relay-routing.test.mjs",
++    "test:conversation-order": "node tests/conversation-order.test.mjs",
++    "test:project-move": "node tests/project-move.test.mjs",
      "postinstall": "electron-builder install-app-deps",
      "build:unpack": "pnpm run build && electron-builder --dir --publish never",
      "build:win": "pnpm run build && electron-builder --win nsis --publish never",
-@@ -25,7 +26,9 @@
-     "build:linux": "pnpm run build && electron-builder --linux AppImage --publish never",
-     "release:win": "pnpm run build && electron-builder --win nsis --publish always",
-     "release:mac": "pnpm run build && electron-builder --mac dmg zip --publish always",
--    "release:linux": "pnpm run build && electron-builder --linux AppImage --publish always"
-+    "release:linux": "pnpm run build && electron-builder --linux AppImage --publish always",
-+    "test:conversation-order": "node tests/conversation-order.test.mjs",
-+    "test:project-move": "node tests/project-move.test.mjs"
-   },
-   "dependencies": {
-     "@anthropic-ai/sdk": "^0.105.0",
-@@ -54,6 +57,7 @@
+@@ -54,6 +56,7 @@
      "openai": "6.18.0",
      "pinyin-pro": "^3.28.0",
      "webdav": "^5.9.0",
@@ -3892,8 +3900,64 @@ index 2ad1391..28cb7e4 100644
                  </div>
                </el-collapse-transition>
              </div>
+diff --git a/render/quick/App.vue b/render/quick/App.vue
+index b0935a1..e6f02e4 100644
+--- a/render/quick/App.vue
++++ b/render/quick/App.vue
+@@ -484,23 +484,14 @@ function movePromptSelection(direction = '') {
+   const currentIndex = list.findIndex((item) => item.key === selectedPromptKey.value)
+   const safeIndex = currentIndex < 0 ? 0 : currentIndex
+   const columnCount = getPromptGridColumnCount()
+-  const columnIndex = safeIndex % columnCount
+   let nextIndex = safeIndex
+ 
+-  if (direction === 'left') {
+-    nextIndex = (safeIndex - 1 + list.length) % list.length
+-  } else if (direction === 'right') {
+-    nextIndex = (safeIndex + 1) % list.length
+-  } else if (direction === 'up') {
+-    const previousRowIndex = safeIndex - columnCount
+-    nextIndex = previousRowIndex >= 0
+-      ? previousRowIndex
+-      : columnIndex + Math.floor((list.length - 1 - columnIndex) / columnCount) * columnCount
+-  } else if (direction === 'down') {
+-    const nextRowIndex = safeIndex + columnCount
+-    nextIndex = nextRowIndex < list.length ? nextRowIndex : columnIndex
+-  }
++  if (direction === 'left') nextIndex = safeIndex - 1
++  if (direction === 'right') nextIndex = safeIndex + 1
++  if (direction === 'up') nextIndex = safeIndex - columnCount
++  if (direction === 'down') nextIndex = safeIndex + columnCount
+ 
++  nextIndex = Math.max(0, Math.min(list.length - 1, nextIndex))
+   selectedPromptKey.value = list[nextIndex].key
+   shouldShowSelection.value = true
+ }
+@@ -1056,13 +1047,7 @@ onMounted(async () => {
+ 
+     if (data?.promptKey) {
+       selectedPromptKey.value = data.promptKey
+-      shouldShowSelection.value = true
+-    } else if (!isAppendOnlyMode.value && candidateSections.value.length > 0) {
+-      selectedPromptKey.value = candidateSections.value[0].key
+-      shouldShowSelection.value = true
+-    } else {
+-      selectedPromptKey.value = ''
+-      shouldShowSelection.value = false
++      shouldShowSelection.value = Boolean(data.promptKey)
+     }
+ 
+     requestAnimationFrame(() => {
+@@ -1140,6 +1125,7 @@ onBeforeUnmount(() => {
+           type="button"
+           class="prompt-tile"
+           :class="{ active: shouldShowSelection && selectedPromptKey === prompt.key }"
++          @mouseenter="selectedPromptKey = prompt.key; shouldShowSelection = true"
+           @click="selectedPromptKey = prompt.key; shouldShowSelection = true; openPrompt(prompt)"
+         >
+           <div class="tile-icon-wrap">
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 2118ef2..35a149e 100644
+index 2118ef2..931a2b9 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -4168,7 +4232,57 @@ index 2118ef2..35a149e 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3072,7 +3302,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -2575,8 +2805,6 @@ const fileList = ref([]);
+ const zoomLevel = ref(1);
+ const collapsedMessages = ref(new Set());
+ const defaultConversationName = ref("");
+-
+-const sessionCreatedAt = ref(new Date().toISOString());
+ const currentConversationStorage = ref(null);
+ const conversationReadOnly = ref(false);
+ const conversationLeasePending = ref(false);
+@@ -2839,25 +3067,6 @@ const normalizeSessionTimestamp = (value) => {
+   return Number.isNaN(date.getTime()) || date.getTime() <= 0 ? '' : date.toISOString();
+ };
+ 
+-
+-const resolveSessionCreatedAt = (sessionData) => {
+-  const metadataCreatedAt = normalizeSessionTimestamp(sessionData?.sessionMetadata?.createdAt);
+-  if (metadataCreatedAt) return metadataCreatedAt;
+-
+-  const timestamps = [];
+-  [sessionData?.fullHistory, sessionData?.history, sessionData?.chat_show].forEach((messages) => {
+-    if (!Array.isArray(messages)) return;
+-    messages.forEach((message) => {
+-      [message?.createdAt, message?.timestamp, message?.updatedAt, message?.completedTimestamp].forEach((candidate) => {
+-        const normalized = normalizeSessionTimestamp(candidate);
+-        if (normalized) timestamps.push(normalized);
+-      });
+-    });
+-  });
+-  timestamps.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+-  return timestamps[0] || '';
+-};
+-
+ const getConversationDisplayName = () => {
+   const normalizedTitle = typeof defaultConversationName.value === 'string' ? defaultConversationName.value.trim() : '';
+   if (normalizedTitle) return normalizedTitle;
+@@ -2878,13 +3087,8 @@ const getConversationDisplayName = () => {
+ };
+ 
+ const getSessionMetadata = () => {
+-  const updatedAt = new Date().toISOString();
+-  const createdAt = normalizeSessionTimestamp(sessionCreatedAt.value) || updatedAt;
+-  sessionCreatedAt.value = createdAt;
+   return {
+-    title: getConversationDisplayName(),
+-    createdAt,
+-    updatedAt
++    title: getConversationDisplayName()
+   };
+ };
+ 
+@@ -3072,7 +3276,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -4185,7 +4299,7 @@ index 2118ef2..35a149e 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5713,7 +5951,18 @@ onMounted(async () => {
+@@ -5713,7 +5925,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -4205,7 +4319,24 @@ index 2118ef2..35a149e 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10026,6 +10275,12 @@ const deleteMessage = (index) => {
+@@ -6853,7 +7076,7 @@ const getSessionDataAsObject = (options = {}) => {
+   return {
+     anywhere_history: true, CODE: CODE.value, basic_msg: basic_msg.value, isInit: isInit.value,
+     autoCloseOnBlur: autoCloseOnBlur.value, model: model.value,
+-    sessionMetadata: { ...getSessionMetadata(), ...(explicitTitle ? { title: explicitTitle } : {}) },
++    sessionMetadata: { title: explicitTitle || getSessionMetadata().title },
+     currentPromptConfig: currentPromptConfig,
+     fullHistory: fullHistory.value,
+     history: historyToSave,
+@@ -8129,7 +8352,6 @@ const handleSaveAction = async () => {
+ 
+ const loadSession = async (jsonData) => {
+   loading.value = true;
+-  sessionCreatedAt.value = resolveSessionCreatedAt(jsonData) || sessionCreatedAt.value;
+   isRestoringSessionSnapshot = true;
+   collapsedMessages.value.clear();
+   messageRefs.clear();
+@@ -10026,6 +10248,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -4218,7 +4349,7 @@ index 2118ef2..35a149e 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10043,6 +10298,18 @@ const deleteMessage = (index) => {
+@@ -10043,6 +10271,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4237,7 +4368,7 @@ index 2118ef2..35a149e 100644
  };
  
  const clearHistory = async () => {
-@@ -10383,6 +10650,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10383,6 +10623,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -4935,6 +5066,109 @@ index 0000000..dc036fe
 +  console.error(error)
 +  process.exitCode = 1
 +})
+diff --git a/tests/conversation-time.test.mjs b/tests/conversation-time.test.mjs
+deleted file mode 100644
+index bb652ce..0000000
+--- a/tests/conversation-time.test.mjs
++++ /dev/null
+@@ -1,97 +0,0 @@
+-import assert from 'node:assert/strict'
+-import fs from 'node:fs/promises'
+-import os from 'node:os'
+-import path from 'node:path'
+-import * as store from '../main/core/conversationStore.js'
+-import { readLocalProjects } from '../main/core/projects.js'
+-
+-const CREATED_AT = '2021-02-03T04:05:06.000Z'
+-const UPDATED_AT = '2021-02-04T05:06:07.000Z'
+-
+-function legacySession() {
+-  return {
+-    anywhere_history: true,
+-    sessionMetadata: { title: 'legacy time fixture' },
+-    fullHistory: [
+-      { role: 'system', content: 'system' },
+-      { role: 'user', content: 'first', timestamp: CREATED_AT },
+-      { role: 'assistant', content: 'last', completedTimestamp: UPDATED_AT }
+-    ],
+-    history: [],
+-    chat_show: [
+-      { role: 'user', content: 'first', timestamp: CREATED_AT },
+-      { role: 'assistant', content: 'last', completedTimestamp: UPDATED_AT }
+-    ]
+-  }
+-}
+-
+-async function main() {
+-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'anywhere-desktop-time-'))
+-  const importedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'anywhere-desktop-time-import-'))
+-  try {
+-    const legacyJson = 'legacy-time.json'
+-    await fs.writeFile(path.join(root, legacyJson), JSON.stringify(legacySession()), 'utf8')
+-
+-    const migrated = await store.migrateJsonConversation({ dirPath: root, jsonBasename: legacyJson })
+-    assert.equal(migrated.descriptor.createdAt, CREATED_AT)
+-    assert.equal(migrated.descriptor.updatedAt, UPDATED_AT)
+-
+-    const firstOpen = await store.openConversation({ dirPath: root, reference: migrated.descriptor.conversationId })
+-    assert.equal(firstOpen.descriptor.createdAt, CREATED_AT)
+-    assert.equal(firstOpen.sessionData.sessionMetadata.createdAt, CREATED_AT)
+-    assert.equal(firstOpen.sessionData.sessionMetadata.updatedAt, UPDATED_AT)
+-
+-    const secondOpen = await store.openConversation({ dirPath: root, reference: migrated.descriptor.conversationId })
+-    assert.equal(secondOpen.descriptor.createdAt, CREATED_AT)
+-    assert.equal(secondOpen.sessionData.sessionMetadata.createdAt, CREATED_AT)
+-
+-    const projects = await readLocalProjects(root)
+-    assert.equal(projects.conversations[migrated.descriptor.conversationId].createdAt, CREATED_AT)
+-
+-    const snapshot = await store.readConversationSnapshot({ dirPath: root, conversationId: migrated.descriptor.conversationId })
+-    const descriptorWithoutTimes = { ...migrated.descriptor }
+-    delete descriptorWithoutTimes.createdAt
+-    delete descriptorWithoutTimes.updatedAt
+-    const imported = await store.importConversationSnapshot({
+-      dirPath: importedRoot,
+-      descriptor: descriptorWithoutTimes,
+-      content: snapshot.content
+-    })
+-    assert.equal(imported.descriptor.createdAt, CREATED_AT)
+-    assert.equal(imported.descriptor.updatedAt, UPDATED_AT)
+-
+-    const importedOpen = await store.openConversation({ dirPath: importedRoot, reference: migrated.descriptor.conversationId })
+-    assert.equal(importedOpen.sessionData.sessionMetadata.createdAt, CREATED_AT)
+-    assert.equal(importedOpen.sessionData.sessionMetadata.updatedAt, UPDATED_AT)
+-
+-
+-    const lease = await store.acquireWriteLease({
+-      dirPath: root,
+-      conversationId: migrated.descriptor.conversationId,
+-      holderInstanceId: 'time-regression-writer',
+-      holderApp: 'desktop'
+-    })
+-    await store.saveConversationSnapshot({
+-      dirPath: root,
+-      conversationId: migrated.descriptor.conversationId,
+-      expectedRevision: 0,
+-      holderInstanceId: 'time-regression-writer',
+-      leaseEpoch: lease.leaseEpoch,
+-      title: migrated.descriptor.title,
+-      sessionData: firstOpen.sessionData
+-    })
+-    const afterSave = await store.openConversation({ dirPath: root, reference: migrated.descriptor.conversationId })
+-    assert.equal(afterSave.descriptor.createdAt, CREATED_AT)
+-    assert.equal(afterSave.sessionData.sessionMetadata.createdAt, CREATED_AT)
+-
+-    console.log('Desktop conversation time regression passed')
+-  } finally {
+-    await fs.rm(root, { recursive: true, force: true })
+-    await fs.rm(importedRoot, { recursive: true, force: true })
+-  }
+-}
+-
+-main().catch((error) => {
+-  console.error(error)
+-  process.exitCode = 1
+-})
 diff --git a/tests/project-move.test.mjs b/tests/project-move.test.mjs
 new file mode 100644
 index 0000000..80407f9
