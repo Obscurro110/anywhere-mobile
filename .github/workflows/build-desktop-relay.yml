@@ -48,7 +48,9 @@ jobs:
         shell: pwsh
         run: |
           $ref = "${{ github.event.inputs.upstream_ref }}"
-          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'v1.3.1' }
+          # 留空时跟随上游默认分支。补丁基线是 refs/heads/upstream-base，
+          # 它跟踪 origin/main；固定旧标签会在上游继续提交后无法干净套用。
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'main' }
           git clone --branch $ref --depth 1 https://github.com/Komorebi-yaodong/anywheredesktop.git upstream
           if ($LASTEXITCODE -ne 0) {
             git clone https://github.com/Komorebi-yaodong/anywheredesktop.git upstream

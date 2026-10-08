@@ -60,10 +60,10 @@ index 24faf63..cb6235b 100644
    electronLanguages:
      - zh-CN
 diff --git a/main/core/conversationStore.js b/main/core/conversationStore.js
-index 383c5ae..4e5b6bd 100644
+index a9f0178..7a036e1 100644
 --- a/main/core/conversationStore.js
 +++ b/main/core/conversationStore.js
-@@ -857,7 +857,8 @@ export async function listLocalConversations(dirPath) {
+@@ -996,7 +996,8 @@ export async function listLocalConversations(dirPath) {
      const stats = fileStats.get(descriptor.dbFile)
      if (!stats) continue
      if (descriptor.legacyJson) mappedLegacy.add(descriptor.legacyJson)
@@ -73,7 +73,7 @@ index 383c5ae..4e5b6bd 100644
      conversations.push({
        type: 'file',
        format: 'sqlite',
-@@ -897,7 +898,16 @@ export async function listLocalConversations(dirPath) {
+@@ -1036,7 +1037,16 @@ export async function listLocalConversations(dirPath) {
    )
    conversations.push(...legacyConversations.filter(Boolean))
  
@@ -91,7 +91,7 @@ index 383c5ae..4e5b6bd 100644
  }
  
  export async function loadConversationPage({ dirPath, conversationId, beforeOrdinal = null, beforeUiOrder = null, pageSize = 200 } = {}) {
-@@ -1137,9 +1147,31 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
+@@ -1363,9 +1373,31 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
      return withTransaction(db, () => {
        assertConversationWriteLease(db, { holderInstanceId, leaseEpoch })
        const stmt = db.prepare('DELETE FROM messages WHERE message_uuid = ?')
@@ -204,10 +204,10 @@ index 5449460..211ea39 100644
  
        zip.writeZip(outputPath)
 diff --git a/main/index.js b/main/index.js
-index f63f831..dda515c 100644
+index b82eac0..6ae0554 100644
 --- a/main/index.js
 +++ b/main/index.js
-@@ -59,6 +59,8 @@ import * as compactApi from './core/compact.js'
+@@ -63,6 +63,8 @@ import { createRemoteConversationReadService } from './core/remote/conversationR
  
  import { applyNetworkProxyConfig, installRequestHeaderBridge } from './core/net.js'
  import { startTaskScheduler } from './core/task_scheduler.js'
@@ -216,8 +216,8 @@ index f63f831..dda515c 100644
  
  let appTray = null
  let appQuitStarted = false
-@@ -730,6 +732,11 @@ app.whenReady().then(async () => {
-   await syncDesktopRuntimeFromConfig()
+@@ -795,6 +797,11 @@ app.whenReady().then(async () => {
+   })
    ensureTray()
    await openWindow('main')
 +
@@ -229,7 +229,7 @@ index f63f831..dda515c 100644
      preheatScreenshotWindow()
    }, 800)
 diff --git a/main/ipcHandler.js b/main/ipcHandler.js
-index 4e20fa8..7a50ac3 100644
+index 3d0b346..f35ec10 100644
 --- a/main/ipcHandler.js
 +++ b/main/ipcHandler.js
 @@ -3,6 +3,7 @@ import crypto from 'node:crypto'
@@ -240,7 +240,7 @@ index 4e20fa8..7a50ac3 100644
  
  const GITHUB_PACKAGE_JSON_URL = 'https://raw.githubusercontent.com/Komorebi-yaodong/anywheredesktop/main/package.json'
  const GITEE_PACKAGE_JSON_URL = 'https://gitee.com/Komorebi-yaodong/anywheredesktop/raw/main/package.json'
-@@ -1284,11 +1285,17 @@ handleInvoke('file:isFileTypeSupported', async (_event, fileName = '') => {
+@@ -1336,11 +1337,17 @@ handleInvoke('file:isFileTypeSupported', async (_event, fileName = '') => {
  
  
    handleInvoke('conversation:rename', async (_event, input = {}) => {
@@ -2898,10 +2898,10 @@ index 0000000..2db9879
 +}
 diff --git a/main/relay/relay-client.js b/main/relay/relay-client.js
 new file mode 100644
-index 0000000..1206e2b
+index 0000000..fb1f47e
 --- /dev/null
 +++ b/main/relay/relay-client.js
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,338 @@
 +import { EventEmitter } from 'node:events';
 +import WebSocket from 'ws';
 +import http from 'node:http';
@@ -3011,7 +3011,13 @@ index 0000000..1206e2b
 +    } catch {}
 +    try {
 +      // readyState: 0 CONNECTING / 1 OPEN / 2 CLOSING / 3 CLOSED
-+      if (ws.readyState === 0 || ws.readyState === 1) ws.terminate?.() ?? ws.close();
++      // ⚠️ 以前写 `ws.terminate?.() ?? ws.close()`：terminate() **返回 undefined**，
++      // 所以 ?? 不会短路，close() 还会跟着执行一次（对已销毁的 socket 调 close
++      // 会抛，被这里吞掉）。虽然结果无害，但意图不清。改成明确的分支。
++      if (ws.readyState === 0 || ws.readyState === 1) {
++        if (typeof ws.terminate === 'function') ws.terminate()
++        else ws.close()
++      }
 +    } catch {}
 +  }
 +
@@ -3236,7 +3242,7 @@ index 0000000..1206e2b
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..e9d1707
+index 0000000..f195eed
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -3248,14 +3254,14 @@ index 0000000..e9d1707
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.22';
-+export const RELAY_VERSION_CODE = 42;
++export const RELAY_VERSION = '1.7.23';
++export const RELAY_VERSION_CODE = 43;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
-index 2096f34..eaed491 100644
+index 0c26e04..bd768e9 100644
 --- a/main/windowManager.js
 +++ b/main/windowManager.js
-@@ -790,7 +790,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig =
+@@ -812,7 +812,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig =
          ? payload.tempPromptConfig
          : null,
      senderId,
@@ -3278,7 +3284,7 @@ index 2096f34..eaed491 100644
  }
  
 diff --git a/package.json b/package.json
-index e60ec30..751baa4 100644
+index 38e2436..e40adc1 100644
 --- a/package.json
 +++ b/package.json
 @@ -18,6 +18,9 @@
@@ -3288,32 +3294,14 @@ index e60ec30..751baa4 100644
 +    "test:relay-routing": "node tests/relay-routing.test.mjs",
 +    "test:conversation-order": "node tests/conversation-order.test.mjs",
 +    "test:project-move": "node tests/project-move.test.mjs",
-     "postinstall": "electron-builder install-app-deps",
-     "build:unpack": "pnpm run build && electron-builder --dir --publish never",
-     "build:win": "pnpm run build && electron-builder --win nsis --publish never",
-@@ -54,6 +57,7 @@
-     "openai": "6.18.0",
-     "pinyin-pro": "^3.28.0",
-     "webdav": "^5.9.0",
-+    "ws": "^8.18.0",
-     "xlsx": "^0.18.5"
-   },
-   "devDependencies": {
+     "test:remote-crypto": "node tests/remote-crypto.test.mjs",
+     "test:remote-gateway": "node tests/remote-gateway.test.mjs",
+     "test:remote-config": "node tests/remote-config-local.test.mjs",
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index eb06201..8820426 100644
+index b31cec8..071a54b 100644
 --- a/pnpm-lock.yaml
 +++ b/pnpm-lock.yaml
-@@ -86,6 +86,9 @@ importers:
-       webdav:
-         specifier: ^5.9.0
-         version: 5.9.0
-+      ws:
-+        specifier: ^8.18.0
-+        version: 8.21.1
-       xlsx:
-         specifier: ^0.18.5
-         version: 0.18.5
-@@ -1084,66 +1087,79 @@ packages:
+@@ -1144,66 +1144,79 @@ packages:
      resolution: {integrity: sha512-t4ONHboXi/3E0rT6OZl1pKbl2Vgxf9vJfWgmUoCEVQVxhW6Cw/c8I6hbbu7DAvgp82RKiH7TpLwxnJeKv2pbsw==}
      cpu: [arm]
      os: [linux]
@@ -3393,21 +3381,20 @@ index eb06201..8820426 100644
  
    '@rollup/rollup-openbsd-x64@4.59.0':
      resolution: {integrity: sha512-M3bLRAVk6GOwFlPTIxVBSYKUaqfLrn8l0psKinkCFxl4lQvOSz8ZrKDz2gxcBwHFpci0B6rttydI4IpS4IS/jQ==}
-@@ -9770,8 +9786,7 @@ snapshots:
+@@ -2791,7 +2804,7 @@ packages:
  
-   wrappy@1.0.2: {}
+   glob@7.2.3:
+     resolution: {integrity: sha512-nFR0zLpU2YCaRxwoCJvL6UvCH2JFyFVIvwTLsIf21AuHlMskA1hhTdk+LlYJtOlYt9v6dvszD2BGRqBL+iQK9Q==}
+-    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
++    deprecated: Glob versions prior to v9 are no longer supported
  
--  ws@8.21.1:
--    optional: true
-+  ws@8.21.1: {}
- 
-   xlsx@0.18.5:
-     dependencies:
+   global-agent@3.0.0:
+     resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
 diff --git a/preload/main_preload.js b/preload/main_preload.js
-index 3d476ea..f9f75db 100644
+index a1872a6..68d8469 100644
 --- a/preload/main_preload.js
 +++ b/preload/main_preload.js
-@@ -75,6 +75,14 @@ const api = {
+@@ -91,6 +91,14 @@ const api = {
    installAppUpdate: () => electronAPI.ipcRenderer.invoke('app:update:install'),
    clearAppUpdateCache: () => electronAPI.ipcRenderer.invoke('app:update:clearCache'),
  
@@ -3423,12 +3410,12 @@ index 3d476ea..f9f75db 100644
  getDroppedFilePath: (file) => {
      try {
 diff --git a/preload/window_preload.js b/preload/window_preload.js
-index 71669d3..46c305c 100644
+index 03cfac5..4c9d2ca 100644
 --- a/preload/window_preload.js
 +++ b/preload/window_preload.js
-@@ -234,6 +234,15 @@ const api = {
-   hideMainWindow: () => electronAPI.ipcRenderer.invoke('window:hideMain'),
-   listWindows: (type = '') => electronAPI.ipcRenderer.invoke('window:list', type),
+@@ -236,6 +236,15 @@ const api = {
+   updateConversationWindowStatus: (input = {}) =>
+     electronAPI.ipcRenderer.invoke('window:conversationStatus', toPlainPayload(input) || {}),
    emitWindowEvent: (input) => electronAPI.ipcRenderer.invoke('window:event:emit', input),
 +
 +  // ===== [anywhere-mobile] 手机互通中继 =====
@@ -3443,10 +3430,10 @@ index 71669d3..46c305c 100644
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
 diff --git a/render/main/App.vue b/render/main/App.vue
-index e3c6cea..393b671 100644
+index 8f724d1..9714d5d 100644
 --- a/render/main/App.vue
 +++ b/render/main/App.vue
-@@ -732,7 +732,13 @@ const fetchAndParseDoc = async (filename) => {
+@@ -737,7 +737,13 @@ const fetchAndParseDoc = async (filename) => {
        return `![${alt}](${imgBaseUrl}${encodeURIComponent(imgFilename)})`;
      });
  
@@ -3510,7 +3497,7 @@ index 7ded1c4..b72f44b 100644
          </div>
        </div>
 diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
-index 2ad1391..28cb7e4 100644
+index 23ba179..b845918 100644
 --- a/render/main/components/Setting.vue
 +++ b/render/main/components/Setting.vue
 @@ -91,22 +91,82 @@ const collapsedCards = ref({
@@ -3645,7 +3632,7 @@ index 2ad1391..28cb7e4 100644
  })
  
  onDeactivated(() => {
-@@ -1927,12 +1996,7 @@ async function pullSelectedCloudSkillsToLocal() {
+@@ -1931,12 +2000,7 @@ async function pullSelectedCloudSkillsToLocal() {
            <template #item="{ element }">
              <div class="settings-card">
                <div class="card-header" :class="{ 'is-collapsed': collapsedCards[element.id] }" @click="toggleCard(element.id)">
@@ -3659,7 +3646,7 @@ index 2ad1391..28cb7e4 100644
                  <el-icon class="collapse-icon" :class="{ 'is-expanded': !collapsedCards[element.id] }"><ArrowRight /></el-icon>
                </div>
  
-@@ -2146,59 +2210,7 @@ async function pullSelectedCloudSkillsToLocal() {
+@@ -2150,59 +2214,7 @@ async function pullSelectedCloudSkillsToLocal() {
                        </div>
                      </div>
                    </div>
@@ -3719,7 +3706,7 @@ index 2ad1391..28cb7e4 100644
  
                    <div v-if="element.id === 'data'" class="card-body">
                      <div class="setting-option-item">
-@@ -2310,6 +2322,79 @@ async function pullSelectedCloudSkillsToLocal() {
+@@ -2314,6 +2326,79 @@ async function pullSelectedCloudSkillsToLocal() {
                      </div>
                    </div>
  
@@ -3800,7 +3787,7 @@ index 2ad1391..28cb7e4 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 2118ef2..7a3fa69 100644
+index 68ac2ff..e5aac99 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,199 @@ const normalizeWindowEventPayload = (input) => {
@@ -4085,7 +4072,7 @@ index 2118ef2..7a3fa69 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3072,7 +3312,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3114,7 +3354,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -4102,7 +4089,7 @@ index 2118ef2..7a3fa69 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5244,6 +5492,7 @@ onMounted(async () => {
+@@ -5286,6 +5534,7 @@ onMounted(async () => {
  
    window.__AGENT_API__ = {
      isBusy: () => loading.value || compacting.value,
@@ -4110,7 +4097,7 @@ index 2118ef2..7a3fa69 100644
  
      getChatLength: () => chat_show.value.length,
  
-@@ -5713,7 +5962,18 @@ onMounted(async () => {
+@@ -5755,7 +6004,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -4130,7 +4117,7 @@ index 2118ef2..7a3fa69 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10026,6 +10286,12 @@ const deleteMessage = (index) => {
+@@ -10071,6 +10331,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -4143,7 +4130,7 @@ index 2118ef2..7a3fa69 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10043,6 +10309,18 @@ const deleteMessage = (index) => {
+@@ -10088,6 +10354,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4162,7 +4149,7 @@ index 2118ef2..7a3fa69 100644
  };
  
  const clearHistory = async () => {
-@@ -10383,6 +10661,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10428,6 +10706,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
