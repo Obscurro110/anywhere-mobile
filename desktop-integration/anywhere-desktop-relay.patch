@@ -3294,10 +3294,28 @@ index 0000000..f195eed
 +export const RELAY_VERSION_CODE = 43;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
-index 0c26e04..bd768e9 100644
+index 0c26e04..94c5965 100644
 --- a/main/windowManager.js
 +++ b/main/windowManager.js
-@@ -812,7 +812,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig =
+@@ -475,15 +475,14 @@ function resolvePromptDisplayName(payload = null, promptCode = '__DEFAULT__') {
+   if (filename) return filename
+ 
+   return 'AI'
++}
++
+ function normalizeConversationMetadataId(value = '') {
+   const normalized = typeof value === 'string' ? value.trim() : ''
+   if (!/^[A-Za-z0-9._:-]{16,160}$/.test(normalized)) return ''
+   return normalized
+ }
+ 
+-
+-}
+-
+ function buildWindowMetadata(windowRef = '', payload = null, fullConfig = {}, promptCode = '__DEFAULT__', promptConfig = null) {
+   const resolvedPromptConfig =
+     promptConfig && typeof promptConfig === 'object'
+@@ -812,7 +811,20 @@ async function buildWindowInitMessage(payload = {}, senderId = '', fullConfig =
          ? payload.tempPromptConfig
          : null,
      senderId,
