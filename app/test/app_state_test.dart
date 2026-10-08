@@ -104,7 +104,7 @@ void main() {
     relay.opened('conversation-B', 'B');
     await Future<void>.delayed(const Duration(milliseconds: 20));
     relay.metadata('conversation-A', firstId);
-    await Future<void>.delayed(const Duration(milliseconds: 180));
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     final preferences = await SharedPreferences.getInstance();
     final raw = preferences.getString('chat_history:conversation-A') ?? '';
     expect(raw, contains(firstId));

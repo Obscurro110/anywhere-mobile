@@ -1559,6 +1559,9 @@ class AppState extends ChangeNotifier {
         if (_detachedConversationIds.contains(convId)) return;
         if (desktopId.isEmpty || index < 0) return;
         final targetId = convId.isEmpty ? _activeConversationId : convId;
+        if (_activeConversationId == null && convId.isNotEmpty) {
+          _bindActiveConversationSilently(convId);
+        }
         if (targetId == null || targetId != _activeConversationId) {
           await _updateStoredMessage(targetId, clientId, (old) => ChatMessage(
             id: old.id,
