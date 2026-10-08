@@ -268,14 +268,21 @@ class AppState extends ChangeNotifier {
   ) async {
     if (messageId.isEmpty) return;
     final key = _historyKey(conversationId);
-    while (_historyWrites.containsKey(key)) {
-      await _historyWrites[key];
-    }
+    var previous = _historyWrites[key] ?? Future<void>.value();
+    final current = previous.catchError((_) {}).then((_) async {
     final stored = _decodeHistory((await SharedPreferences.getInstance()).getString(key));
     final index = stored.indexWhere((message) => message.id == messageId);
     if (index < 0) return;
     stored[index] = update(stored[index]);
-    await _persistMessagesTo(conversationId, stored);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(key, jsonEncode(stored.map((e) => e.toJson()).toList()));
+    });
+    _historyWrites[key] = current;
+    try {
+      await current;
+    } finally {
+      if (identical(_historyWrites[key], current)) _historyWrites.remove(key);
+    }
   }
 
   List<ChatMessage> _mergeHistory(List<ChatMessage> stored, List<ChatMessage> incoming) {
@@ -1095,7 +1102,7 @@ class AppState extends ChangeNotifier {
         _handlePresence(env);
         break;
       case MsgType.chat:
-        _handleChat(env);
+        await _handleChat(env);
         break;
       case MsgType.notification:
         await _handleNotification(env);
@@ -1129,7 +1136,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void _handleChat(Envelope env) {
+  Future<void> _handleChat(Envelope env) async {
     final p = ChatPayload.fromJson((env.payload as Map).cast<String, dynamic>());
 
     // Desktop capability list
