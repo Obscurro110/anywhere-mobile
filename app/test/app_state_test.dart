@@ -95,6 +95,22 @@ void main() {
     expect(relay.sent.last.payload['__relayNewConversation'], isNull);
   });
 
+  test('switching away preserves messages persisted during the switch', () async {
+    state.historyWriteDelay = const Duration(milliseconds: 80);
+    relay.opened('conversation-A', 'A');
+    await settle();
+    expect(state.sendChat('first'), isTrue);
+    final firstId = relay.sent.last.id;
+    relay.opened('conversation-B', 'B');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    relay.metadata('conversation-A', firstId);
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    final preferences = await SharedPreferences.getInstance();
+    final raw = preferences.getString('chat_history:conversation-A') ?? '';
+    expect(raw, contains(firstId));
+    expect(raw, contains('desktop-message'));
+  });
+
   test('disconnect during upload does not create a sent attachment', () async {
     await expectLater(state.shareFile(File('unused-test-file')), throwsStateError);
     expect(state.messages, isEmpty);

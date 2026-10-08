@@ -173,7 +173,10 @@ class AppState extends ChangeNotifier {
   String get activeConversationTitle => _activeConversationTitle;
 
   int _conversationSwitchGeneration = 0;
+  @visibleForTesting
+  Duration historyWriteDelay = Duration.zero;
   final Set<String> _detachedConversationIds = {};
+  final Map<String, Future<void>> _historyWrites = {};
 
   /// 切换「当前对话的电脑端会话」。
   ///
@@ -219,18 +222,58 @@ class AppState extends ChangeNotifier {
   }
 
   /// 把指定的一份消息写到**指定会话**的 key（不依赖当前 _activeConversationId）。
-  Future<void> _persistMessagesTo(String? conversationId, List<ChatMessage> msgs) async {
+  Future<void> _persistMessagesTo(String? conversationId, List<ChatMessage> msgs) {
+    final key = _historyKey(conversationId);
+    final delay = historyWriteDelay;
+    final previous = _historyWrites[key] ?? Future<void>.value();
+    final current = previous.catchError((_) {}).then((_) async {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      try {
+        final p = await SharedPreferences.getInstance();
+        final existing = _decodeHistory(p.getString(key));
+        final merged = _mergeHistory(existing, msgs);
+        final trimmed = merged.length > 500 ? merged.sublist(merged.length - 500) : merged;
+        await p.setString(
+          key,
+          jsonEncode(trimmed.map((e) => e.toJson()).toList()),
+        );
+      } catch (e) {
+        debugPrint('[AppState] _persistMessagesTo failed: $e');
+      }
+    });
+    _historyWrites[key] = current;
+    return current.whenComplete(() {
+      if (identical(_historyWrites[key], current)) _historyWrites.remove(key);
+    });
+  }
+
+  List<ChatMessage> _decodeHistory(String? raw) {
+    if (raw == null || raw.isEmpty) return [];
     try {
-      final p = await SharedPreferences.getInstance();
-      final keep = msgs.where((m) => !m.pending).toList();
-      final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
-      await p.setString(
-        _historyKey(conversationId),
-        jsonEncode(trimmed.map((e) => e.toJson()).toList()),
-      );
-    } catch (e) {
-      debugPrint('[AppState] _persistMessagesTo failed: $e');
+      final list = jsonDecode(raw) as List;
+      return list
+          .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
+          .where((m) => !m.pending)
+          .toList();
+    } catch (_) {
+      return [];
     }
+  }
+
+  /// 同一会话的多次保存可能乱序完成。按消息 ID 合并，不能让较旧快照覆盖新快照。
+  List<ChatMessage> _mergeHistory(List<ChatMessage> stored, List<ChatMessage> incoming) {
+    final byId = <String, ChatMessage>{
+      for (final message in stored.where((m) => !m.pending)) message.id: message,
+    };
+    final order = stored.map((m) => m.id).toList();
+    for (final message in incoming.where((m) => !m.pending)) {
+      if (!byId.containsKey(message.id)) order.add(message.id);
+      byId[message.id] = message;
+    }
+    return [
+      for (final id in order)
+        if (byId.containsKey(id)) byId[id]!,
+    ];
   }
 
   void _bind() {
@@ -1906,20 +1949,18 @@ class AppState extends ChangeNotifier {
         _activeConversationId != conversationId) {
       return;
     }
+    await (_historyWrites[_historyKey(conversationId)] ?? Future<void>.value());
+    if (generation != _conversationSwitchGeneration ||
+        _activeConversationId != conversationId) {
+      return;
+    }
     final raw = p.getString(_historyKey(conversationId));
 
     // await 期间新到的消息，稍后补回去（按 id 去重，避免和磁盘里的重复）
     final arrived = messages.toList();
 
     messages.clear();
-    if (raw != null) {
-      try {
-        final list = jsonDecode(raw) as List;
-        messages.addAll(list
-            .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
-            .where((m) => !m.pending));
-      } catch (_) {}
-    }
+    messages.addAll(_decodeHistory(raw));
     if (arrived.isNotEmpty) {
       final have = messages.map((m) => m.id).toSet();
       messages.addAll(arrived.where((m) => !have.contains(m.id)));
