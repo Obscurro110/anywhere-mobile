@@ -3861,7 +3861,7 @@ index 23ba179..b845918 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 68ac2ff..e5aac99 100644
+index 68ac2ff..fe562aa 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,199 @@ const normalizeWindowEventPayload = (input) => {
@@ -4223,7 +4223,7 @@ index 68ac2ff..e5aac99 100644
  };
  
  const clearHistory = async () => {
-@@ -10428,6 +10706,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10428,6 +10706,562 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -4361,7 +4361,7 @@ index 68ac2ff..e5aac99 100644
 +};
 +
 +/** 组装 meta（选项/工具/思考/token）并转成纯对象（Vue Proxy 不能直接过 IPC）。 */
-+const buildAssistantExtra = (last, assistantIndex, { tools = null, update = false } = {}) => {
++const buildAssistantExtra = (last, assistantIndex, { tools = null, update = false, streaming = false } = {}) => {
 +  let relayChoice = null;
 +  if (Array.isArray(last?.tool_calls)) {
 +    const pendingChoice = last.tool_calls.find(
@@ -4399,6 +4399,9 @@ index 68ac2ff..e5aac99 100644
 +          : '',
 +      ...(tools && tools.length ? { toolCalls: tools } : {}),
 +      ...(update ? { update: true } : {}),
++      // 流式进行中：手机端据此显示「正在生成」并把增量文本滚动出来，
++      // 不用等整轮结束才出现内容。
++      ...(streaming ? { streaming: true } : {}),
 +      startTime: Number(last?.startTime) || Number(last?.timestamp) || 0,
 +      endTime: Number(last?.endTime) || 0,
 +      ...(relayTokens ? { tokens: relayTokens } : {})
@@ -4466,6 +4469,13 @@ index 68ac2ff..e5aac99 100644
 +      p.payload.trim().length > 0;
 +    if (isRealPhoneMessage) {
 +      enqueueRelayReply(relayTo);
++      // 立刻回一个"已受理"状态：把本轮的 assistant 气泡 id 先给手机，
++      // 这样手机上马上能看到「正在生成」，后面每次流式推送都就地更新它。
++      // 以前要等 watcher 因为 loading/chat_show 变化才动，空窗期很长。
++      setTimeout(() => {
++        pushLiveToolStatus().catch(() => {});
++        pushLiveTextStatus().catch(() => {});
++      }, 120);
 +    } else {
 +      armRelayReply(relayTo);
 +      relayLog('[relay] arm-only event (not queued)');
@@ -4547,28 +4557,34 @@ index 68ac2ff..e5aac99 100644
 +// 手机端显示转圈；节流避免刷屏。
 +let relayLiveToolSig = '';
 +let relayLiveToolAt = 0;
++// ⚠️ 这里刻意**不要求**已经有 tool_calls / 正文：
++// 以前只有「工具已经开始跑」或「正文已经有字」才推，于是从"手机消息已送达"
++// 到"AI 吐出第一段"之间是完全没有回包的 —— 手机上就只能干等一个静态的
++// 「电脑端正在处理…」，看不到任何过程（用户反馈的「不显示等待过程」）。
++// 现在只要本轮在跑、最后一条是 assistant，就把当前状态（可能还是空的正文 +
++// streaming 标记）推过去，手机端至少能显示「正在生成」并在有字后滚动出来。
 +const pushLiveToolStatus = async () => {
 +  const to = relayReplyTarget.value;
 +  if (!to || !loading.value) return;
 +  const list = chat_show.value;
 +  const last = list[list.length - 1];
 +  if (!last || last.role !== 'assistant') return;
-+  if (!Array.isArray(last.tool_calls) || !last.tool_calls.length) return;
-+  const waitingUser = last.tool_calls.some(
++  const waitingUser = Array.isArray(last.tool_calls) && last.tool_calls.some(
 +    (tc) => tc && (tc.approvalStatus === 'choosing' || tc.approvalStatus === 'waiting')
 +  );
 +  // 等用户交互时走正常下发（带选项），这里不重复推
 +  if (waitingUser) return;
-+  const sig = `${last.id}#${relayToolSignature(last)}`;
++  const sig = `${last.id}#${relayToolSignature(last)}#${relayMessageText(last).length}`;
 +  if (sig === relayLiveToolSig) return;
 +  const now = Date.now();
-+  if (now - relayLiveToolAt < 700) return;
++  if (now - relayLiveToolAt < RELAY_LIVE_STATUS_THROTTLE_MS) return;
 +  relayLiveToolSig = sig;
 +  relayLiveToolAt = now;
 +  try {
 +    const extra = buildAssistantExtra(last, list.length - 1, {
 +      tools: relayToolCallsPayload(last),
-+      update: true
++      update: true,
++      streaming: true
 +    });
 +    await window.api.sendRelayChat({ text: relayMessageText(last), to, extra });
 +    relayLog('[relay] live tool status pushed');
@@ -4584,7 +4600,11 @@ index 68ac2ff..e5aac99 100644
 +let relayLiveTextSig = '';
 +let relayLiveTextAt = 0;
 +const relayLiveTextSentIds = new Set();
-+const RELAY_LIVE_TEXT_THROTTLE_MS = 800;
++// 逐字滚动靠这个节流：以前 800ms 才推一次、每次推一整段，手机上就是
++// 「一大段突然闪出来」。降到 150ms 后按块连续滚动，接近逐字效果。
++const RELAY_LIVE_TEXT_THROTTLE_MS = 150;
++// 状态推送（含"还没出正文"的空状态）用同一个节流节奏。
++const RELAY_LIVE_STATUS_THROTTLE_MS = 150;
 +const pushLiveTextStatus = async () => {
 +  const to = relayReplyTarget.value;
 +  if (!to || !loading.value) return;
@@ -4613,7 +4633,8 @@ index 68ac2ff..e5aac99 100644
 +  try {
 +    const extra = buildAssistantExtra(last, list.length - 1, {
 +      tools: relayToolCallsPayload(last),
-+      update: true
++      update: true,
++      streaming: true
 +    });
 +    await window.api.sendRelayChat({ text, to, extra });
 +    relayLog('[relay] live text pushed len =', text.length);

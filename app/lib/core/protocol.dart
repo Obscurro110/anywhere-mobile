@@ -323,6 +323,11 @@ class AssistantMeta {
   /// 手机上渲染成折叠块，执行中显示转圈 —— 不再铺成一大段文字。
   final List<ToolCallMeta> toolCalls;
 
+  /// 电脑端正在**流式生成**这条回复（还没跑完）。
+  /// true 时手机显示「正在生成…」转圈，并在每次更新时就地滚动文本，
+  /// 而不是等整轮结束才「一大段突然闪出来」。
+  final bool streaming;
+
   AssistantMeta({
     this.messageId = '',
     this.index = -1,
@@ -334,6 +339,7 @@ class AssistantMeta {
     this.tokens,
     this.reasoning = '',
     this.toolCalls = const <ToolCallMeta>[],
+    this.streaming = false,
   });
 
   bool get isValid => messageId.isNotEmpty && index >= 0;
@@ -350,6 +356,7 @@ class AssistantMeta {
         if (reasoning.isNotEmpty) 'reasoning': reasoning,
         if (toolCalls.isNotEmpty)
           'toolCalls': toolCalls.map((e) => e.toJson()).toList(),
+        if (streaming) 'streaming': true,
       };
 
   factory AssistantMeta.fromJson(Map<String, dynamic> j) => AssistantMeta(
@@ -372,6 +379,7 @@ class AssistantMeta {
                 .map((e) => ToolCallMeta.fromJson(e.cast<String, dynamic>()))
                 .toList()
             : const <ToolCallMeta>[],
+        streaming: j['streaming'] == true,
       );
 }
 

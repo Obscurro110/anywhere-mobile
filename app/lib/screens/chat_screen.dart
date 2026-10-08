@@ -243,6 +243,28 @@ class _Bubble extends StatelessWidget {
               )
             else if (msg.text.isNotEmpty)
               _MarkdownText(text: msg.text),
+            // 电脑端已受理、正在流式生成但这一帧还没出正文：
+            // 显示「正在生成…」，而不是干等一个空气泡。
+            if (!outgoing &&
+                !msg.pending &&
+                msg.text.isEmpty &&
+                (msg.desktopMeta?.streaming ?? false))
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    SizedBox(width: 8),
+                    Text('电脑端正在生成…',
+                        style: TextStyle(fontSize: 13, color: Colors.white70)),
+                  ],
+                ),
+              ),
             // 工具调用：折叠块，默认收起（执行中转圈）。
             // 以前是拼成一大段文字直接铺在气泡里，手机上刷屏。
             if (!outgoing &&

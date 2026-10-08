@@ -143,6 +143,16 @@ class AppState extends ChangeNotifier {
   String? _activeConversationId;
   String _activeConversationTitle = '';
 
+  /// 未绑定电脑端会话时（手机自建会话）用的本地会话 id。
+  ///
+  /// ⚠️ 以前未绑定时固定共用一个 `chat_history` key，于是：
+  ///   · 换助手要"开新会话"时，旧记录写回同一个 key，
+  ///     `_mergeHistory` 又按 id 把旧消息合并回来 —— 界面上就是
+  ///     「切换助手后上一段会话记录还在」；
+  ///   · 用户反复换助手，历史永远混在同一份存储里。
+  /// 现在每次「开新会话」都换一个本地 id，各自独享一个 key。
+  String _localSessionId = '';
+
   /// True while we're waiting for the desktop's reply (drives the UI spinner).
   bool get awaitingReply => hasPendingReply;
 
@@ -203,7 +213,18 @@ class AppState extends ChangeNotifier {
     // 落盘和加载都基于快照/新 id，天然不会串。
     final oldId = _activeConversationId;
     final snapshot = messages.where((m) => !m.pending).toList();
+    // ⚠️ 必须在改动 _localSessionId **之前**把旧 key 定下来：
+    // _historyKey 依赖 _localSessionId，晚一步快照就会被写进新会话的 key，
+    // 新旧记录混在一起（就是用户看到的「切换助手后上一段记录还在」）。
+    final oldKey = _historyKey(oldId);
     final switchGeneration = ++_conversationSwitchGeneration;
+
+    // 「开新会话」：如果当前没有绑定电脑端会话，就换一个本地会话 id。
+    // 只有换了 key，新会话才有一份干净的存储；否则未绑定会话共用一个
+    // chat_history key，_mergeHistory 会把上一段记录按 id 合并回来。
+    if (startBlank && (id == null || id.isEmpty)) {
+      _localSessionId = DateTime.now().microsecondsSinceEpoch.toString();
+    }
 
     _activeConversationId = id;
     _activeConversationTitle = title;
@@ -213,14 +234,39 @@ class AppState extends ChangeNotifier {
 
     unawaited(() async {
       // 旧会话的记录用**快照 + 旧 key** 落盘（此时 _activeConversationId 已变）
-      await _persistMessagesTo(oldId, snapshot);
+      await _persistMessagesToKey(oldKey, snapshot);
       if (switchGeneration != _conversationSwitchGeneration || _activeConversationId != id) return;
-      // 新会话必须从空白开始。未绑定记录共用一个 key，重新加载会把上一条会话带回来。
+      // 新会话必须从空白开始。
       if (startBlank) return;
       await _switchHistoryTo(id, switchGeneration);
       // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
       notifyListeners();
     }());
+  }
+
+  /// 把一份消息写到**指定的 key**（调用方自己算好，避免 _localSessionId 漂移）。
+  Future<void> _persistMessagesToKey(String key, List<ChatMessage> msgs) {
+    final delay = historyWriteDelay;
+    final previous = _historyWrites[key] ?? Future<void>.value();
+    final current = previous.catchError((_) {}).then((_) async {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      try {
+        final p = await SharedPreferences.getInstance();
+        final existing = _decodeHistory(p.getString(key));
+        final merged = _mergeHistory(existing, msgs);
+        final trimmed = merged.length > 500 ? merged.sublist(merged.length - 500) : merged;
+        await p.setString(
+          key,
+          jsonEncode(trimmed.map((e) => e.toJson()).toList()),
+        );
+      } catch (e) {
+        debugPrint('[AppState] _persistMessagesToKey failed: $e');
+      }
+    });
+    _historyWrites[key] = current;
+    return current.whenComplete(() {
+      if (identical(_historyWrites[key], current)) _historyWrites.remove(key);
+    });
   }
 
   /// 把指定的一份消息写到**指定会话**的 key（不依赖当前 _activeConversationId）。
@@ -439,7 +485,12 @@ class AppState extends ChangeNotifier {
     // 也就是用户说的「会话和助手绑定不严格 / 会错乱」。
     //
     // 正确语义：**换助手 = 开新会话**。
-    if (fromUser && _activeConversationId != null) {
+    //
+    // ⚠️ 条件里**不能**有 `_activeConversationId != null`：
+    // 手机自建会话（没对接电脑端某个会话）时换助手，同样要开新会话。
+    // 以前只有"已绑定"才清空，未绑定时 messages 原样留着，用户看到的就是
+    // 「切换助手后前一段会话记录还有残留」。现在无论绑没绑定都重置。
+    if (fromUser) {
       final changed = (key ?? '') != (options.promptKey ?? '');
       if (changed) {
         // ⚠️ 这里只解绑，**不能**设 _leftConversationManually：
@@ -448,7 +499,10 @@ class AppState extends ChangeNotifier {
         // _bindActiveConversationSilently 会拒绝绑定 → 每轮都开新会话，
         // 新助手必须开启新的电脑端会话，而不是复用旧手机窗口。
         _forceNewConversationOnNextMessage = true;
-        _detachedConversationIds.add(_activeConversationId!);
+        if (_activeConversationId != null) {
+          _detachedConversationIds.add(_activeConversationId!);
+        }
+        // startBlank 会同时换掉本地会话 key，历史不会合并回来。
         _setActiveConversation(null, '', startBlank: true);
       }
     }
@@ -1721,7 +1775,11 @@ class AppState extends ChangeNotifier {
           modelTag: p.assistantMeta?.modelTag ?? prev.modelTag,
           choice: p.choice ?? p.assistantMeta?.choice ?? prev.choice,
         );
-        _persistHistory();
+        // 流式增量（每 ~150ms 一次）不落盘、不打扰：最终完整版到达时才写。
+        // 否则一次回复会触发几十次 SharedPreferences 写入 + 通知。
+        if (p.assistantMeta?.streaming != true) {
+          _persistHistory();
+        }
         notifyListeners();
         return;
       }
@@ -1758,11 +1816,16 @@ class AppState extends ChangeNotifier {
         choice: p.choice ?? p.assistantMeta?.choice,
       ));
     }
-    _persistHistory();
+    // 流式增量不落盘、不弹通知（见上：一次回复会有几十次增量）。
+    if (p.assistantMeta?.streaming != true) {
+      _persistHistory();
 
-    // if it came from desktop while app in background, surface a notification
-    if (isAssistant) {
-      notifications.show('Anywhere', p.text, id: env.ts.remainder(100000));
+      // if it came from desktop while app in background, surface a notification
+      if (isAssistant) {
+        notifications.show('Anywhere', p.text, id: env.ts.remainder(100000));
+      }
+    } else {
+      notifyListeners();
     }
   }
 
@@ -2001,8 +2064,12 @@ class AppState extends ChangeNotifier {
   /// 看起来就是「多个对话互相重合」。现在每个会话各有各的 key。
   String _historyKey(String? conversationId) {
     final id = (conversationId ?? '').trim();
-    // 没绑定任何电脑端会话时（本机随便聊）用一个固定 key
-    return id.isEmpty ? 'chat_history' : 'chat_history:$id';
+    if (id.isNotEmpty) return 'chat_history:$id';
+    // 没绑定任何电脑端会话时（本机自己聊）用一个**按本地会话区分**的 key：
+    // 换助手开新会话时会换 _localSessionId，历史不会互相合并回来。
+    return _localSessionId.isEmpty
+        ? 'chat_history'
+        : 'chat_history:local:$_localSessionId';
   }
 
   /// 把当前 messages 写回**当前会话自己**的 key
