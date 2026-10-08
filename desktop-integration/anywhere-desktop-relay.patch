@@ -212,10 +212,18 @@ index 5449460..211ea39 100644
  
        zip.writeZip(outputPath)
 diff --git a/main/index.js b/main/index.js
-index b82eac0..6ae0554 100644
+index b82eac0..f64431e 100644
 --- a/main/index.js
 +++ b/main/index.js
-@@ -63,6 +63,8 @@ import { createRemoteConversationReadService } from './core/remote/conversationR
+@@ -17,6 +17,7 @@
+ 
+ 
+ import { app, Menu, Tray, nativeTheme, nativeImage, powerMonitor, BrowserWindow, safeStorage } from 'electron'
++import path from 'node:path'
+ import { electronApp, optimizer } from '@electron-toolkit/utils'
+ import { registerIpcHandlers } from './ipcHandler.js'
+ import {
+@@ -63,6 +64,8 @@ import { createRemoteConversationReadService } from './core/remote/conversationR
  
  import { applyNetworkProxyConfig, installRequestHeaderBridge } from './core/net.js'
  import { startTaskScheduler } from './core/task_scheduler.js'
@@ -224,7 +232,27 @@ index b82eac0..6ae0554 100644
  
  let appTray = null
  let appQuitStarted = false
-@@ -795,6 +797,11 @@ app.whenReady().then(async () => {
+@@ -121,6 +124,10 @@ setWindowMetadataNotifier((change = {}) => {
+ 
+ 
+ 
++const relayUserData = path.join(path.dirname(process.execPath), 'user-data')
++app.setPath('userData', relayUserData)
++app.setName('anywhere-desktop-relay')
++
+ const hasSingleInstanceLock = app.requestSingleInstanceLock()
+ 
+ function focusPrimaryInstanceMainWindow() {
+@@ -724,7 +731,7 @@ async function syncDesktopRuntimeFromConfig() {
+ }
+ 
+ app.whenReady().then(async () => {
+-  electronApp.setAppUserModelId('com.komorebi.anywhere.desktop')
++  electronApp.setAppUserModelId('com.komorebi.anywhere.desktop.relay')
+ 
+   installRequestHeaderBridge()
+ 
+@@ -795,6 +802,11 @@ app.whenReady().then(async () => {
    })
    ensureTray()
    await openWindow('main')
