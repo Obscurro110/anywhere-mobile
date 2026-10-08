@@ -265,6 +265,13 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> {
             ],
           ),
           const SizedBox(height: 6),
+          if (m.pending)
+            const SizedBox(
+              width: 28,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
           // 正文：长会话也完整显示（可选中复制）
           SelectableText(
             m.text,

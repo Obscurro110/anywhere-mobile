@@ -1021,6 +1021,7 @@ class ConvMessage {
   final String role;
   final String text;
   final String time;
+  final bool pending;
 
   ConvMessage({
     required this.id,
@@ -1030,6 +1031,7 @@ class ConvMessage {
     required this.role,
     required this.text,
     this.time = '',
+    this.pending = false,
   });
 
   bool get isUser => role == 'user';
@@ -1047,6 +1049,7 @@ class ConvMessage {
         role: j['role'] as String? ?? '',
         text: j['text'] as String? ?? '',
         time: j['time'] as String? ?? '',
+        pending: j['pending'] == true,
       );
 }
 
