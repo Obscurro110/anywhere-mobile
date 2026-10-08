@@ -109,6 +109,7 @@ void main() {
     final raw = preferences.getString('chat_history:conversation-A') ?? '';
     expect(raw, contains(firstId));
     expect(raw, contains('desktop-message'));
+    expect(state.activeConversationId, 'conversation-B');
   });
 
   test('disconnect during upload does not create a sent attachment', () async {

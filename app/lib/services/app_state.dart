@@ -261,6 +261,21 @@ class AppState extends ChangeNotifier {
   }
 
   /// 同一会话的多次保存可能乱序完成。按消息 ID 合并，不能让较旧快照覆盖新快照。
+  Future<void> _updateStoredMessage(
+    String? conversationId,
+    String messageId,
+    ChatMessage Function(ChatMessage old) update,
+  ) async {
+    if (messageId.isEmpty) return;
+    final key = _historyKey(conversationId);
+    await (_historyWrites[key] ?? Future<void>.value());
+    final stored = _decodeHistory((await SharedPreferences.getInstance()).getString(key));
+    final index = stored.indexWhere((message) => message.id == messageId);
+    if (index < 0) return;
+    stored[index] = update(stored[index]);
+    await _persistMessagesTo(conversationId, stored);
+  }
+
   List<ChatMessage> _mergeHistory(List<ChatMessage> stored, List<ChatMessage> incoming) {
     final byId = <String, ChatMessage>{
       for (final message in stored.where((m) => !m.pending)) message.id: message,
@@ -1541,6 +1556,27 @@ class AppState extends ChangeNotifier {
         final index = (m['index'] as num?)?.toInt() ?? -1;
         final convId = m['conversationId']?.toString() ?? '';
         if (_detachedConversationIds.contains(convId)) return;
+        if (desktopId.isEmpty || index < 0) return;
+        final targetId = convId.isEmpty ? _activeConversationId : convId;
+        if (targetId == null || targetId != _activeConversationId) {
+          await _updateStoredMessage(targetId, clientId, (old) => ChatMessage(
+            id: old.id,
+            role: old.role,
+            text: old.text,
+            time: old.time,
+            outgoing: old.outgoing,
+            conversationId: convId.isNotEmpty ? convId : old.conversationId,
+            attachments: old.attachments,
+            pending: old.pending,
+            modelTag: old.modelTag,
+            desktopMeta: AssistantMeta(
+              messageId: desktopId,
+              index: index,
+              conversationId: convId,
+            ),
+          ));
+          return;
+        }
         // 优先按手机本地消息 id 精确匹配；拿不到就退回「最后一条自己发的」
         var at = -1;
         if (clientId.isNotEmpty) {
