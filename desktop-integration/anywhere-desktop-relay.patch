@@ -60,10 +60,10 @@ index 24faf63..cb6235b 100644
    electronLanguages:
      - zh-CN
 diff --git a/main/core/conversationStore.js b/main/core/conversationStore.js
-index 4cb7363..eb68eb1 100644
+index 383c5ae..d4454c2 100644
 --- a/main/core/conversationStore.js
 +++ b/main/core/conversationStore.js
-@@ -1102,9 +1102,31 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
+@@ -1137,9 +1137,31 @@ export async function deleteMessages({ dirPath, conversationId, holderInstanceId
      return withTransaction(db, () => {
        assertConversationWriteLease(db, { holderInstanceId, leaseEpoch })
        const stmt = db.prepare('DELETE FROM messages WHERE message_uuid = ?')
@@ -3163,25 +3163,25 @@ index 2096f34..eaed491 100644
  }
  
 diff --git a/package.json b/package.json
-index f3a088c..dd0bda6 100644
+index e60ec30..1a172dd 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,5 +1,5 @@
  {
 -  "name": "anywhere-desktop",
 +  "name": "anywhere-desktop-relay",
-   "version": "1.2.6",
+   "version": "1.3.1",
    "description": "AI Anywhere Desktop",
    "main": "./out/main/index.js",
-@@ -17,6 +17,7 @@
-     "dev": "electron-vite dev",
+@@ -18,6 +18,7 @@
      "build": "electron-vite build",
      "test:conversation-lease": "node tests/conversation-lease.test.mjs",
+     "test:conversation-time": "node tests/conversation-time.test.mjs",
 +    "test:relay-routing": "node tests/relay-routing.test.mjs",
      "postinstall": "electron-builder install-app-deps",
      "build:unpack": "pnpm run build && electron-builder --dir --publish never",
      "build:win": "pnpm run build && electron-builder --win nsis --publish never",
-@@ -53,6 +54,7 @@
+@@ -54,6 +55,7 @@
      "openai": "6.18.0",
      "pinyin-pro": "^3.28.0",
      "webdav": "^5.9.0",
@@ -3660,7 +3660,7 @@ index 2ad1391..28cb7e4 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 6bb1113..931a2b9 100644
+index 2118ef2..35a149e 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,189 @@ const normalizeWindowEventPayload = (input) => {
@@ -3935,7 +3935,7 @@ index 6bb1113..931a2b9 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3046,7 +3276,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3072,7 +3302,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -3952,7 +3952,7 @@ index 6bb1113..931a2b9 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5687,7 +5925,18 @@ onMounted(async () => {
+@@ -5713,7 +5951,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -3972,7 +3972,7 @@ index 6bb1113..931a2b9 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -9999,6 +10248,12 @@ const deleteMessage = (index) => {
+@@ -10026,6 +10275,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -3985,7 +3985,7 @@ index 6bb1113..931a2b9 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10016,6 +10271,18 @@ const deleteMessage = (index) => {
+@@ -10043,6 +10298,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4004,7 +4004,7 @@ index 6bb1113..931a2b9 100644
  };
  
  const clearHistory = async () => {
-@@ -10356,6 +10623,541 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10383,6 +10650,541 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
