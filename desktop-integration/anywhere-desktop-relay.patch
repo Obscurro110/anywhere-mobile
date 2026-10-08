@@ -3355,7 +3355,7 @@ index 2096f34..eaed491 100644
  }
  
 diff --git a/package.json b/package.json
-index e60ec30..fe1fb55 100644
+index e60ec30..801fa56 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,5 +1,5 @@
@@ -3373,17 +3373,18 @@ index e60ec30..fe1fb55 100644
      "postinstall": "electron-builder install-app-deps",
      "build:unpack": "pnpm run build && electron-builder --dir --publish never",
      "build:win": "pnpm run build && electron-builder --win nsis --publish never",
-@@ -25,7 +26,8 @@
+@@ -25,7 +26,9 @@
      "build:linux": "pnpm run build && electron-builder --linux AppImage --publish never",
      "release:win": "pnpm run build && electron-builder --win nsis --publish always",
      "release:mac": "pnpm run build && electron-builder --mac dmg zip --publish always",
 -    "release:linux": "pnpm run build && electron-builder --linux AppImage --publish always"
 +    "release:linux": "pnpm run build && electron-builder --linux AppImage --publish always",
-+    "test:conversation-order": "node tests/conversation-order.test.mjs"
++    "test:conversation-order": "node tests/conversation-order.test.mjs",
++    "test:project-move": "node tests/project-move.test.mjs"
    },
    "dependencies": {
      "@anthropic-ai/sdk": "^0.105.0",
-@@ -54,6 +56,7 @@
+@@ -54,6 +57,7 @@
      "openai": "6.18.0",
      "pinyin-pro": "^3.28.0",
      "webdav": "^5.9.0",
@@ -3553,6 +3554,36 @@ index e3c6cea..393b671 100644
  
      // 等待 DOM 更新后，将滚动条回到顶部
      nextTick(() => {
+diff --git a/render/main/components/Chats.vue b/render/main/components/Chats.vue
+index bd6927b..81b1caa 100644
+--- a/render/main/components/Chats.vue
++++ b/render/main/components/Chats.vue
+@@ -187,6 +187,14 @@ const activeProjectsData = computed(() =>
+     activeView.value === 'local' ? localProjects.value : cloudProjects.value
+ );
+ 
++const isConversationReference = (reference) => {
++    const value = String(reference || '').trim();
++    if (!value) return false;
++    if (activeProjectsData.value?.conversations?.[value]) return true;
++    const file = fileByBasename.value.get(value);
++    return file?.format === 'sqlite' && String(file.conversationId || '').trim() === value;
++};
++
+ const getConversationReference = (file) => {
+     if (file?.format === 'sqlite' && typeof file?.conversationId === 'string' && file.conversationId.trim()) {
+         return file.conversationId.trim();
+@@ -1360,8 +1368,8 @@ const onProjectDragWheel = (event) => {
+ async function assignFilesToProject(references, projectId) {
+     if (!Array.isArray(references) || references.length === 0) return;
+     try {
+-        const conversationIds = references.filter((reference) => activeProjectsData.value?.conversations?.[reference]);
+-        const legacyFiles = references.filter((reference) => !activeProjectsData.value?.conversations?.[reference]);
++        const conversationIds = references.filter((reference) => isConversationReference(reference));
++        const legacyFiles = references.filter((reference) => !isConversationReference(reference));
+         const draggedFiles = new Set(legacyFiles.map((name) => getJsonBasenameCandidate(name)));
+         const draggedConversations = new Set(conversationIds);
+         let projects = (activeProjectsData.value.projects || []).map((project) => ({
 diff --git a/render/main/components/Prompts.vue b/render/main/components/Prompts.vue
 index 7ded1c4..b72f44b 100644
 --- a/render/main/components/Prompts.vue
@@ -4895,6 +4926,52 @@ index 0000000..dc036fe
 +    assert.equal(listed[0].conversationId, newer.descriptor.conversationId)
 +    assert.equal(listed[0].updatedAt, recent.toISOString())
 +    console.log('PASS conversation order uses newest database activity')
++  } finally {
++    await fs.rm(root, { recursive: true, force: true })
++  }
++}
++
++main().catch((error) => {
++  console.error(error)
++  process.exitCode = 1
++})
+diff --git a/tests/project-move.test.mjs b/tests/project-move.test.mjs
+new file mode 100644
+index 0000000..80407f9
+--- /dev/null
++++ b/tests/project-move.test.mjs
+@@ -0,0 +1,40 @@
++import assert from 'node:assert/strict'
++import fs from 'node:fs/promises'
++import os from 'node:os'
++import path from 'node:path'
++import { createConversation } from '../main/core/conversationStore.js'
++import { readLocalProjects, writeLocalProjects } from '../main/core/projects.js'
++
++async function main() {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'anywhere-project-move-'))
++  try {
++    const created = await createConversation({
++      dirPath: root,
++      title: 'movable',
++      sessionData: { anywhere_history: true, fullHistory: [], history: [], chat_show: [] }
++    })
++    const projects = await readLocalProjects(root)
++    projects.projects.push({ id: 'target', name: 'Target', files: [], conversationIds: [] })
++    await writeLocalProjects(root, projects)
++
++    const saved = await readLocalProjects(root)
++    const conversationId = created.descriptor.conversationId
++    assert.equal(Boolean(saved.conversations[conversationId]), true)
++    saved.projects = saved.projects.map((project) => project.id === 'target'
++      ? { ...project, conversationIds: [conversationId] }
++      : project)
++    await writeLocalProjects(root, saved)
++
++    const reloaded = await readLocalProjects(root)
++    const target = reloaded.projects.find((project) => project.id === 'target')
++    assert.deepEqual(target.conversationIds, [conversationId])
++    console.log('PASS sqlite conversation project move survives reload')
 +  } finally {
 +    await fs.rm(root, { recursive: true, force: true })
 +  }

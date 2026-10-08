@@ -140,6 +140,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Relay 路由测试失败" }
           pnpm run test:conversation-order
           if ($LASTEXITCODE -ne 0) { throw "会话排序测试失败" }
+          pnpm run test:project-move
+          if ($LASTEXITCODE -ne 0) { throw "会话项目移动测试失败" }
 
       - name: 编译
         shell: pwsh
