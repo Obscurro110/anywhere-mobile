@@ -37,8 +37,8 @@ class AppConfig {
     } else if (u.startsWith('ws://')) {
       u = u.replaceFirst('ws://', 'http://');
     }
-    final i = u.indexOf('/ws');
-    return i >= 0 ? u.substring(0, i) : u;
+    final i = u.lastIndexOf('/ws');
+    return i >= 0 && i + 3 == u.length ? u.substring(0, i) : u;
   }
 
   /// 自动探测一个像样的设备显示名（例如「Xiaomi 14」「Pixel 8」）。

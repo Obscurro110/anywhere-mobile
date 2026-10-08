@@ -6,10 +6,27 @@ import 'package:flutter_test/flutter_test.dart';
 
 // 用 models.dart：它 re-export protocol 里的类型，同时还定义了 ChatMessage。
 // 直接 import protocol.dart 会找不到 ChatMessage。
+import 'package:anywhere_mobile/core/app_config.dart';
 import 'package:anywhere_mobile/models/models.dart';
 import 'package:anywhere_mobile/services/update_service.dart';
 
 void main() {
+  group('AppConfig URL', () {
+    test('只移除末尾 /ws，不误截断路径', () {
+      AppConfig config(String url) => AppConfig(
+            userId: 'u',
+            token: 't',
+            serverUrl: url,
+            deviceId: 'd',
+            deviceName: 'test device',
+          );
+      expect(config('ws://host:8787/ws').httpBase, 'http://host:8787');
+      expect(config('ws://host/websocket').httpBase, 'http://host/websocket');
+      expect(config('wss://api.example/v1/wss/relay').httpBase,
+          'https://api.example/v1/wss/relay');
+    });
+  });
+
   group('ChatOptions', () {
     test('空 options 不参与序列化', () {
       const o = ChatOptions();

@@ -18,8 +18,8 @@ const _uuid = Uuid();
 /// Central application state. Owns the [RelayClient], chat history, peer list,
 /// transferred files, delivered notifications and the desktop capability list.
 class AppState extends ChangeNotifier {
-  AppState(this.config) {
-    _client = RelayClient(config);
+  AppState(this.config, {RelayClient? relayClient}) {
+    _client = relayClient ?? RelayClient(config);
     _bind();
   }
 
@@ -172,6 +172,9 @@ class AppState extends ChangeNotifier {
   /// 当前对接着的电脑端会话标题
   String get activeConversationTitle => _activeConversationTitle;
 
+  int _conversationSwitchGeneration = 0;
+  final Set<String> _detachedConversationIds = {};
+
   /// 切换「当前对话的电脑端会话」。
   ///
   /// **必须同时换掉 messages** —— 每个会话的聊天记录是分开存的，
@@ -197,6 +200,7 @@ class AppState extends ChangeNotifier {
     // 落盘和加载都基于快照/新 id，天然不会串。
     final oldId = _activeConversationId;
     final snapshot = messages.where((m) => !m.pending).toList();
+    final switchGeneration = ++_conversationSwitchGeneration;
 
     _activeConversationId = id;
     _activeConversationTitle = title;
@@ -207,7 +211,8 @@ class AppState extends ChangeNotifier {
     unawaited(() async {
       // 旧会话的记录用**快照 + 旧 key** 落盘（此时 _activeConversationId 已变）
       await _persistMessagesTo(oldId, snapshot);
-      await _switchHistoryTo(id);
+      if (switchGeneration != _conversationSwitchGeneration || _activeConversationId != id) return;
+      await _switchHistoryTo(id, switchGeneration);
       // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
       notifyListeners();
     }());
@@ -341,13 +346,19 @@ class AppState extends ChangeNotifier {
   /// 手动选过之后，就不再被电脑端上报的默认助手覆盖。
   bool _promptTouchedByUser = false;
 
-  /// 用户是不是**主动退出**了电脑端会话。
-  /// 退出之后就不该再被电脑端回传的 conversationId 自动绑回去 ——
-  /// 否则界面会在「退出」和「已绑定」之间来回跳。
+  /// 换助手后，下一条消息必须创建新电脑端会话；成功发送一次后清除。
+  bool _forceNewConversationOnNextMessage = false;
+
+  /// 用户是不是主动退出了电脑端会话。
   bool _leftConversationManually = false;
 
   void applyPrompt(String? key, {bool fromUser = true}) {
-    if (fromUser) _promptTouchedByUser = true;
+    if (fromUser) {
+      _promptTouchedByUser = true;
+      if ((key ?? '') != (options.promptKey ?? '')) {
+        _forceNewConversationOnNextMessage = true;
+      }
+    }
 
     // ⚠️⚠️ 关键规则：**助手属于「会话」，不属于「参数」**。
     //
@@ -366,14 +377,16 @@ class AppState extends ChangeNotifier {
         // 发出去的消息会在电脑端开一个新会话，回传的 user-message-meta
         // 需要能把手机绑到**新会话**上；一旦标记"用户主动退出"，
         // _bindActiveConversationSilently 会拒绝绑定 → 每轮都开新会话，
-        // 永远接不上。解绑本身已足够（_activeConversationId 为 null 时
-        // 就不会再被旧会话的迟到响应命中）。
+        // 新助手必须开启新的电脑端会话，而不是复用旧手机窗口。
+        _forceNewConversationOnNextMessage = true;
+        _detachedConversationIds.add(_activeConversationId!);
         _setActiveConversation(null, '');
       }
     }
 
     if (key == null || key.isEmpty) {
       options = options.copyWith(clearPromptKey: true);
+      if (_activeConversationId != null) unawaited(_persistActiveConversation());
       notifyListeners();
       return;
     }
@@ -432,6 +445,7 @@ class AppState extends ChangeNotifier {
     if (_leftConversationManually) return;
     if (_activeConversationId == convId) return;
     if (_activeConversationId != null) return; // 已绑定别的会话，不要抢
+    ++_conversationSwitchGeneration;
     _activeConversationId = convId;
     if (title.isNotEmpty) _activeConversationTitle = title;
     unawaited(_persistActiveConversation());
@@ -486,6 +500,7 @@ class AppState extends ChangeNotifier {
   bool openConversationOnDesktop(String conversationId) {
     if (!_client.isConnected) return false;
     lastConversationOpen = null;
+    _detachedConversationIds.remove(conversationId);
     notifyListeners();
     return _client.send(Envelope(
       type: MsgType.chat,
@@ -504,6 +519,8 @@ class AppState extends ChangeNotifier {
     lastConversationOpen = null;
     // 记住"是我主动退出的"：之后电脑端回传 conversationId 也不会自动绑回去
     _leftConversationManually = true;
+    if (_activeConversationId != null) _detachedConversationIds.add(_activeConversationId!);
+    _forceNewConversationOnNextMessage = true;
     _setActiveConversation(null, '');
   }
 
@@ -1401,19 +1418,23 @@ class AppState extends ChangeNotifier {
         final decoded = jsonDecode(p.text) as Map<String, dynamic>;
         final r = (decoded['__relayConversationOpen'] as Map?)?.cast<String, dynamic>() ?? {};
         final ok = r['ok'] == true;
+        if (_detachedConversationIds.contains(r['conversationId']?.toString())) return;
         // 统一走 _setActiveConversation：它会落盘旧会话的记录、
         // 再加载新会话的记录。直接改 _activeConversationId 会让
         // messages 留在上一个会话，造成「多个对话内容重合」。
         final openPromptKey = r['promptKey']?.toString() ?? '';
-        if (ok) _leftConversationManually = false;
+        if (ok) {
+          _leftConversationManually = false;
+          _forceNewConversationOnNextMessage = false;
+        }
         _setActiveConversation(
           ok ? r['conversationId']?.toString() : null,
           ok ? (r['title']?.toString() ?? '') : '',
         );
         // 会话和助手对应：电脑端会话里的 promptKey 同步成手机当前助手。
         // 这样在手机里继续对话时，用的还是这个会话原来的助手预设。
-        if (ok && openPromptKey.isNotEmpty) {
-          applyPrompt(openPromptKey);
+        if (ok) {
+          applyPrompt(openPromptKey.isEmpty ? null : openPromptKey, fromUser: false);
         }
         lastConversationOpen = {
           'ok': ok,
@@ -1476,23 +1497,21 @@ class AppState extends ChangeNotifier {
         final desktopId = m['messageId']?.toString() ?? '';
         final index = (m['index'] as num?)?.toInt() ?? -1;
         final convId = m['conversationId']?.toString() ?? '';
-        // 电脑端告诉我们这条消息真实落在哪个会话里 ——
-        // 手机如果还没绑定会话，就静默绑定过去（不切历史，
-        // 因为当前这些消息本来就属于那个会话）。
-        // 这样下一条消息会带上 conversationId，电脑端就不会再把它
-        // 路由到别的会话，「对话和助手」也就对得上了。
-        if (convId.isNotEmpty) {
-          _bindActiveConversationSilently(convId);
-        }
+        if (_detachedConversationIds.contains(convId)) return;
         // 优先按手机本地消息 id 精确匹配；拿不到就退回「最后一条自己发的」
         var at = -1;
         if (clientId.isNotEmpty) {
           at = messages.indexWhere((x) => x.id == clientId);
         }
-        if (at < 0) {
+        if (at < 0 && clientId.isEmpty) {
           at = messages.lastIndexWhere((x) => x.outgoing);
         }
-        if (at >= 0 && desktopId.isNotEmpty && index >= 0) {
+        // 先确认回执对应当前列表里的消息，再允许自动绑定。
+        if (at < 0) return;
+        if (convId.isNotEmpty) {
+          _bindActiveConversationSilently(convId);
+        }
+        if (desktopId.isNotEmpty && index >= 0) {
           final old = messages[at];
           messages[at] = ChatMessage(
             id: old.id,
@@ -1527,6 +1546,7 @@ class AppState extends ChangeNotifier {
     // 否则会出现：从 A 切到 B 之后，A 迟到的回复被追加进 B 的聊天列表，
     // 两个会话的内容又混在一起。
     if (isAssistant && p.conversationId != null && p.conversationId!.isNotEmpty) {
+      if (_detachedConversationIds.contains(p.conversationId)) return;
       final mine = _activeConversationId;
       if (mine != null && mine.isNotEmpty && p.conversationId != mine) {
         debugPrint('[AppState] 丢弃不属于当前会话的回复: '
@@ -1715,6 +1735,11 @@ class AppState extends ChangeNotifier {
       ).toJson(),
     );
 
+    // 换助手后的第一条消息不携带旧会话 id，并要求 relay 强制新建会话。
+    if (_forceNewConversationOnNextMessage) {
+      env.payload['__relayNewConversation'] = true;
+    }
+
     // 把本条消息在手机本地的 id 也带上（放在 __relayClientMsgId）。
     // 电脑端 append 后会回传「这条在电脑端的位置」，手机靠这个 id
     // 就能精确给对应气泡挂上「删除这条」。
@@ -1747,6 +1772,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     final ok = _client.send(env);
+    if (ok && _forceNewConversationOnNextMessage) {
+      _forceNewConversationOnNextMessage = false;
+      _leftConversationManually = false;
+    }
     if (!ok) {
       // 没发出去：把刚加的 pending 和**用户气泡**一起撤掉。
       // 以前只摘 pending，用户气泡留在列表里看起来像"已发送"，
@@ -1760,24 +1789,45 @@ class AppState extends ChangeNotifier {
 
   /// Upload a local file and share it with the desktop (or all devices).
   Future<void> shareFile(File file, {String? toDeviceId}) async {
+    if (!_client.isConnected) throw StateError('未连接到中继服务器，文件未发送');
+    final recipient = toDeviceId ?? targetDeviceId ?? '*';
+    final conversationId = _activeConversationId;
     final meta = await _client.uploadFile(file);
     final env = Envelope(
       type: MsgType.fileShare,
       from: config.deviceId,
-      to: toDeviceId ?? targetDeviceId ?? '*',
+      to: recipient,
       payload: {'file': meta.toJson()},
     );
-    _client.send(env);
+    if (!_client.send(env)) throw StateError('连接已断开，文件未发送');
     receivedFiles.insert(0, meta);
-    messages.add(ChatMessage(
+    final message = ChatMessage(
       id: env.id,
       role: ChatRole.user,
       text: '',
       time: DateTime.now(),
       outgoing: true,
+      conversationId: conversationId,
       attachments: [meta],
-    ));
-    _persistHistory();
+    );
+    if (_activeConversationId == conversationId) {
+      messages.add(message);
+      await _persistHistory();
+    } else {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_historyKey(conversationId));
+      var history = <ChatMessage>[];
+      if (raw != null) {
+        try {
+          history = (jsonDecode(raw) as List)
+              .map((e) => ChatMessage.fromJson((e as Map).cast<String, dynamic>()))
+              .toList();
+        } catch (e) {
+          debugPrint('[AppState] shareFile history decode failed: $e');
+        }
+      }
+      await _persistMessagesTo(conversationId, [...history, message]);
+    }
     notifyListeners();
   }
 
@@ -1842,29 +1892,24 @@ class AppState extends ChangeNotifier {
 
   /// 把当前 messages 写回**当前会话自己**的 key
   Future<void> _persistHistory() async {
-    final p = await SharedPreferences.getInstance();
-    final keep = messages.where((m) => !m.pending).toList();
-    final trimmed = keep.length > 500 ? keep.sublist(keep.length - 500) : keep;
-    await p.setString(
-      _historyKey(_activeConversationId),
-      jsonEncode(trimmed.map((e) => e.toJson()).toList()),
-    );
+    final id = _activeConversationId;
+    final snapshot = messages.toList();
+    await _persistMessagesTo(id, snapshot);
   }
 
   /// 切换到某个会话时，把 messages 换成**那个会话自己**的记录
-  Future<void> _switchHistoryTo(String? conversationId) async {
-    // await 之前先记住当前长度：getInstance() 是异步的，
-    // 这期间如果正好收到一条新消息（已被加进 messages），
-    // 下面 clear() 会把它冲掉 —— 表现就是「消息凭空消失」。
-    final before = messages.length;
-
+  Future<void> _switchHistoryTo(String? conversationId, [int? expectedGeneration]) async {
+    // 加载代次失效时不再写界面；保留切换后已经收到的所有消息。
+    final generation = expectedGeneration ?? _conversationSwitchGeneration;
     final p = await SharedPreferences.getInstance();
+    if (generation != _conversationSwitchGeneration ||
+        _activeConversationId != conversationId) {
+      return;
+    }
     final raw = p.getString(_historyKey(conversationId));
 
     // await 期间新到的消息，稍后补回去（按 id 去重，避免和磁盘里的重复）
-    final arrived = messages.length > before
-        ? messages.sublist(before).toList()
-        : <ChatMessage>[];
+    final arrived = messages.toList();
 
     messages.clear();
     if (raw != null) {
@@ -1914,19 +1959,20 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _persistActiveConversation() async {
-    final p = await SharedPreferences.getInstance();
     final id = _activeConversationId;
+    final title = _activeConversationTitle;
+    final pk = options.promptKey;
+    final p = await SharedPreferences.getInstance();
     if (id == null || id.isEmpty) {
       await p.remove('active_conversation_id');
       await p.remove('active_conversation_title');
       await p.remove('active_conversation_prompt');
     } else {
       await p.setString('active_conversation_id', id);
-      await p.setString('active_conversation_title', _activeConversationTitle);
+      await p.setString('active_conversation_title', title);
       // ⚠️ 助手必须跟着会话一起存：以前只存 id/title，重启后手机不知道
       // 当前会话用的是哪个助手 —— 要么显示空助手、要么被电脑端默认助手
       // 顶掉，看起来就是「会话和助手对不上」。
-      final pk = options.promptKey;
       if (pk == null || pk.isEmpty) {
         await p.remove('active_conversation_prompt');
       } else {

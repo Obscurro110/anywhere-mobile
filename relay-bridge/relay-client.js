@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import http from 'node:http';
+import https from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
@@ -189,13 +190,14 @@ export class RelayClient extends EventEmitter {
     );
     const json = JSON.parse(res);
     if (!json.ok) throw new Error('upload failed: ' + res);
-    this._send({
+    const sent = this._send({
       v: 1,
       type: 'file_share',
       id: randomUUID(),
       to,
       payload: { file: json.file },
     });
+    if (!sent) throw new Error('file share not sent: relay disconnected');
     return json.file;
   }
 
@@ -212,8 +214,8 @@ export class RelayClient extends EventEmitter {
     let u = this.serverUrl;
     if (u.startsWith('wss://')) u = u.replace('wss://', 'https://');
     else if (u.startsWith('ws://')) u = u.replace('ws://', 'http://');
-    const i = u.indexOf('/ws');
-    return i >= 0 ? u.slice(0, i) : u;
+    const i = u.lastIndexOf('/ws');
+    return i >= 0 && i + 3 === u.length ? u.slice(0, i) : u;
   }
 
   _resolvePending(id, payload) {
@@ -236,7 +238,8 @@ export class RelayClient extends EventEmitter {
 // ---- tiny http helpers (no extra deps) ----
 function httpRequest(url, body) {
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const transport = new URL(url).protocol === 'https:' ? https : http;
+    const req = transport.request(
       url,
       { method: 'POST', headers: { 'content-type': 'application/octet-stream' } },
       (res) => {
@@ -252,8 +255,14 @@ function httpRequest(url, body) {
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {
-    http
+    const transport = new URL(url).protocol === 'https:' ? https : http;
+    transport
       .get(url, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`download failed ${res.statusCode}`));
+          return;
+        }
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => resolve(Buffer.concat(chunks)));

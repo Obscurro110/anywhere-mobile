@@ -234,10 +234,10 @@ index 4e20fa8..7a50ac3 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..90e8531
+index 0000000..8a7be65
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2526 @@
+@@ -0,0 +1,2543 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -1160,6 +1160,11 @@ index 0000000..90e8531
 +    return { ok: false, reason: 'conversation_not_found' }
 +  }
 +
++  const promptKey =
++    opened.sessionData?.promptKey ||
++    opened.sessionData?.sessionMetadata?.promptKey ||
++    phonePromptKey
++
 +  // 已经为这个会话开过窗口就复用
 +  const reuseKey = `conv:${opened.descriptor.conversationId}`
 +  if (phoneWindowId && phoneWindowKey === reuseKey && isWindowAlive(phoneWindowId)) {
@@ -1173,16 +1178,12 @@ index 0000000..90e8531
 +        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
 +      )
 +      convWindows.set(opened.descriptor.conversationId, phoneWindowId)
-+      return { ok: true, windowId: phoneWindowId, reused: true, title: opened.descriptor.title }
++      return { ok: true, windowId: phoneWindowId, reused: true, title: opened.descriptor.title, promptKey }
 +    } catch (err) {
 +      rwarn('[relay] reuse conversation window failed:', err?.message || err)
 +    }
 +  }
 +
-+  const promptKey =
-+    opened.sessionData?.promptKey ||
-+    opened.sessionData?.sessionMetadata?.promptKey ||
-+    phonePromptKey
 +
 +  const res = await ctx.openWindow('window', {
 +    code: promptKey,
@@ -1574,6 +1575,8 @@ index 0000000..90e8531
 +            reason: res.reason || '',
 +            windowId: res.windowId || null,
 +            title: res.title || '',
++            promptKey: res.promptKey || '',
++            assistantName: res.assistantName || '',
 +            reused: !!res.reused
 +          }
 +        }),
@@ -2259,6 +2262,20 @@ index 0000000..90e8531
 +  const opts = msg?.options && typeof msg.options === 'object' ? msg.options : null
 +  // 手机明确说了「我在哪个会话里」—— 必须投递到那个会话，不能自作主张
 +  const wantConvId = String(msg?.conversationId ?? '').trim()
++  const forceNewConversation = !wantConvId && msg?.__relayNewConversation === true
++  if (forceNewConversation) {
++    // 换助手后不能复用旧手机窗口或历史会话，确保下一条创建新会话。
++    if (isWindowAlive(phoneWindowId)) {
++      try { ctx.getWindowByRef(phoneWindowId)?.destroy?.() } catch (err) {
++        rwarn('[relay] destroy old window for new conversation failed:', err?.message || err)
++      }
++    }
++    if (typeof phoneWindowKey === 'string' && phoneWindowKey.startsWith('conv:')) {
++      convWindows.delete(phoneWindowKey.slice(5))
++    }
++    phoneWindowId = null
++    phoneWindowKey = 'phone'
++  }
 +
 +  // 手机切换了「快捷助手」→ 换一个 promptKey 承载这个会话
 +  //
@@ -2444,7 +2461,7 @@ index 0000000..90e8531
 +    // 以前这里无条件新建：每次窗口重建（切助手/重连/重启）都会多出一个
 +    // 标题为「手机」的会话，手机端列表里一堆同名项、内容还各不相同。
 +    // 现在优先接着上次那个「手机」会话聊。
-+    const reusableId = await findReusablePhoneConversationId(phonePromptKey)
++    const reusableId = forceNewConversation ? '' : await findReusablePhoneConversationId(phonePromptKey)
 +    if (reusableId) {
 +      const opened = await openPhoneConversation(reusableId, relayTo)
 +      if (opened?.ok) {
@@ -2766,13 +2783,14 @@ index 0000000..90e8531
 +}
 diff --git a/main/relay/relay-client.js b/main/relay/relay-client.js
 new file mode 100644
-index 0000000..f5ac5ba
+index 0000000..1206e2b
 --- /dev/null
 +++ b/main/relay/relay-client.js
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,332 @@
 +import { EventEmitter } from 'node:events';
 +import WebSocket from 'ws';
 +import http from 'node:http';
++import https from 'node:https';
 +import { readFile } from 'node:fs/promises';
 +import { randomUUID } from 'node:crypto';
 +
@@ -3010,13 +3028,14 @@ index 0000000..f5ac5ba
 +    );
 +    const json = JSON.parse(res);
 +    if (!json.ok) throw new Error('upload failed: ' + res);
-+    this._send({
++    const sent = this._send({
 +      v: 1,
 +      type: 'file_share',
 +      id: randomUUID(),
 +      to,
 +      payload: { file: json.file },
 +    });
++    if (!sent) throw new Error('file share not sent: relay disconnected');
 +    return json.file;
 +  }
 +
@@ -3033,8 +3052,8 @@ index 0000000..f5ac5ba
 +    let u = this.serverUrl;
 +    if (u.startsWith('wss://')) u = u.replace('wss://', 'https://');
 +    else if (u.startsWith('ws://')) u = u.replace('ws://', 'http://');
-+    const i = u.indexOf('/ws');
-+    return i >= 0 ? u.slice(0, i) : u;
++    const i = u.lastIndexOf('/ws');
++    return i >= 0 && i + 3 === u.length ? u.slice(0, i) : u;
 +  }
 +
 +  _resolvePending(id, payload) {
@@ -3061,7 +3080,8 @@ index 0000000..f5ac5ba
 +
 +function httpRequest(url, body) {
 +  return new Promise((resolve, reject) => {
-+    const req = http.request(
++    const transport = new URL(url).protocol === 'https:' ? https : http;
++    const req = transport.request(
 +      url,
 +      { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, timeout: HTTP_TIMEOUT_MS },
 +      (res) => {
@@ -3081,7 +3101,13 @@ index 0000000..f5ac5ba
 +
 +function httpGet(url) {
 +  return new Promise((resolve, reject) => {
-+    const req = http.get(url, { timeout: HTTP_TIMEOUT_MS }, (res) => {
++    const transport = new URL(url).protocol === 'https:' ? https : http;
++    const req = transport.get(url, { timeout: HTTP_TIMEOUT_MS }, (res) => {
++      if (res.statusCode !== 200) {
++        res.resume();
++        reject(new Error(`download failed ${res.statusCode}`));
++        return;
++      }
 +      const chunks = [];
 +      res.on('data', (c) => chunks.push(c));
 +      res.on('end', () => resolve(Buffer.concat(chunks)));
@@ -3095,7 +3121,7 @@ index 0000000..f5ac5ba
 +}
 diff --git a/main/relay/version.js b/main/relay/version.js
 new file mode 100644
-index 0000000..24da61c
+index 0000000..e7d2b59
 --- /dev/null
 +++ b/main/relay/version.js
 @@ -0,0 +1,10 @@
@@ -3107,8 +3133,8 @@ index 0000000..24da61c
 + * 本地构建时不会自动重写，所以本地打包前请手动把下面的值改成当前版本，
 + * 否则电脑端会向手机上报旧版本号。
 + */
-+export const RELAY_VERSION = '1.7.17';
-+export const RELAY_VERSION_CODE = 37;
++export const RELAY_VERSION = '1.7.18';
++export const RELAY_VERSION_CODE = 38;
 \ No newline at end of file
 diff --git a/main/windowManager.js b/main/windowManager.js
 index 2096f34..eaed491 100644
@@ -3137,7 +3163,7 @@ index 2096f34..eaed491 100644
  }
  
 diff --git a/package.json b/package.json
-index f3a088c..3378791 100644
+index f3a088c..dd0bda6 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,5 +1,5 @@
@@ -3147,7 +3173,15 @@ index f3a088c..3378791 100644
    "version": "1.2.6",
    "description": "AI Anywhere Desktop",
    "main": "./out/main/index.js",
-@@ -53,6 +53,7 @@
+@@ -17,6 +17,7 @@
+     "dev": "electron-vite dev",
+     "build": "electron-vite build",
+     "test:conversation-lease": "node tests/conversation-lease.test.mjs",
++    "test:relay-routing": "node tests/relay-routing.test.mjs",
+     "postinstall": "electron-builder install-app-deps",
+     "build:unpack": "pnpm run build && electron-builder --dir --publish never",
+     "build:win": "pnpm run build && electron-builder --win nsis --publish never",
+@@ -53,6 +54,7 @@
      "openai": "6.18.0",
      "pinyin-pro": "^3.28.0",
      "webdav": "^5.9.0",
@@ -4622,3 +4656,46 @@ index 0000000..1ceb519
 +} else {
 +  console.log('[apply-relay-patch] nothing to do.')
 +}
+diff --git a/tests/relay-routing.test.mjs b/tests/relay-routing.test.mjs
+new file mode 100644
+index 0000000..edc3b7c
+--- /dev/null
++++ b/tests/relay-routing.test.mjs
+@@ -0,0 +1,37 @@
++import assert from 'node:assert/strict';
++import { readFile } from 'node:fs/promises';
++import vm from 'node:vm';
++const source = await readFile(new URL('../main/relay/index.js', import.meta.url), 'utf8');
++const start = source.indexOf('async function routePhoneChat(msg) {');
++const end = source.indexOf('// IPC', start);
++const route = source.slice(start, source.lastIndexOf('// ---------------------------------------------------------------------------', end));
++let creates = [], dispatches = [], destroys = 0, probes = 0;
++const context = vm.createContext({
++  phoneWindowId: 'old', phoneWindowKey: 'conv:old-conversation', phonePromptKey: 'A',
++  convWindows: new Map([['old-conversation', 'old']]),
++  pruneConvWindows() {}, isWindowAlive(id) { return Boolean(id); }, rlog() {}, rwarn() {},
++  async findReusablePhoneConversationId() { probes++; return ''; },
++  ctx: {
++    getWindowByRef() { return { destroy() { destroys++; } }; },
++    listWindows() { return []; },
++    dispatchWindowEvent(event) { dispatches.push(event); return { ok: true }; },
++    async openWindow(type, params) { creates.push(params); return { ok: true, id: 'new' }; }
++  }
++});
++vm.runInContext(route + '\nthis.routePhoneChat = routePhoneChat;', context);
++await context.routePhoneChat({role:'user', text:'new turn', from:'phone', options:{promptKey:'B'}, __relayNewConversation:true});
++assert.equal(destroys, 1);
++assert.equal(probes, 0, 'explicit new session must skip historical reuse');
++assert.equal(dispatches.length, 0);
++assert.equal(creates.length, 1);
++assert.equal(creates[0].code, 'B');
++assert.equal(creates[0].payload, 'new turn');
++assert.equal(context.convWindows.has('old-conversation'), false);
++context.phoneWindowId = 'bound'; context.phoneWindowKey = 'conv:C'; context.convWindows.set('C','bound');
++await context.routePhoneChat({role:'user', text:'bound turn', from:'phone', conversationId:'C', options:{promptKey:'B',model:'p|m'}, __relayNewConversation:true});
++assert.equal(creates.length, 1, 'specified conversation wins over new flag');
++assert.equal(dispatches.length, 1);
++assert.equal(dispatches[0].target, 'bound');
++assert.equal(dispatches[0].payload.__relayOptions.promptKey, undefined);
++assert.equal(dispatches[0].payload.__relayOptions.model, 'p|m');
++console.log('PASS relay new conversation and bound conversation routing');
