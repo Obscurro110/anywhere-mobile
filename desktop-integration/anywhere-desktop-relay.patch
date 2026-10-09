@@ -298,10 +298,10 @@ index 3d0b346..f35ec10 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..d975f11
+index 0000000..8d7a237
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2650 @@
+@@ -0,0 +1,2724 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -360,7 +360,9 @@ index 0000000..d975f11
 +import {
 +  renameConversation as storeRenameConversation,
 +  deleteConversation as storeDeleteConversation,
-+  deleteMessages as storeDeleteMessages
++  deleteMessages as storeDeleteMessages,
++  acquireWriteLease,
++  releaseWriteLease
 +} from '../core/conversationStore.js'
 +import { readLocalProjects } from '../core/projects.js'
 +import { listSkills, getSkillDetails, deleteSkill } from '../core/skill.js'
@@ -1201,6 +1203,61 @@ index 0000000..d975f11
 +  }
 +}
 +
++/**
++ * 手机侧要删/改某个会话时，那个会话很可能**正被电脑端某个窗口编辑着**：
++ * 窗口打开会话时会 acquireWriteLease 并每 5 秒心跳续期（TTL 20s），
++ * 于是 relay 不带租约信息直接去写就抛 `conversation_write_lease_lost` ——
++ * 手机端看到的就是「点了没反应 / 这个会话被电脑端锁死了」。
++ *
++ * 这里在**首次失败后**用 force 抢占租约重试一次，用完立即释放：
++ *   · 正常情况下（没有窗口占用）走原路径，完全不打扰电脑端；
++ *   · 只有真冲突时才抢，此时原窗口下次心跳会失败、自己切只读并提示，
++ *     而「会话正在被手机删/改」本来就是它的正确结局。
++ */
++const RELAY_LEASE_HOLDER = `relay-${process.pid}`
++async function withConversationLeaseRetry(conversationId, run) {
++  try {
++    return await run({ holderInstanceId: '', leaseEpoch: null })
++  } catch (err) {
++    const msg = String(err?.message || err || '')
++    if (!msg.includes('conversation_write_lease_lost')) throw err
++    const dirPath = await readChatDirPath()
++    if (!dirPath) throw err
++    let lease = null
++    try {
++      lease = await acquireWriteLease({
++        dirPath,
++        conversationId,
++        holderInstanceId: RELAY_LEASE_HOLDER,
++        holderApp: 'relay',
++        force: true
++      })
++    } catch (e2) {
++      rwarn('[relay] force-acquire write lease failed:', e2?.message || e2)
++      throw err
++    }
++    if (!lease?.ok) throw err
++    rlog('[relay] took over write lease (window was holding it):', conversationId)
++    try {
++      return await run({
++        holderInstanceId: RELAY_LEASE_HOLDER,
++        leaseEpoch: lease.leaseEpoch
++      })
++    } finally {
++      try {
++        await releaseWriteLease({
++          dirPath,
++          conversationId,
++          holderInstanceId: RELAY_LEASE_HOLDER,
++          leaseEpoch: lease.leaseEpoch
++        })
++      } catch (e3) {
++        rwarn('[relay] release write lease failed:', e3?.message || e3)
++      }
++    }
++  }
++}
++
 +/** 删除整个会话 */
 +async function deletePhoneConversation(conversationId) {
 +  const dirPath = await readChatDirPath()
@@ -1233,7 +1290,9 @@ index 0000000..d975f11
 +  }
 +  convWindows.delete(ref)
 +
-+  const res = await storeDeleteConversation({ dirPath, conversationId: ref })
++  const res = await withConversationLeaseRetry(ref, ({ holderInstanceId, leaseEpoch }) =>
++    storeDeleteConversation({ dirPath, conversationId: ref, holderInstanceId, leaseEpoch })
++  )
 +  rlog('[relay] deleted conversation', ref, 'removed =', res?.removed)
 +  return { ok: res?.ok !== false, removed: !!res?.removed }
 +}
@@ -1246,7 +1305,9 @@ index 0000000..d975f11
 +  const next = String(title || '').trim()
 +  if (!ref) return { ok: false, reason: 'conversationId_required' }
 +  if (!next) return { ok: false, reason: 'title_required' }
-+  await storeRenameConversation({ dirPath, conversationId: ref, title: next })
++  await withConversationLeaseRetry(ref, ({ holderInstanceId, leaseEpoch }) =>
++    storeRenameConversation({ dirPath, conversationId: ref, title: next, holderInstanceId, leaseEpoch })
++  )
 +  return { ok: true, title: next }
 +}
 +
@@ -1256,7 +1317,9 @@ index 0000000..d975f11
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
 +  const ids = (Array.isArray(storageIds) ? storageIds : []).map((x) => String(x)).filter(Boolean)
 +  if (!ids.length) return { ok: false, reason: 'storageIds_required' }
-+  const res = await storeDeleteMessages({ dirPath, conversationId, storageIds: ids })
++  const res = await withConversationLeaseRetry(conversationId, ({ holderInstanceId, leaseEpoch }) =>
++    storeDeleteMessages({ dirPath, conversationId, storageIds: ids, holderInstanceId, leaseEpoch })
++  )
 +  // ⚠️ 回**真实**删除数，不能直接回 ids.length：
 +  // 之前哪怕一条都没删掉也报「已删除 N 条」，手机端显示成功，
 +  // 但重新打开会话消息又回来了 —— 用户以为「删了没反应」。
@@ -1314,7 +1377,7 @@ index 0000000..d975f11
 +    }
 +  }
 +
-+async function openPhoneConversation(conversationId, relayTo) {
++async function openPhoneConversation(conversationId, relayTo, relayOpts = null) {
 +  const dirPath = await readChatDirPath()
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
 +  if (typeof ctx?.openWindow !== 'function') return { ok: false, reason: 'openWindow_unavailable' }
@@ -1337,7 +1400,14 @@ index 0000000..d975f11
 +      ctx.dispatchWindowEvent(
 +        {
 +          event: 'relay:incoming',
-+          payload: { type: 'empty', payload: '', relayTo, __relayArmOnly: true },
++          payload: {
++            type: 'empty',
++            payload: '',
++            relayTo,
++            __relayArmOnly: true,
++            // 复用窗口也要把手机这次带来的参数带上，否则「切了模型没反应」
++            ...(relayOpts ? { __relayOptions: relayOpts } : {})
++          },
 +          target: phoneWindowId
 +        },
 +        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
@@ -1358,7 +1428,11 @@ index 0000000..d975f11
 +      descriptor: opened.descriptor,
 +      sessionData: opened.sessionData
 +    },
-+    relayTo
++    relayTo,
++    // ⚠️ 参数必须**随开窗**一起给：窗口刚建好时 relay 再发 dispatchWindowEvent
++    // 有可能在渲染层就绪之前丢掉，那样这一轮用的还是电脑端旧设置 ——
++    // 用户看到的就是「手机上切了模型/MCP/Skill，电脑端毫无反应」。
++    ...(relayOpts ? { __relayOptions: relayOpts } : {})
 +  })
 +
 +  if (res?.ok && res.id) {
@@ -2513,7 +2587,7 @@ index 0000000..d975f11
 +
 +      let opened = null
 +      try {
-+        opened = await openPhoneConversation(wantConvId, relayTo)
++        opened = await openPhoneConversation(wantConvId, relayTo, relayOpts)
 +      } catch (err) {
 +        rwarn('[relay] open conversation for phone message failed:', err?.message || err)
 +      }
@@ -3861,7 +3935,7 @@ index 23ba179..b845918 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 68ac2ff..fe562aa 100644
+index 68ac2ff..aeab69c 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
 @@ -741,9 +741,199 @@ const normalizeWindowEventPayload = (input) => {
@@ -4191,7 +4265,32 @@ index 68ac2ff..fe562aa 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -10071,6 +10331,12 @@ const deleteMessage = (index) => {
+@@ -6909,6 +7169,8 @@ const getSessionDataAsObject = (options = {}) => {
+     pendingAppendBuffer: normalizePendingInputBuffer(pendingAppendBuffer.value),
+     activeMcpServerIds: sessionMcpServerIds.value || [],
+     activeSkillIds: sessionSkillIds.value || [],
++    // 思考预算也落盘（以前只在内存里，切窗口就丢）
++    reasoningEffort: tempReasoningEffort.value || 'default',
+     isAutoApproveTools: isAutoApproveTools.value,
+     taskList: taskList.value,
+     conversationOwnerId: ensureConversationOwnerId(),
+@@ -8286,6 +8548,15 @@ const loadSession = async (jsonData) => {
+       tempSessionSkillIds.value = [];
+     }
+ 
++    // 思考预算跟着会话走：手机切过一次之后，换个窗口/重启也要保持住。
++    if (typeof jsonData.reasoningEffort === 'string' && jsonData.reasoningEffort) {
++      tempReasoningEffort.value = jsonData.reasoningEffort;
++    }
++    if (Array.isArray(jsonData.activeMcpServerIds)) {
++      sessionMcpServerIds.value = [...jsonData.activeMcpServerIds];
++      tempSessionMcpServerIds.value = [...jsonData.activeMcpServerIds];
++    }
++
+     if (chat_show.value && chat_show.value.length > 0) {
+       chat_show.value.forEach(msg => { if (msg.id === undefined) msg.id = messageIdCounter.value++; });
+       const maxId = Math.max(...chat_show.value.map(m => m.id || 0));
+@@ -10071,6 +10342,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -4204,7 +4303,7 @@ index 68ac2ff..fe562aa 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10088,6 +10354,18 @@ const deleteMessage = (index) => {
+@@ -10088,6 +10365,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -4223,7 +4322,7 @@ index 68ac2ff..fe562aa 100644
  };
  
  const clearHistory = async () => {
-@@ -10428,6 +10706,562 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10428,6 +10717,600 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
@@ -4450,10 +4549,67 @@ index 68ac2ff..fe562aa 100644
 +  }
 +};
 +
++// 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
++//
++// ⚠️ 必须能被**两处**调用：
++//   1) onWindowEvent —— 窗口已存在、后续消息；
++//   2) onWindowInit  —— 刚为某个会话新开的窗口。
++// 以前只有 (1)，于是「新开/切换会话后的第一条消息」参数根本没机会应用，
++// 用户看到的就是「手机上切了模型/MCP/Skill，电脑端毫无反应」。
++const applyRelayOptions = (opts) => {
++  if (!opts || typeof opts !== 'object') return;
++  relayLog('[relay] applying options:', JSON.stringify(opts));
++  try {
++    if (typeof opts.model === 'string' && opts.model && opts.model !== model.value) {
++      handleChangeModel(opts.model);
++      // 记到会话上：模型属于会话，重启/换窗口后也要保持
++      pendingRelaySessionSync = true;
++    }
++    if (typeof opts.reasoningEffort === 'string' && opts.reasoningEffort) {
++      tempReasoningEffort.value = opts.reasoningEffort;
++      // 思考预算以前只放在临时变量里，不落盘 —— 换个窗口就丢。
++      pendingRelaySessionSync = true;
++    }
++    if (Array.isArray(opts.mcp)) {
++      sessionMcpServerIds.value = [...opts.mcp];
++      tempSessionMcpServerIds.value = [...opts.mcp];
++      pendingRelaySessionSync = true;
++    }
++    if (Array.isArray(opts.skills)) {
++      applyNormalizedSkillSelection(opts.skills);
++      pendingRelaySessionSync = true;
++    }
++  } catch (err) {
++    relayWarn('[relay] apply options failed:', err);
++  }
++};
++
++// 手机改过参数 → 触发一次会话落盘，让模型/MCP/Skill/思考预算
++// 真正写进会话本身（和电脑端手动改的行为一致）。
++let pendingRelaySessionSync = false;
++const scheduleRelaySessionSync = () => {
++  if (!pendingRelaySessionSync) return;
++  pendingRelaySessionSync = false;
++  setTimeout(() => {
++    try { autoSaveSession(true); } catch (err) {
++      relayWarn('[relay] session sync after options failed:', err);
++    }
++  }, 600);
++};
++
 +// 窗口初始化载荷里带 relayTo（主进程刚为手机开的窗口）
 +window.api?.onWindowInit?.((data) => {
 +  relayLog('[relay] window init, relayTo =', data?.relayTo);
 +  armRelayReply(data?.relayTo);
++  // 新开的窗口也要立刻应用手机带来的参数，否则这一轮用的是电脑端旧设置。
++  // 延后一点等 bootstrap（技能列表等）就绪，避免技能被归一化掉。
++  const initOpts = data?.__relayOptions;
++  if (initOpts) {
++    setTimeout(() => {
++      applyRelayOptions(initOpts);
++      scheduleRelaySessionSync();
++    }, 800);
++  }
 +});
 +
 +// 窗口事件里带 relayTo（窗口已存在、后续消息）
@@ -4482,27 +4638,8 @@ index 68ac2ff..fe562aa 100644
 +    }
 +  }
 +  // 手机传来的运行参数（模型 / 思考预算 / MCP / Skill / 压缩）
-+  const opts = p?.__relayOptions;
-+  if (opts && typeof opts === 'object') {
-+    relayLog('[relay] applying options:', JSON.stringify(opts));
-+    try {
-+      if (typeof opts.model === 'string' && opts.model && opts.model !== model.value) {
-+        handleChangeModel(opts.model);
-+      }
-+      if (typeof opts.reasoningEffort === 'string' && opts.reasoningEffort) {
-+        tempReasoningEffort.value = opts.reasoningEffort;
-+      }
-+      if (Array.isArray(opts.mcp)) {
-+        sessionMcpServerIds.value = [...opts.mcp];
-+        tempSessionMcpServerIds.value = [...opts.mcp];
-+      }
-+      if (Array.isArray(opts.skills)) {
-+        applyNormalizedSkillSelection(opts.skills);
-+      }
-+    } catch (err) {
-+      relayWarn('[relay] apply options failed:', err);
-+    }
-+  }
++  applyRelayOptions(p?.__relayOptions);
++  scheduleRelaySessionSync();
 +});
 +
 +// ---------------------------------------------------------------------------
