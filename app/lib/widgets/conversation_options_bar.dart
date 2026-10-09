@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-// models.dart 会 re-export core/protocol.dart，所以 kReasoningEffortLabels
-// 从这里就能拿到，不用再单独 import 一次 protocol.dart。
+// ⚠️ 必须显式 import protocol.dart：models.dart 用的是
+// `export '../core/protocol.dart' show <一堆类型>` 白名单导出，
+// kReasoningEffortLabels / reasoningEffortLabel 这两个顶层符号**不在白名单里**，
+// 只 import models.dart 会报 undefined_identifier（CI 的 flutter analyze 会挂）。
+import '../core/protocol.dart';
 import '../models/models.dart';
 import '../services/app_state.dart';
 
