@@ -96,13 +96,11 @@ class _HomeShellState extends State<HomeShell> {
             // 与电脑端对话
             const Text('对话', style: TextStyle(fontWeight: FontWeight.w600)),
             const SizedBox(width: 8),
-            // 顶部胶囊：两级入口 —— 先选电脑设备，再选该设备上的会话；
-            // 已进入会话时显示会话名，点它仍可换设备 / 换会话 / 退出。
+            // 顶部胶囊：直接选电脑上的会话。已进入会话时显示会话名。
             _SessionPill(
-              deviceLabel: state.targetLabel,
               conversationTitle: state.activeConversationTitle,
               inConversation: state.activeConversationId != null,
-              onTap: () => _pickDeviceThenSession(context, state),
+              onTap: () => _pickSession(context, state),
             ),
           ],
         ),
@@ -199,70 +197,16 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  /// 点标题栏胶囊：两级 —— 先选电脑设备，再选该设备上的会话。
+  /// 点标题栏胶囊：直接列出电脑上的会话，选中即切换。
   ///
-  /// 第一级选的是「跟哪台电脑对话」（决定后续请求的 to）；
-  /// 选到具体设备后自动进第二级「选会话」。选「所有设备（广播）」
-  /// 则只切目标、不进会话选择（广播没有单一会话可言）。
-  void _pickDeviceThenSession(BuildContext context, AppState state) {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF1B1F2B),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(14),
-              child:
-                  Text('选择电脑设备', style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-            if (state.peers.isEmpty)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Text('暂无在线电脑设备',
-                    style: TextStyle(fontSize: 12, color: Colors.white38)),
-              ),
-            for (final opt in <_TargetOpt>[
-              const _TargetOpt(null, '所有设备（广播）', Icons.campaign_outlined),
-              ...state.peers.map((d) => _TargetOpt(
-                    d.deviceId,
-                    '${d.deviceName} (${d.platform})',
-                    Icons.devices,
-                  )),
-            ])
-              ListTile(
-                dense: true,
-                leading: Icon(opt.icon,
-                    size: 20,
-                    color: opt.id == state.targetDeviceId
-                        ? Colors.lightBlueAccent
-                        : Colors.white38),
-                title: Text(opt.label,
-                    style: TextStyle(
-                      color: opt.id == state.targetDeviceId
-                          ? Colors.lightBlueAccent
-                          : null,
-                    )),
-                trailing: opt.id == state.targetDeviceId
-                    ? const Icon(Icons.check, size: 18, color: Colors.lightBlueAccent)
-                    : null,
-                onTap: () {
-                  state.setTargetDevice(opt.id);
-                  Navigator.pop(ctx);
-                  // 第二级：只有选定具体设备才进会话选择
-                  if (opt.id != null) _pickSession(context, state);
-                },
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 第二级：列出该设备上的电脑端会话，选中即切换。
+  /// 只有一台电脑在线、又还没指定目标时，自动对上它，
+  /// 免得会话列表和后面的消息广播到所有设备。
   void _pickSession(BuildContext context, AppState state) {
+    if (state.targetDeviceId == null) {
+      final others =
+          state.peers.where((d) => d.deviceId != state.config.deviceId).toList();
+      if (others.length == 1) state.setTargetDevice(others.first.deviceId);
+    }
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF1B1F2B),
@@ -272,16 +216,13 @@ class _HomeShellState extends State<HomeShell> {
   }
 }
 
-/// 标题栏里的两级入口胶囊：显示「设备」或「当前会话名」。
-/// 进入电脑端会话时用链接图标 + 蓝色，一眼能看出"正在电脑端会话里"。
+/// 标题栏入口胶囊：未进会话时显示「选择会话」，进入后显示会话名。
 class _SessionPill extends StatelessWidget {
-  final String deviceLabel;
   final String conversationTitle;
   final bool inConversation;
   final VoidCallback onTap;
 
   const _SessionPill({
-    required this.deviceLabel,
     required this.conversationTitle,
     required this.inConversation,
     required this.onTap,
@@ -291,7 +232,7 @@ class _SessionPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = (inConversation && conversationTitle.isNotEmpty)
         ? conversationTitle
-        : deviceLabel;
+        : '选择会话';
     return Material(
       color: inConversation ? const Color(0xFF1D2A3A) : const Color(0xFF232838),
       borderRadius: BorderRadius.circular(20),
@@ -327,14 +268,7 @@ class _SessionPill extends StatelessWidget {
   }
 }
 
-class _TargetOpt {
-  final String? id;
-  final String label;
-  final IconData icon;
-  const _TargetOpt(this.id, this.label, this.icon);
-}
-
-/// 第二级面板：列出当前设备上的电脑端会话，点一条即切到该会话。
+/// 会话面板：列出电脑端会话，点一条即切到该会话。
 ///
 /// 切换成功后底部「助手/模型/思考」会跟随该会话的助手
 /// （由 AppState 处理 conversationOpenResult 时 applyPrompt 完成）。
@@ -429,8 +363,8 @@ class _SessionSheetState extends State<_SessionSheet> {
     );
   }
 
-  /// 第二级会话列表：按「项目」分组（复用电脑端 projects 顺序，其余归「未归类」），
-  /// 与「电脑端对话」列表页（ConversationsPage）一致，避免项目层级在两级胶囊里丢失。
+  /// 会话列表按「项目」分组（复用电脑端 projects 顺序，其余归「未归类」），
+  /// 与「电脑端对话」列表页一致。
   Widget _buildGroupedList(BuildContext context, AppState state) {
     final grouped = <String, List<ConversationOption>>{};
     for (final p in state.conversationProjects) {
