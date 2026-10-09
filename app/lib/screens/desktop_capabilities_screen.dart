@@ -310,7 +310,13 @@ class _DesktopCapabilityPageState extends State<DesktopCapabilityPage> {
       MapEntry('标识', p.key),
       if (p.model.isNotEmpty)
         MapEntry('默认模型', _modelDisplay(caps, p.model)),
-      if (p.reasoningEffort.isNotEmpty) MapEntry('思考预算', p.reasoningEffort),
+      // 显示中文档位名，并在括号里带上电脑端的原始值 —— 与电脑端叫法一致，
+      // 又能看出实际传的是什么（以前直接显示 "high" 这种英文标识）。
+      if (p.reasoningEffort.isNotEmpty)
+        MapEntry(
+          '思考预算',
+          '${reasoningEffortLabel(p.reasoningEffort)}（${p.reasoningEffort}）',
+        ),
       if (p.type.isNotEmpty) MapEntry('类型', p.type),
       MapEntry('MCP 工具', p.mcp.isEmpty ? '（不限）' : p.mcp.join('、')),
       MapEntry('Skill 技能', p.skills.isEmpty ? '（不限）' : p.skills.join('、')),

@@ -167,6 +167,32 @@ class Envelope {
   }
 }
 
+/// 思考预算档位的**显示名**，必须与电脑端逐字一致。
+///
+/// 电脑端定义在 `render/window/components/ChatInput.vue` 的
+/// `reasoningEffortOptions` / `reasoningTooltipContent`：
+///   default→默认  none→关闭  low→快速  medium→均衡
+///   high→深入    xhigh→强化  max→极致
+///
+/// ⚠️ 以前手机端自己写了一套（低/中/高/很高/最大），同一个档位两边叫法不同，
+/// 用户在手机上切完再看电脑端会对不上号。这里收敛成唯一一份，两处 UI 共用。
+const Map<String, String> kReasoningEffortLabels = {
+  'default': '默认',
+  'none': '关闭',
+  'low': '快速',
+  'medium': '均衡',
+  'high': '深入',
+  'xhigh': '强化',
+  'max': '极致',
+};
+
+/// 取某个档位的中文名；未知值原样返回（电脑端以后加了新档位也不会显示成空白）。
+String reasoningEffortLabel(String? effort) {
+  final key = (effort ?? '').trim();
+  if (key.isEmpty) return kReasoningEffortLabels['default']!;
+  return kReasoningEffortLabels[key] ?? key;
+}
+
 /// Per-message run options the phone can send along with a chat message.
 /// These are applied by the desktop before it runs the AI turn.
 class ChatOptions {

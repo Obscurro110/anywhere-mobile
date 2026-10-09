@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+// models.dart 会 re-export core/protocol.dart，所以 kReasoningEffortLabels
+// 从这里就能拿到，不用再单独 import 一次 protocol.dart。
 import '../models/models.dart';
 import '../services/app_state.dart';
 
@@ -11,15 +13,11 @@ import '../services/app_state.dart';
 class ConversationOptionsBar extends StatelessWidget {
   const ConversationOptionsBar({super.key});
 
-  static const _effortLabels = {
-    'default': '默认',
-    'none': '关闭',
-    'low': '低',
-    'medium': '中',
-    'high': '高',
-    'xhigh': '很高',
-    'max': '最大',
-  };
+  /// 思考预算档位的中文名。
+  ///
+  /// ⚠️ 用 `core/protocol.dart` 里的**唯一一份**定义，保证与电脑端逐字一致
+  /// （电脑端：默认/关闭/快速/均衡/深入/强化/极致）。
+  static const _effortLabels = kReasoningEffortLabels;
 
   @override
   Widget build(BuildContext context) {
