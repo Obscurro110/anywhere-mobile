@@ -188,6 +188,96 @@ class AppState extends ChangeNotifier {
   final Set<String> _detachedConversationIds = {};
   final Map<String, Future<void>> _historyWrites = {};
 
+  // ---------------------------------------------------------------------------
+  // 多会话并行的「后台收件箱」
+  //
+  // 场景：A 在等回复、用户切到 B 提问、C 还在电脑端跑长任务。
+  // 电脑端现在会**同时**推出三个会话的窗口各自生成并各自回传。
+  //
+  // 但手机界面一次只能显示一个会话（`messages` 就是「当前会话」）。
+  // 以前的做法是：凡是回传的 conversationId 跟当前会话对不上，**直接丢弃**
+  // （见 _onChat 里的「丢弃不属于当前会话的回复」）——
+  // 于是 A 的回复永远丢了，切回去还是转圈。
+  //
+  // 现在改为「转存」：不属于当前会话的回复写进 _backgroundByConv[cid]，
+  // 同时落盘到那个会话自己的存储 key。等用户切回 A 时，这些消息已经在手里，
+  // 会一起合并进 messages，看起来就是「A 在后台跑完了」。
+  //
+  // 为什么不用单独的后台队列而是直接合并进存储：
+  // 存储本来就是「按会话分开」的（_historyKey(conversationId)），
+  // 把消息写进去等于让它成为那个会话历史的一部分，切回来自然就能看到，
+  // 不需要额外维护一份「未读」列表和它的生命周期。
+  // ---------------------------------------------------------------------------
+
+  /// 后台会话最多在内存里留多少条消息（磁盘上有完整历史，这里只做界面缓冲）。
+  /// 防止「用户一直不切回某个会话」时内存无限增长。
+  static const int _kMaxBackgroundMessages = 200;
+
+  /// 「已解绑会话」集合的上限（见 case 'delete' 里的 FIFO 清理）
+  static const int _kMaxDetachedIds = 500;
+
+  /// 后台会话的消息：conversationId -> 该会话在「我没看它」时收到的消息。
+  /// 切到该会话时会被取走并合并进 messages，然后清空这一项。
+  final Map<String, List<ChatMessage>> _backgroundByConv = {};
+
+  /// 后台会话里还没跑完的回复数：conversationId -> 条数。
+  /// 只用来在会话列表上显示「生成中」角标，切过去时会清掉。
+  final Map<String, int> _backgroundPendingByConv = {};
+
+  /// 某个会话在后台有多少条新消息（角标用）。0 表示没有。
+  int backgroundUnreadCount(String conversationId) {
+    final id = conversationId.trim();
+    if (id.isEmpty) return 0;
+    return _backgroundByConv[id]?.where((m) => !m.pending).length ?? 0;
+  }
+
+  /// 某个会话是否在后台还有回复没跑完（列表上显示「生成中」）
+  bool backgroundGenerating(String conversationId) {
+    final id = conversationId.trim();
+    if (id.isEmpty) return false;
+    return (_backgroundPendingByConv[id] ?? 0) > 0;
+  }
+
+  /// 把一条消息转存到**后台会话**（用户当前没在看它）。
+  ///
+  /// 只做两件事：塞进 _backgroundByConv，和落盘到那个会话的 key。
+  /// 不碰 messages —— 界面上不该出现别的会话的内容。
+  ///
+  /// ⚠️ 流式增量（streaming）**不落盘**：电脑端每 ~150ms 推一次增量，
+  /// 一轮回复会有几十上百次。每次写 SharedPreferences 既慢又费电，
+  /// 而且这些中间态本来就没有保留价值（最终完整版到达时才写）。
+  /// 和前台的处理保持一致（见 _onChat 里的 `if (streaming != true) _persistHistory()`）。
+  void _stashBackgroundMessage(ChatMessage msg, {bool streaming = false}) {
+    final cid = (msg.conversationId ?? '').trim();
+    if (cid.isEmpty) {
+      // 没有会话归属的消息（旧版电脑端）没法归到某个会话，只能丢。
+      // 新电脑端一定带 conversationId（buildAssistantExtra 里就有）。
+      debugPrint('[AppState] 后台消息缺少 conversationId，丢弃');
+      return;
+    }
+    final list = _backgroundByConv.putIfAbsent(cid, () => <ChatMessage>[]);
+    // 同一条消息可能因为流式更新多次到达 —— 按 messageId/id 就地替换
+    final mid = msg.desktopMeta?.messageId ?? '';
+    final idx = mid.isNotEmpty
+        ? list.indexWhere((m) => m.desktopMeta?.messageId == mid)
+        : list.indexWhere((m) => m.id == msg.id);
+    if (idx >= 0) {
+      list[idx] = msg;
+    } else {
+      list.add(msg);
+    }
+    // ⚠️ 内存也要有上限：用户要是一直不切回这个会话，后台消息会一直堆。
+    // 保留最近 200 条足够（磁盘上有完整历史，切回去时还会从磁盘读）。
+    if (list.length > _kMaxBackgroundMessages) {
+      list.removeRange(0, list.length - _kMaxBackgroundMessages);
+    }
+    // 流式增量不落盘（见上）。最终完整版（streaming == false）才写。
+    if (!streaming) {
+      unawaited(_persistMessagesTo(cid, list.toList()));
+    }
+    notifyListeners();
+  }
+
   /// 切换「当前对话的电脑端会话」。
   ///
   /// **必须同时换掉 messages** —— 每个会话的聊天记录是分开存的，
@@ -242,6 +332,28 @@ class AppState extends ChangeNotifier {
       // 切会话时正在等待的回复属于旧会话，别把它的 pending 带过来
       notifyListeners();
     }());
+
+    // ⚠️ 多会话并行：把**这个会话后台收到的消息**并回界面。
+    //
+    // 后台收件箱（_backgroundByConv）里存着「我在看 B 时，A 回传过来的消息」。
+    // 切回 A 时必须把它们显示出来，否则用户切回去还是看不到 A 的结果。
+    //
+    // 两路来源都合、按 id 去重：
+    //   1) _switchHistoryTo 已经从磁盘读到的那份（_stashBackgroundMessage 落过盘）；
+    //   2) 内存里的 _backgroundByConv——落盘是异步的，可能还没写完，
+    //      只靠磁盘会漏掉刚到的几条。
+    // 这里同步合并（不 await），保证界面立刻能看到，不会先空一下再蹦出来。
+    if (id != null && id.isNotEmpty) {
+      final bgList = _backgroundByConv.remove(id);
+      _backgroundPendingByConv.remove(id);
+      if (bgList != null && bgList.isNotEmpty) {
+        final have = messages.map((m) => m.id).toSet();
+        messages.addAll(bgList.where((m) => !have.contains(m.id)));
+        // 内存里的这份也可能比磁盘新（流式最后一段），同步落一次盘
+        unawaited(_persistMessagesTo(id, messages.toList()));
+        notifyListeners();
+      }
+    }
   }
 
   /// 把一份消息写到**指定的 key**（调用方自己算好，避免 _localSessionId 漂移）。
@@ -1384,6 +1496,27 @@ class AppState extends ChangeNotifier {
           switch (action) {
             case 'delete':
               conversations = conversations.where((c) => c.id != cid).toList();
+              // 会话没了 → 把它的后台收件箱也清掉。
+              // 不清的话：① 内存里那几条再也不会被切回去看到，白占内存；
+              // ② 会话列表上还会挂着「N 条新回复」角标，但点进去是空的。
+              _backgroundByConv.remove(cid);
+              _backgroundPendingByConv.remove(cid);
+              // 记进「已解绑」：万一电脑端还有这个会话的回复在路上（它刚跑完
+              // 才收到删除指令），_onChat 会据此直接丢弃，不再转存进来。
+              if (cid.isNotEmpty) {
+                _detachedConversationIds.add(cid);
+                // ⚠️ 这个 Set 只增不减，正常使用一年也攒不到多少，但总得有界。
+                // 超上限就丢掉最早记的那些（FIFO）—— 丢掉的代价只是：
+                // 一个早已删除的会话若有极迟的回复到达，可能被转存成一条
+                // 后台消息（用户看不到，下次清缓存时一并消失），无害。
+                if (_detachedConversationIds.length > _kMaxDetachedIds) {
+                  final drop = _detachedConversationIds.length - _kMaxDetachedIds;
+                  final it = _detachedConversationIds.iterator;
+                  for (var i = 0; i < drop && it.moveNext(); i++) {
+                    _detachedConversationIds.remove(it.current);
+                  }
+                }
+              }
               if (activeConversationId == cid) {
                 _setActiveConversation(null, '');
               }
@@ -1711,15 +1844,45 @@ class AppState extends ChangeNotifier {
 
     // 会话归属校验：电脑端回的是**哪个**会话的消息？
     //
-    // 只在手机已绑定电脑端会话时校验（p.conversationId 有值）。
-    // 否则会出现：从 A 切到 B 之后，A 迟到的回复被追加进 B 的聊天列表，
-    // 两个会话的内容又混在一起。
+    // ⚠️ 多会话并行：以前这里是「不属于当前会话就直接 return 丢弃」。
+    // 那时手机同一时刻只跟一个会话打交道，丢弃是合理的（防止 A 的回复
+    // 混进 B 的列表）。但现在电脑端会**同时**跑好几个会话并各自回传，
+    // 直接丢就等于把 A/C 的回复永久扔掉了 —— 用户切回去还是转圈。
+    //
+    // 现在改为「转存到那个会话的后台收件箱」，并落盘到它自己的存储：
+    //   · 界面上仍然不会出现别的会话的内容（不碰 messages）；
+    //   · 但那条消息被保存下来了，用户切回去就能看到。
+    // 只有两种情况下才真的丢弃：会话已被删除（_detachedConversationIds），
+    // 或者这条消息本来就不带 conversationId（旧版电脑端，无法归属）。
     if (isAssistant && p.conversationId != null && p.conversationId!.isNotEmpty) {
       if (_detachedConversationIds.contains(p.conversationId)) return;
       final mine = _activeConversationId;
       if (mine != null && mine.isNotEmpty && p.conversationId != mine) {
-        debugPrint('[AppState] 丢弃不属于当前会话的回复: '
+        debugPrint('[AppState] 转存后台会话的回复: '
             'got=${p.conversationId} current=$mine');
+        final streaming = p.assistantMeta?.streaming == true;
+        final bg = ChatMessage(
+          id: env.id,
+          role: p.role,
+          text: p.text,
+          time: DateTime.fromMillisecondsSinceEpoch(env.ts),
+          outgoing: false,
+          conversationId: p.conversationId,
+          attachments:
+              (p.attachments ?? []).map((e) => FileMeta.fromJson(e)).toList(),
+          desktopMeta: p.assistantMeta,
+          modelTag: p.assistantMeta?.modelTag ?? '',
+          choice: p.choice ?? p.assistantMeta?.choice,
+        );
+        // 流式增量不落盘（和前台一致，见 _stashBackgroundMessage 的注释）
+        _stashBackgroundMessage(bg, streaming: streaming);
+        // 这一轮还没跑完就记着，列表上显示「生成中」；跑完了就撤掉。
+        final cid = p.conversationId!;
+        if (streaming) {
+          _backgroundPendingByConv[cid] = (_backgroundPendingByConv[cid] ?? 0);
+        } else {
+          _backgroundPendingByConv.remove(cid);
+        }
         return;
       }
     }

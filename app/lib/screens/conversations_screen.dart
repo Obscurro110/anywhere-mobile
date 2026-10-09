@@ -207,6 +207,9 @@ class _ConversationsPageState extends State<ConversationsPage> {
 
   Widget _tile(BuildContext context, AppState state, ConversationOption c) {
     final isActive = c.id == state.activeConversationId;
+    // 只算一次：backgroundUnreadCount 内部要遍历列表，build 里重复调用没必要
+    final bgUnread = isActive ? 0 : state.backgroundUnreadCount(c.id);
+    final bgGenerating = !isActive && state.backgroundGenerating(c.id);
 
     return Card(
       color: isActive ? const Color(0xFF1D2A3A) : const Color(0xFF1B1F2B),
@@ -262,6 +265,52 @@ class _ConversationsPageState extends State<ConversationsPage> {
             if (isActive) ...[
               const Text('对话中',
                   style: TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+            ],
+            // ---- 多会话并行的后台状态（只对「没在看」的会话显示）----
+            //
+            // A 在等回复、C 在跑长任务时，用户可能在 B 里。
+            // 这些会话的结果会照常被接收（见 AppState._stashBackgroundMessage），
+            // 但界面上得让用户**知道**它跑完了 —— 否则永远不知道要切回去看。
+            if (!isActive) ...[
+              if (bgGenerating)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2A2438),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      SizedBox(
+                        width: 9,
+                        height: 9,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.6,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Colors.deepPurpleAccent),
+                        ),
+                      ),
+                      SizedBox(width: 5),
+                      Text('生成中',
+                          style: TextStyle(
+                              fontSize: 10.5, color: Colors.deepPurpleAccent)),
+                    ],
+                  ),
+                ),
+              if (bgUnread > 0)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1F3A2C),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '$bgUnread 条新回复',
+                    style: const TextStyle(
+                        fontSize: 10.5, color: Colors.greenAccent),
+                  ),
+                ),
             ],
           ],
         ),

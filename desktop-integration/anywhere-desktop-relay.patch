@@ -298,10 +298,10 @@ index 3d0b346..f35ec10 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..3c7d20e
+index 0000000..6e915ec
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2764 @@
+@@ -0,0 +1,2850 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -422,7 +422,66 @@ index 0000000..3c7d20e
 +// 又可能被「打开某个会话」覆盖掉 —— 结果手机想让电脑端操作 A 会话的消息时，
 +// 窗口可能已经被 B 会话占用了，只能报「会话没打开」。
 +// 有了这张表，每个会话各有各的窗口引用，互不干扰。
++//
++// ⚠️ 多会话并行（2026-10 起）：这张表就是**并行的核心**。
++// 每个会话最多一个窗口，切换会话时**不再**关掉别的会话窗口，
++// 于是「A 在等回复 / B 在提问 / C 在跑长任务」可以真正同时活着。
++// 手机切走只是换了个显示对象，后台会话的窗口继续跑、继续回传。
 +const convWindows = new Map()
++
++// 每个会话窗口的最近活动时间：conversationId -> epoch ms。
++//
++// 多会话并行后同一时刻可能有多个会话窗口，回收窗口时必须避开
++// 「正在跑长任务」的那个 —— 光看「有没有开着」会误杀。
++// 每次往某个会话窗口派发事件时刷新，用来判断它是不是闲置了。
++const convWindowActivity = new Map()
++
++// 会话窗口并发上限。超过后只回收「闲置最久」的那个（见 reclaimConversationWindows）。
++// 取值偏大是有意的：用户的典型场景就是三四个会话同时活着，宁可多留也别误关。
++const MAX_CONVERSATION_WINDOWS = 6
++
++// 多久没有活动的会话窗口算「闲置」，可以被回收（10 分钟）。
++// 比常见的单轮生成耗时长，正常跑着的任务不会被判闲置。
++const CONV_WINDOW_IDLE_MS = 10 * 60 * 1000
++
++/** 记一下某个会话窗口刚有过活动 */
++function touchConvWindow(conversationId) {
++  const cid = String(conversationId || '').trim()
++  if (!cid) return
++  convWindowActivity.set(cid, Date.now())
++}
++
++/**
++ * 窗口数超上限时回收最闲置的会话窗口。
++ *
++ * 只回收「闲置超过 CONV_WINDOW_IDLE_MS」的；一个都不到标准就宁可超限也不关
++ * —— 关掉正在生成的窗口会直接掐断那轮任务，比多留几个窗口严重得多。
++ */
++function reclaimConversationWindows() {
++  if (convWindows.size <= MAX_CONVERSATION_WINDOWS) return
++  const now = Date.now()
++  const idle = []
++  for (const [cid, wid] of convWindows.entries()) {
++    if (!isWindowAlive(wid)) continue
++    const at = convWindowActivity.get(cid) || 0
++    if (now - at >= CONV_WINDOW_IDLE_MS) idle.push({ cid, wid, at })
++  }
++  // 闲置越久越先关；只关到回落到上限为止
++  idle.sort((a, b) => a.at - b.at)
++  let excess = convWindows.size - MAX_CONVERSATION_WINDOWS
++  for (const item of idle) {
++    if (excess <= 0) break
++    try {
++      ctx.getWindowByRef(item.wid)?.destroy?.()
++      rlog('[relay] reclaimed idle conversation window:', item.wid, 'conv =', item.cid)
++    } catch (err) {
++      rwarn('[relay] reclaim conversation window failed:', err?.message || err)
++    }
++    convWindows.delete(item.cid)
++    convWindowActivity.delete(item.cid)
++    excess -= 1
++  }
++}
 +
 +
 +const CONFIG_PATH = () => join(app.getPath('userData'), 'relay.json')
@@ -758,7 +817,14 @@ index 0000000..3c7d20e
 +function pruneConvWindows() {
 +  if (!convWindows || convWindows.size === 0) return
 +  for (const [cid, wid] of [...convWindows.entries()]) {
-+    if (!isWindowAlive(wid)) convWindows.delete(cid)
++    if (!isWindowAlive(wid)) {
++      convWindows.delete(cid)
++      convWindowActivity.delete(cid)
++    }
++  }
++  // 用户手动关掉某个会话窗口后，活动表里可能残留它的记录，一并清掉
++  for (const cid of [...convWindowActivity.keys()]) {
++    if (!convWindows.has(cid)) convWindowActivity.delete(cid)
 +  }
 +  // phoneWindowId 指向的窗口已经没了 → 复位，避免后续误判「已绑定」
 +  if (phoneWindowId && !isWindowAlive(phoneWindowId)) {
@@ -1412,9 +1478,16 @@ index 0000000..3c7d20e
 +  // 这个会话自己的助手（键名可能是 CODE，见 conversationPromptKey 的注释）
 +  const promptKey = conversationPromptKey(opened.sessionData) || phonePromptKey
 +
-+  // 已经为这个会话开过窗口就复用
-+  const reuseKey = `conv:${opened.descriptor.conversationId}`
-+  if (phoneWindowId && phoneWindowKey === reuseKey && isWindowAlive(phoneWindowId)) {
++  // 已经为这个会话开过窗口就复用。
++  //
++  // ⚠️ 多会话并行：这里改成**按会话查 convWindows**，不再依赖单槽 phoneWindowKey。
++  // 以前条件是 `phoneWindowKey === reuseKey`，也就是「这次要开的会话恰好就是
++  // 手机槽位当前停的那个」才复用 —— 手机在 A、B 之间来回切时，每次都会
++  // 走「不复用 → 关旧窗 → 开新窗」，既慢又打断了另一个会话正在跑的生成。
++  // 现在每个会话各有各的窗口，切回来直接复用，另一个会话不受影响。
++  const conversationId = opened.descriptor.conversationId
++  const existingWin = convWindows.get(conversationId)
++  if (existingWin && isWindowAlive(existingWin)) {
 +    try {
 +      ctx.dispatchWindowEvent(
 +        {
@@ -1427,42 +1500,43 @@ index 0000000..3c7d20e
 +            // 复用窗口也要把手机这次带来的参数带上，否则「切了模型没反应」
 +            ...(relayOpts ? { __relayOptions: relayOpts } : {})
 +          },
-+          target: phoneWindowId
++          target: existingWin
 +        },
 +        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
 +      )
-+      convWindows.set(opened.descriptor.conversationId, phoneWindowId)
-+      return { ok: true, windowId: phoneWindowId, reused: true, title: opened.descriptor.title, promptKey }
++      phoneWindowId = existingWin
++      phoneWindowKey = `conv:${conversationId}`
++      touchConvWindow(conversationId)
++      return { ok: true, windowId: existingWin, reused: true, title: opened.descriptor.title, promptKey }
 +    } catch (err) {
 +      rwarn('[relay] reuse conversation window failed:', err?.message || err)
 +    }
 +  }
 +
-+
-+  // ⚠️ 要开新窗口了 —— 先把「当前手机窗口」关掉。
++  // ⚠️ 多会话并行：这里**故意不再关掉上一个手机窗口**。
 +  //
-+  // 以前只有 routePhoneChat（手机发消息）那条路径会先 destroy 旧窗口，
-+  // conversation-open（手机点会话切换）这条**不关**：
-+  //   · 切到别的会话时旧窗口留在屏幕上；
-+  //   · 旧窗口还持有那个会话的写租约（每 5 秒心跳续期）；
-+  //   · 来回切几次就攒出一堆窗口 —— 用户反馈的「电脑端打开了一堆重复的会话」。
-+  // 手机同一时刻只在一个会话里，所以切换时关掉上一个手机窗口是正确的语义。
-+  // 只关 relay 自己为手机开的那个；用户手动开的窗口不碰。
-+  if (phoneWindowId && isWindowAlive(phoneWindowId)) {
-+    try {
-+      ctx.getWindowByRef(phoneWindowId)?.destroy?.()
-+    } catch (err) {
-+      rwarn('[relay] close previous phone window failed:', err?.message || err)
-+    }
-+    if (typeof phoneWindowKey === 'string' && phoneWindowKey.startsWith('conv:')) {
-+      const prevConv = phoneWindowKey.slice(5)
-+      if (prevConv !== opened.descriptor.conversationId && convWindows.get(prevConv) === phoneWindowId) {
-+        convWindows.delete(prevConv)
-+      }
-+    }
++  // 历史沿革：以前手机同一时刻只在一个会话里，所以「要开新窗口就先把旧的关掉」
++  // 是对的语义（也修掉了「来回切攒出一堆重复窗口」）。但在「A 等回复 / B 提问 /
++  // C 跑长任务」的并行场景下，关掉旧窗口 = 掐断 A/C 正在跑的生成 —— 这恰恰是
++  // 用户要避免的。
++  //
++  // 现在靠 convWindows 保证「每个会话最多一个窗口」：「一堆重复窗口」的根因是
++  // 同一个会话被反复开新窗，而那由上面的复用逻辑挡住了。不同会话各有各的窗口，
++  // 数量天然受会话数约束，不会失控。
++  //
++  // 只关**同一个会话**上一次残留的窗口（复用失败走到这里的情况）。
++  if (existingWin && !isWindowAlive(existingWin)) {
++    convWindows.delete(conversationId)
++    convWindowActivity.delete(conversationId)
++  }
++  // 槽位如果还指着一个已死的窗口，顺手复位
++  if (phoneWindowId && !isWindowAlive(phoneWindowId)) {
 +    phoneWindowId = null
 +    phoneWindowKey = 'phone'
 +  }
++
++  // 会话窗口太多了 → 回收最闲置的那些（正在跑的不动）
++  reclaimConversationWindows()
 +
 +  const res = await ctx.openWindow('window', {
 +    code: promptKey,
@@ -1481,9 +1555,10 @@ index 0000000..3c7d20e
 +
 +  if (res?.ok && res.id) {
 +    phoneWindowId = res.id
-+    phoneWindowKey = reuseKey
-+    convWindows.set(opened.descriptor.conversationId, res.id)
-+    rlog('[relay] opened conversation window:', res.id, 'conv =', opened.descriptor.conversationId)
++    phoneWindowKey = `conv:${conversationId}`
++    convWindows.set(conversationId, res.id)
++    touchConvWindow(conversationId)
++    rlog('[relay] opened conversation window:', res.id, 'conv =', conversationId, 'total =', convWindows.size)
 +        let assistantName = ''
 +    try {
 +      const cRes = await ctx?.dataApi?.getConfig?.()
@@ -2043,15 +2118,28 @@ index 0000000..3c7d20e
 +
 +    // 2) 再看当前这个「手机窗口」能不能用
 +    //
-+    // 手机聊天窗口（key='phone'）一律接受：那个窗口就是手机自己在聊的会话，
-+    // 消息必然来自它。具体是不是同一条消息，由窗口自己按 messageId 查——
-+    // 窗口手里有真实的 chat_show，它比主进程更有发言权。
++    // ⚠️ 多会话并行下这里必须收紧：以前 phone 窗口（key='phone'）**一律接受**。
++    // 那时手机同一时刻只在一个会话里，所以「手机窗口必然是这条消息的窗口」成立。
++    // 现在电脑端可能同时跑着 A/B/C 三个会话窗口，若手机当前停在手机自建会话
++    // （key 还是 'phone'），又去操作**另一个**会话的消息（比如在会话详情页里
++    // 点「删除这条」——详情页只读磁盘，不会为此开窗），就会把那条命令派发到
++    // 手机自建会话的窗口里 —— 轻则 message_not_found，重则删错/重答错消息。
++    //
++    // 现在规则改为：带 conversationId 的操作**只认精确窗口**（第 1 步）。
++    // 命中不了就走第 3 步「自动开窗」，由 openPhoneConversation 精确打开并
++    // 登记进 convWindows，之后再派发 —— 不会打错窗口。
++    //
++    // 会不会影响「手机自建会话」的删除/重新回答？不会：那个窗口在收到第一条
++    // 消息回传 meta 时就已经被绑定成 conv:<它自己的会话 id> 并登记进
++    // convWindows 了（见下面 relay:sendChat 里 user-message-meta 的处理），
++    // 第 1 步就能精确命中。'phone' 这个 key 只在「窗口刚开、还没回过 meta」
++    // 时才存在，而那时会话里还没有消息可操作。
 +    if (!targetWin && isWindowAlive(phoneWindowId)) {
-+      if (phoneWindowKey === 'phone') {
++      if (!conversationId) {
++        // 没有会话归属的操作（手机本地消息）：手机窗口就是它的窗口，接受
 +        targetWin = phoneWindowId
-+      } else if (conversationId && phoneWindowKey === `conv:${conversationId}`) {
-+        targetWin = phoneWindowId
-+      } else if (!conversationId) {
++      } else if (phoneWindowKey === `conv:${conversationId}`) {
++        // 兜底：槽位恰好停在这个会话（正常情况下第 1 步已经命中）
 +        targetWin = phoneWindowId
 +      }
 +    }
@@ -2547,14 +2635,19 @@ index 0000000..3c7d20e
 +  const forceNewConversation = !wantConvId && msg?.__relayNewConversation === true
 +  if (forceNewConversation) {
 +    // 换助手后不能复用旧手机窗口或历史会话，确保下一条创建新会话。
-+    if (isWindowAlive(phoneWindowId)) {
-+      try { ctx.getWindowByRef(phoneWindowId)?.destroy?.() } catch (err) {
++    //
++    // ⚠️ 多会话并行：只销毁「手机自建会话」的窗口（key='phone'）。
++    // 已绑定到某个电脑端会话的窗口**绝不能**销毁 —— 那个会话可能正跑着长任务，
++    // 关掉它就等于掐断（这正是多会话并行要避免的）。
++    // 和下面「换助手」分支遵循同一条原则（见那里的注释）。
++    if (phoneWindowKey === 'phone' && isWindowAlive(phoneWindowId)) {
++      try {
++        ctx.getWindowByRef(phoneWindowId)?.destroy?.()
++      } catch (err) {
 +        rwarn('[relay] destroy old window for new conversation failed:', err?.message || err)
 +      }
 +    }
-+    if (typeof phoneWindowKey === 'string' && phoneWindowKey.startsWith('conv:')) {
-+      convWindows.delete(phoneWindowKey.slice(5))
-+    }
++    // 槽位清空即可；已绑定会话的窗口引用留在 convWindows 里继续有效
 +    phoneWindowId = null
 +    phoneWindowKey = 'phone'
 +  }
@@ -2607,24 +2700,16 @@ index 0000000..3c7d20e
 +  // 手机以为自己在会话 X 里聊，电脑端却把消息塞进了通用「手机」会话，
 +  // 回复也落在别处 —— 两边对不上，就是用户说的「对话和助手没有对应」。
 +  if (wantConvId) {
-+    const alreadyBound =
-+      isWindowAlive(phoneWindowId) && phoneWindowKey === `conv:${wantConvId}`
++    // ⚠️ 多会话并行：这里改成看「这个会话有没有自己的窗口」，而不是看手机槽位。
++    // 以前判断 `phoneWindowKey === conv:<wantConvId>`，手机槽位停在别处时
++    // 就会先把那个会话的窗口 destroy 掉再重开 —— 直接掐断另一个会话的生成。
++    pruneConvWindows()
++    const boundWin = convWindows.get(wantConvId)
++    const alreadyBound = !!(boundWin && isWindowAlive(boundWin))
 +
 +    if (!alreadyBound) {
-+      // 当前窗口不是目标会话：先关掉/解绑，再打开目标会话
-+      if (isWindowAlive(phoneWindowId)) {
-+        try {
-+          ctx.getWindowByRef(phoneWindowId)?.destroy?.()
-+        } catch (err) {
-+          rwarn('[relay] destroy window before switching conversation failed:', err?.message || err)
-+        }
-+        if (typeof phoneWindowKey === 'string' && phoneWindowKey.startsWith('conv:')) {
-+          convWindows.delete(phoneWindowKey.slice(5))
-+        }
-+      }
-+      phoneWindowId = null
-+      phoneWindowKey = 'phone'
-+
++      // 只有「这个会话自己的窗口」不存在时才需要开窗。
++      // 别的会话的窗口一律不动（那是并行的那几个）。
 +      let opened = null
 +      try {
 +        opened = await openPhoneConversation(wantConvId, relayTo, relayOpts)
@@ -2673,6 +2758,7 @@ index 0000000..3c7d20e
 +        },
 +        { getWindowByRef: ctx.getWindowByRef, listWindows: ctx.listWindows }
 +      )
++      touchConvWindow(wantConvId)
 +      // ⚠️ 派发返回 ok:false（窗口在存活检查之后、派发之前被关掉）时，
 +      // 必须回执并 return，否则会掉进下面的通用手机窗口分支，
 +      // 把本该属于**指定会话**的消息发到别的窗口，且手机永远收不到结果。
