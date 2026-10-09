@@ -133,6 +133,2581 @@ index a9f0178..7a036e1 100644
      })
    } finally { db.close() }
  }
+diff --git a/main/core/data.js b/main/core/data.js
+index 2f71acd..8db8ead 100644
+--- a/main/core/data.js
++++ b/main/core/data.js
+@@ -5,12 +5,6 @@ import { app } from 'electron'
+ 
+ import { safeClone } from '../dataConverter.js'
+ import { fetchWithProxy, normalizeNetworkProxyConfig } from './net.js'
+-import { sanitizeRemoteSettingsForConfig } from './remote/protocol.js'
+-import {
+-  mergeLocalRemoteSettings,
+-  preserveLocalRemoteSettings,
+-  splitLocalRemoteSettings
+-} from './remote/configLocal.js'
+ import { getBuiltinServers as getBuiltinMcpServers } from './mcp_builtin.js'
+ 
+ import {
+@@ -307,13 +301,6 @@ export const defaultConfig = {
+     isAlwaysOnTop_global: true,
+     autoCloseOnBlur_global: true,
+     autoSaveChat_global: false,
+-    // Remote v2 is disabled by default. Gateway identity/device secrets are stored separately.
+-    remote: {
+-      enabled: false,
+-      host: '0.0.0.0',
+-      port: 17860,
+-      publicEndpoint: ''
+-    },
+     zoom: 1,
+     webdav: {
+       url: '',
+@@ -574,18 +561,15 @@ function sanitizePromptBindings(bindings = []) {
+ function splitConfigForStorage(fullConfig) {
+   const source = deepClone(fullConfig || {})
+   const { prompts, providers, mcpServers, tasks, ...restOfConfig } = source
+-  const remoteSplit = splitLocalRemoteSettings(restOfConfig, defaultConfig.config.remote)
+-  const sharedRestOfConfig = remoteSplit.sharedConfig
++  const sharedRestOfConfig = deepClone(restOfConfig)
+ 
+   const localConfigPart = {
+     skillPath: sharedRestOfConfig.skillPath || '',
+-    localChatPath: sharedRestOfConfig?.webdav?.localChatPath || '',
+-    // Remote listener addresses are machine-local. Device/TLS secrets live in the
+-    // remote gateway's encrypted storage and are never represented in config.
+-    remote: remoteSplit.remote
++    localChatPath: sharedRestOfConfig?.webdav?.localChatPath || ''
+   }
+ 
+   delete sharedRestOfConfig.skillPath
++  delete sharedRestOfConfig.remote
+   if (sharedRestOfConfig.webdav && typeof sharedRestOfConfig.webdav === 'object') {
+     delete sharedRestOfConfig.webdav.localChatPath
+   }
+@@ -675,14 +659,6 @@ const rootDefaults = {
+       server: '',
+       bypassRules: '<local>'
+     },
+-    // Remote v2 listens only when the user explicitly enables it in Desktop.
+-    // Secrets/paired-device keys are stored separately by the gateway and never in this config.
+-    remote: {
+-      enabled: false,
+-      host: '0.0.0.0',
+-      port: 17860,
+-      publicEndpoint: ''
+-    },
+     zoom: 1,
+     fastWindowPosition: null,
+     voiceList: [...defaultConfig.config.voiceList],
+@@ -742,17 +718,6 @@ const rootDefaults = {
+     changed = true
+   }
+ 
+-  try {
+-    const normalizedRemote = sanitizeRemoteSettingsForConfig(config.remote)
+-    if (JSON.stringify(config.remote) !== JSON.stringify(normalizedRemote)) {
+-      config.remote = normalizedRemote
+-      changed = true
+-    }
+-  } catch {
+-    config.remote = deepClone(rootDefaults.remote)
+-    changed = true
+-  }
+-
+   config.providers = ensureObject(config.providers, deepClone(defaultConfig.config.providers))
+   config.prompts = ensureObject(config.prompts, deepClone(defaultConfig.config.prompts))
+   config.mcpServers = ensureObject(config.mcpServers, {})
+@@ -1110,15 +1075,14 @@ async function readStoredConfigSnapshot() {
+   const tasksPart = await readDocData(TASKS_DOC_ID, {})
+   const localPart = await readDocData(getLocalConfigId(), {
+     skillPath: '',
+-    localChatPath: '',
+-    remote: deepClone(defaultConfig.config.remote)
++    localChatPath: ''
+   })
+ 
+-  const mergedConfig = mergeLocalRemoteSettings(
+-    ensureObject(baseConfigPart.config, {}),
+-    localPart,
+-    defaultConfig.config.remote
+-  )
++  const mergedConfig = ensureObject(baseConfigPart.config, {})
++  // 远程网关已移除，历史配置里残留的 remote 字段直接丢弃。
++  if (mergedConfig.remote && typeof mergedConfig.remote === 'object') {
++    delete mergedConfig.remote
++  }
+   mergedConfig.prompts = ensureObject(promptsPart, deepClone(defaultConfig.config.prompts))
+   mergedConfig.providers = ensureObject(providersPart, deepClone(defaultConfig.config.providers))
+   mergedConfig.mcpServers = ensureObject(mcpServersPart, {})
+@@ -1268,26 +1232,16 @@ export async function saveSetting(keyPath, value) {
+     }
+   }
+ 
+-  if (keyPath === 'skillPath' || keyPath === 'webdav.localChatPath' || keyPath === 'remote') {
++  if (keyPath === 'skillPath' || keyPath === 'webdav.localChatPath') {
+     const localDoc = await readDocData(getLocalConfigId(), {
+       skillPath: '',
+-      localChatPath: '',
+-      remote: deepClone(defaultConfig.config.remote)
++      localChatPath: ''
+     })
+ 
+     if (keyPath === 'skillPath') {
+       localDoc.skillPath = normalizedValue || ''
+     } else if (keyPath === 'webdav.localChatPath') {
+       localDoc.localChatPath = normalizedValue || ''
+-    } else {
+-      try {
+-        localDoc.remote = sanitizeRemoteSettingsForConfig(normalizedValue)
+-      } catch (error) {
+-        return {
+-          success: false,
+-          message: error?.message || 'remote_config_invalid'
+-        }
+-      }
+     }
+ 
+     const writeResult = await writeDocData(getLocalConfigId(), localDoc)
+@@ -1360,13 +1314,7 @@ export async function updateConfigWithoutFeatures(newConfig) {
+   const storedConfig = await readStoredConfigSnapshot()
+   const previousMcpServers =
+     storedConfig?.mcpServers && typeof storedConfig.mcpServers === 'object' ? deepClone(storedConfig.mcpServers) : {}
+-  // Remote listener settings are local-machine-only and must not be overwritten by
+-  // normal full-config saves or imported/shared config snapshots.
+-  const nextConfig = preserveLocalRemoteSettings(
+-    incomingConfig,
+-    storedConfig,
+-    defaultConfig.config.remote
+-  )
++  const nextConfig = incomingConfig
+ 
+   return persistConfigSnapshot(nextConfig, {
+     previousMcpServers
+@@ -1581,11 +1529,13 @@ export async function getUser() {
+   }
+ }
+ 
+-export async function savePromptWindowSettings(promptKey, settings = {}) {  if (typeof promptKey !== 'string' || !promptKey.trim()) {
++export async function savePromptWindowSettings(promptKey, settings = {}) {
++  if (typeof promptKey !== 'string' || !promptKey.trim()) {
+     const result = {
+       success: false,
+       message: 'promptKey is required'
+-    }    return result
++    }
++    return result
+   }
+ 
+   const normalizedPromptKey = promptKey.trim()
+diff --git a/main/core/remote/configLocal.js b/main/core/remote/configLocal.js
+deleted file mode 100644
+index 75eaf68..0000000
+--- a/main/core/remote/configLocal.js
++++ /dev/null
+@@ -1,55 +0,0 @@
+-import { sanitizeRemoteSettingsForConfig } from './protocol.js'
+-
+-const DEFAULT_REMOTE_SETTINGS = Object.freeze({
+-  enabled: false,
+-  host: '0.0.0.0',
+-  port: 17860,
+-  publicEndpoint: ''
+-})
+-
+-function clone(value) {
+-  return JSON.parse(JSON.stringify(value))
+-}
+-
+-function asObject(value) {
+-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+-}
+-
+-export function normalizeLocalRemoteSettings(value, fallback = DEFAULT_REMOTE_SETTINGS) {
+-  try {
+-    return sanitizeRemoteSettingsForConfig(asObject(value))
+-  } catch {
+-    return sanitizeRemoteSettingsForConfig(asObject(fallback))
+-  }
+-}
+-
+-/**
+- * Removes machine-local Remote listener settings from a shared config snapshot.
+- * Paired-device credentials and identity keys are never part of either object.
+- */
+-export function splitLocalRemoteSettings(fullConfig = {}, fallback = DEFAULT_REMOTE_SETTINGS) {
+-  const sharedConfig = clone(asObject(fullConfig))
+-  const remote = normalizeLocalRemoteSettings(sharedConfig.remote, fallback)
+-  delete sharedConfig.remote
+-  return { sharedConfig, remote }
+-}
+-
+-/** Merge local Remote settings into a shared config snapshot for Desktop runtime/UI use. */
+-export function mergeLocalRemoteSettings(sharedConfig = {}, localConfig = {}, fallback = DEFAULT_REMOTE_SETTINGS) {
+-  const merged = clone(asObject(sharedConfig))
+-  const local = asObject(localConfig)
+-  merged.remote = normalizeLocalRemoteSettings(local.remote, fallback)
+-  return merged
+-}
+-
+-/**
+- * Full config saves/imports may update shared settings, but cannot overwrite the
+- * current machine's listener state, port, bind host, or Tunnel endpoint.
+- */
+-export function preserveLocalRemoteSettings(incomingConfig = {}, storedConfig = {}, fallback = DEFAULT_REMOTE_SETTINGS) {
+-  const next = clone(asObject(incomingConfig))
+-  next.remote = normalizeLocalRemoteSettings(asObject(storedConfig).remote, fallback)
+-  return next
+-}
+-
+-export { DEFAULT_REMOTE_SETTINGS }
+diff --git a/main/core/remote/conversationRead.js b/main/core/remote/conversationRead.js
+deleted file mode 100644
+index c1c3318..0000000
+--- a/main/core/remote/conversationRead.js
++++ /dev/null
+@@ -1,238 +0,0 @@
+-import crypto from 'node:crypto'
+-import { normalizeIdentifier, remoteError } from './protocol.js'
+-
+-const FORBIDDEN_PATH_KEYS = new Set([
+-  'path',
+-  'filepath',
+-  'dirpath',
+-  'dbfile',
+-  'legacyjson',
+-  'worktreedir',
+-  'localchatpath'
+-])
+-
+-function asObject(value) {
+-  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+-}
+-
+-function normalizeText(value = '') {
+-  return typeof value === 'string' ? value.trim() : ''
+-}
+-
+-function normalizeTime(value = '') {
+-  const date = new Date(value)
+-  return Number.isNaN(date.getTime()) ? '' : date.toISOString()
+-}
+-
+-function assertAllowedParameters(input = {}, allowedKeys = []) {
+-  const source = asObject(input)
+-  const allowed = new Set(allowedKeys)
+-  for (const key of Object.keys(source)) {
+-    const normalizedKey = key.toLowerCase()
+-    if (FORBIDDEN_PATH_KEYS.has(normalizedKey)) throw remoteError('remote_path_parameter_forbidden')
+-    if (!allowed.has(key)) throw remoteError('remote_parameter_unknown')
+-  }
+-}
+-
+-function legacyConversationId(basename = '') {
+-  return `legacy_${crypto.createHash('sha256').update(String(basename)).digest('hex').slice(0, 32)}`
+-}
+-
+-function encodeCursor(item) {
+-  return Buffer.from(JSON.stringify({
+-    updatedAt: item.updatedAt || '',
+-    conversationId: item.conversationId
+-  }), 'utf8').toString('base64url')
+-}
+-
+-function decodeCursor(value = '') {
+-  if (!value) return null
+-  if (typeof value !== 'string' || value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+-    throw remoteError('remote_cursor_invalid')
+-  }
+-  try {
+-    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+-    const updatedAt = normalizeTime(parsed?.updatedAt)
+-    const conversationId = normalizeIdentifier(parsed?.conversationId, 'conversationId', { minLength: 16, maxLength: 160 })
+-    return { updatedAt, conversationId }
+-  } catch (error) {
+-    if (error?.code) throw error
+-    throw remoteError('remote_cursor_invalid')
+-  }
+-}
+-
+-function toRemoteWindow(item = {}) {
+-  const conversationId = normalizeText(item.conversationId)
+-  if (!conversationId) return null
+-  return {
+-    windowId: normalizeText(item.id).slice(0, 160),
+-    conversationId,
+-    title: normalizeText(item.conversationTitle || item.title || item.displayName).slice(0, 240),
+-    revision: Math.max(0, Number(item.conversationRevision ?? item.revision) || 0),
+-    visible: item.visible === true,
+-    busy: item.busy === true,
+-    generating: item.generating === true,
+-    compacting: item.compacting === true,
+-    readOnly: item.readOnly === true,
+-    leasePending: item.leasePending === true,
+-    promptCode: normalizeText(item.promptCode || '__DEFAULT__') || '__DEFAULT__'
+-  }
+-}
+-
+-function sortConversations(left, right) {
+-  const byTime = String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''))
+-  return byTime || left.conversationId.localeCompare(right.conversationId)
+-}
+-
+-export function createRemoteConversationReadService({
+-  getConfig,
+-  listLocalConversations,
+-  readLocalProjects,
+-  loadRemoteConversationPage,
+-  listWindows
+-} = {}) {
+-  if (typeof getConfig !== 'function') throw new Error('remote_read_get_config_required')
+-  if (typeof listLocalConversations !== 'function') throw new Error('remote_read_list_conversations_required')
+-  if (typeof readLocalProjects !== 'function') throw new Error('remote_read_projects_required')
+-  if (typeof loadRemoteConversationPage !== 'function') throw new Error('remote_read_page_required')
+-  if (typeof listWindows !== 'function') throw new Error('remote_read_windows_required')
+-
+-  async function getLocalDirectory() {
+-    const result = await getConfig()
+-    const directory = normalizeText(result?.config?.webdav?.localChatPath)
+-    return directory
+-  }
+-
+-  function getWindows(params = {}) {
+-    assertAllowedParameters(params, [])
+-    const rawWindows = listWindows('window')
+-    const windows = (Array.isArray(rawWindows) ? rawWindows : [])
+-      .map(toRemoteWindow)
+-      .filter(Boolean)
+-      .sort((left, right) => left.windowId.localeCompare(right.windowId))
+-    return {
+-      ok: true,
+-      windows,
+-      updatedAt: new Date().toISOString()
+-    }
+-  }
+-
+-  async function listConversations(params = {}) {
+-    assertAllowedParameters(params, ['limit', 'cursor'])
+-    const limit = Math.min(200, Math.max(1, Math.floor(Number(params.limit) || 100)))
+-    const cursor = decodeCursor(params.cursor || '')
+-    const directory = await getLocalDirectory()
+-    const windowResult = getWindows()
+-    const openByConversationId = new Map(windowResult.windows.map((item) => [item.conversationId, item]))
+-
+-    if (!directory) {
+-      return {
+-        ok: true,
+-        configured: false,
+-        conversations: [],
+-        projects: [],
+-        page: { limit, nextCursor: null, hasMore: false },
+-        catalogRevision: crypto.createHash('sha256').update('unconfigured').digest('base64url')
+-      }
+-    }
+-
+-    const [rawConversations, projectsData] = await Promise.all([
+-      listLocalConversations(directory),
+-      readLocalProjects(directory)
+-    ])
+-    const projects = Array.isArray(projectsData?.projects) ? projectsData.projects : []
+-    const projectByConversationId = new Map()
+-    const projectByFile = new Map()
+-    for (const project of projects) {
+-      const publicProject = { projectId: normalizeText(project.id), name: normalizeText(project.name) }
+-      for (const conversationId of Array.isArray(project.conversationIds) ? project.conversationIds : []) {
+-        projectByConversationId.set(conversationId, publicProject)
+-      }
+-      for (const basename of Array.isArray(project.files) ? project.files : []) {
+-        projectByFile.set(basename, publicProject)
+-      }
+-    }
+-
+-    const conversations = (Array.isArray(rawConversations) ? rawConversations : [])
+-      .map((item) => {
+-        const isSqlite = item?.format === 'sqlite' && normalizeText(item.conversationId)
+-        const conversationId = isSqlite
+-          ? normalizeText(item.conversationId)
+-          : legacyConversationId(item?.basename || item?.filename || item?.title)
+-        const project = isSqlite
+-          ? projectByConversationId.get(conversationId) || null
+-          : projectByFile.get(item?.basename || item?.filename) || null
+-        const window = openByConversationId.get(conversationId) || null
+-        return {
+-          conversationId,
+-          title: (normalizeText(item?.title) || 'Untitled').slice(0, 240),
+-          format: isSqlite ? 'sqlite' : 'legacy-json',
+-          revision: isSqlite ? Math.max(0, Number(item?.revision) || 0) : 0,
+-          createdAt: normalizeTime(item?.createdAt),
+-          updatedAt: normalizeTime(item?.updatedAt || item?.lastmod),
+-          byteSize: Math.max(0, Number(item?.size) || 0),
+-          project,
+-          migrationRequired: !isSqlite,
+-          readable: Boolean(isSqlite),
+-          window
+-        }
+-      })
+-      .sort(sortConversations)
+-
+-    let startIndex = 0
+-    if (cursor) {
+-      const matchedIndex = conversations.findIndex((item) =>
+-        item.conversationId === cursor.conversationId && item.updatedAt === cursor.updatedAt
+-      )
+-      if (matchedIndex < 0) throw remoteError('remote_cursor_stale')
+-      startIndex = matchedIndex + 1
+-    }
+-    const pageItems = conversations.slice(startIndex, startIndex + limit)
+-    const hasMore = startIndex + pageItems.length < conversations.length
+-    const safeProjects = projects.map((project) => ({
+-      projectId: normalizeText(project.id),
+-      name: normalizeText(project.name).slice(0, 160),
+-      conversationIds: pageItems
+-        .filter((item) => item.project?.projectId === normalizeText(project.id))
+-        .map((item) => item.conversationId)
+-    }))
+-    const catalogRevision = crypto.createHash('sha256').update(JSON.stringify({
+-      conversations: conversations.map((item) => [item.conversationId, item.revision, item.updatedAt, item.window?.busy || false]),
+-      projects: safeProjects
+-    })).digest('base64url')
+-
+-    return {
+-      ok: true,
+-      configured: true,
+-      conversations: pageItems,
+-      projects: safeProjects,
+-      windows: windowResult.windows,
+-      page: {
+-        limit,
+-        nextCursor: hasMore && pageItems.length > 0 ? encodeCursor(pageItems.at(-1)) : null,
+-        hasMore
+-      },
+-      catalogRevision
+-    }
+-  }
+-
+-  async function listMessages(params = {}) {
+-    assertAllowedParameters(params, ['conversationId', 'beforeUiOrder', 'pageSize'])
+-    const conversationId = normalizeIdentifier(params.conversationId, 'conversationId', { minLength: 16, maxLength: 160 })
+-    if (conversationId.startsWith('legacy_')) throw remoteError('remote_conversation_migration_required')
+-    const directory = await getLocalDirectory()
+-    if (!directory) throw remoteError('remote_conversation_directory_not_configured')
+-    return loadRemoteConversationPage({
+-      dirPath: directory,
+-      conversationId,
+-      beforeUiOrder: params.beforeUiOrder,
+-      pageSize: params.pageSize
+-    })
+-  }
+-
+-  return {
+-    listConversations,
+-    listMessages,
+-    getWindows
+-  }
+-}
+diff --git a/main/core/remote/cryptoSession.js b/main/core/remote/cryptoSession.js
+deleted file mode 100644
+index 8fd92c2..0000000
+--- a/main/core/remote/cryptoSession.js
++++ /dev/null
+@@ -1,612 +0,0 @@
+-import crypto from 'node:crypto'
+-import {
+-  REMOTE_MAX_FRAME_BYTES,
+-  REMOTE_PROTOCOL_VERSION,
+-  buildFrameAad,
+-  canonicalBuffer,
+-  decodeBase64Url,
+-  encodeBase64Url,
+-  normalizeIdentifier,
+-  normalizeSequence,
+-  randomBase64Url,
+-  remoteError,
+-  sha256Base64Url,
+-  timingSafeEqualBase64Url
+-} from './protocol.js'
+-
+-const CURVE = 'prime256v1'
+-const PUBLIC_KEY_BYTES = 65
+-const SHARED_SECRET_BYTES = 32
+-const SESSION_KEY_BYTES = 32
+-const NONCE_BYTES = 12
+-const TAG_BYTES = 16
+-const HANDSHAKE_LABEL = 'anywhere-remote-v2/handshake'
+-const SESSION_LABEL = 'anywhere-remote-v2/session'
+-
+-function exportUncompressedPublicKey(keyObject) {
+-  const exported = keyObject.export({ format: 'jwk' })
+-  const x = decodeBase64Url(exported.x, 'publicKey.x', { minBytes: 32, maxBytes: 32 })
+-  const y = decodeBase64Url(exported.y, 'publicKey.y', { minBytes: 32, maxBytes: 32 })
+-  return Buffer.concat([Buffer.from([0x04]), x, y])
+-}
+-
+-function importUncompressedPublicKey(value, field = 'publicKey') {
+-  const raw = typeof value === 'string'
+-    ? decodeBase64Url(value, field, { minBytes: PUBLIC_KEY_BYTES, maxBytes: PUBLIC_KEY_BYTES })
+-    : Buffer.isBuffer(value)
+-      ? Buffer.from(value)
+-      : null
+-
+-  if (!raw || raw.length !== PUBLIC_KEY_BYTES || raw[0] !== 0x04) {
+-    throw remoteError('remote_public_key_invalid', `${field} must be an uncompressed P-256 public key`)
+-  }
+-
+-  const x = raw.subarray(1, 33).toString('base64url')
+-  const y = raw.subarray(33, 65).toString('base64url')
+-  return crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x, y }, format: 'jwk' })
+-}
+-
+-function exportPrivateKey(keyObject) {
+-  return keyObject.export({ format: 'jwk' })
+-}
+-
+-function importPrivateKey(jwk, field = 'privateKey') {
+-  if (!jwk || typeof jwk !== 'object' || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || typeof jwk.d !== 'string') {
+-    throw remoteError('remote_private_key_invalid', `${field} must be a P-256 private JWK`)
+-  }
+-  return crypto.createPrivateKey({ key: jwk, format: 'jwk' })
+-}
+-
+-function normalizeSecret(value, field = 'secret') {
+-  const secret = Buffer.isBuffer(value)
+-    ? Buffer.from(value)
+-    : decodeBase64Url(value, field, { minBytes: SESSION_KEY_BYTES, maxBytes: SESSION_KEY_BYTES })
+-  if (secret.length !== SESSION_KEY_BYTES) throw remoteError('remote_root_secret_invalid')
+-  return secret
+-}
+-
+-function hkdf(ikm, { salt, info, length = SESSION_KEY_BYTES }) {
+-  const safeSalt = Buffer.isBuffer(salt) ? salt : Buffer.from(salt || '')
+-  const safeInfo = Buffer.isBuffer(info) ? info : Buffer.from(info || '')
+-  return Buffer.from(crypto.hkdfSync('sha256', ikm, safeSalt, safeInfo, length))
+-}
+-
+-function hmac(key, value) {
+-  return crypto.createHmac('sha256', key).update(value).digest()
+-}
+-
+-function deriveSharedSecret(privateKey, publicKey) {
+-  const secret = crypto.diffieHellman({ privateKey, publicKey })
+-  if (!Buffer.isBuffer(secret) || secret.length !== SHARED_SECRET_BYTES) {
+-    throw remoteError('remote_ecdh_failed')
+-  }
+-  return secret
+-}
+-
+-function normalizeHandshakeContext(context = {}) {
+-  const pairingId = normalizeIdentifier(context.pairingId, 'pairingId', { minLength: 16, maxLength: 160 })
+-  const pairingChallenge = typeof context.pairingChallenge === 'string' ? context.pairingChallenge : ''
+-  const desktopId = normalizeIdentifier(context.desktopId, 'desktopId', { minLength: 16, maxLength: 160 })
+-  decodeBase64Url(pairingChallenge, 'pairingChallenge', { minBytes: 16, maxBytes: 128 })
+-  return { pairingId, pairingChallenge, desktopId }
+-}
+-
+-export function createPairingTranscript({ context, desktopPublicKey, devicePublicKey, clientEphemeralPublicKey, serverEphemeralPublicKey }) {
+-  const normalizedContext = normalizeHandshakeContext(context)
+-  // Validate all public key encodings before canonicalization. This avoids accepting an invalid
+-  // key in one code path and failing only after a secret has already been derived.
+-  importUncompressedPublicKey(desktopPublicKey, 'desktopPublicKey')
+-  importUncompressedPublicKey(devicePublicKey, 'device.publicKey')
+-  importUncompressedPublicKey(clientEphemeralPublicKey, 'clientEphemeralPublicKey')
+-  importUncompressedPublicKey(serverEphemeralPublicKey, 'serverEphemeralPublicKey')
+-
+-  return canonicalBuffer({
+-    v: REMOTE_PROTOCOL_VERSION,
+-    label: HANDSHAKE_LABEL,
+-    pairingId: normalizedContext.pairingId,
+-    pairingChallenge: normalizedContext.pairingChallenge,
+-    desktopId: normalizedContext.desktopId,
+-    desktopPublicKey,
+-    devicePublicKey,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPublicKey
+-  })
+-}
+-
+-function derivePairingRootSecret({ desktopPrivateKey, devicePublicKey, clientEphemeralPublicKey, serverEphemeralPrivateKey, transcript }) {
+-  const staticSecret = deriveSharedSecret(desktopPrivateKey, importUncompressedPublicKey(devicePublicKey, 'device.publicKey'))
+-  const ephemeralSecret = deriveSharedSecret(serverEphemeralPrivateKey, importUncompressedPublicKey(clientEphemeralPublicKey, 'clientEphemeralPublicKey'))
+-  const ikm = Buffer.concat([staticSecret, ephemeralSecret])
+-  const salt = crypto.createHash('sha256').update(transcript).digest()
+-  return hkdf(ikm, { salt, info: Buffer.from(`${HANDSHAKE_LABEL}/root`, 'utf8') })
+-}
+-
+-function deriveClientPairingRootSecret({ devicePrivateKey, desktopPublicKey, serverEphemeralPublicKey, clientEphemeralPrivateKey, transcript }) {
+-  const staticSecret = deriveSharedSecret(devicePrivateKey, importUncompressedPublicKey(desktopPublicKey, 'desktopPublicKey'))
+-  const ephemeralSecret = deriveSharedSecret(clientEphemeralPrivateKey, importUncompressedPublicKey(serverEphemeralPublicKey, 'serverEphemeralPublicKey'))
+-  const ikm = Buffer.concat([staticSecret, ephemeralSecret])
+-  const salt = crypto.createHash('sha256').update(transcript).digest()
+-  return hkdf(ikm, { salt, info: Buffer.from(`${HANDSHAKE_LABEL}/root`, 'utf8') })
+-}
+-
+-const PAIRING_START_LABEL = 'anywhere-remote-v2/pair-start'
+-
+-function createPairingStartAad({ context, desktopPublicKey, clientEphemeralPublicKey }) {
+-  const normalizedContext = normalizeHandshakeContext(context)
+-  importUncompressedPublicKey(desktopPublicKey, 'desktopPublicKey')
+-  importUncompressedPublicKey(clientEphemeralPublicKey, 'clientEphemeralPublicKey')
+-  return canonicalBuffer({
+-    v: REMOTE_PROTOCOL_VERSION,
+-    type: 'remote.pair.start',
+-    label: PAIRING_START_LABEL,
+-    pairingId: normalizedContext.pairingId,
+-    pairingChallenge: normalizedContext.pairingChallenge,
+-    desktopId: normalizedContext.desktopId,
+-    desktopPublicKey,
+-    clientEphemeralPublicKey
+-  })
+-}
+-
+-function derivePairingStartKey({ privateKey, peerPublicKey, aad }) {
+-  const sharedSecret = deriveSharedSecret(privateKey, importUncompressedPublicKey(peerPublicKey, 'pairingStartPeerPublicKey'))
+-  const salt = crypto.createHash('sha256').update(aad).digest()
+-  return hkdf(sharedSecret, {
+-    salt,
+-    info: Buffer.from(`${PAIRING_START_LABEL}/key`, 'utf8')
+-  })
+-}
+-
+-function normalizePairingStartEnvelope(input = {}) {
+-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw remoteError('remote_pairing_start_invalid')
+-  if (input.type !== 'remote.pair.start' || Number(input.v) !== REMOTE_PROTOCOL_VERSION) {
+-    throw remoteError('remote_pairing_start_invalid')
+-  }
+-  return {
+-    pairingId: normalizeIdentifier(input.pairingId, 'pairingId', { minLength: 16, maxLength: 160 }),
+-    clientEphemeralPublicKey: typeof input.clientEphemeralPublicKey === 'string' ? input.clientEphemeralPublicKey : '',
+-    nonce: typeof input.nonce === 'string' ? input.nonce : '',
+-    ciphertext: typeof input.ciphertext === 'string' ? input.ciphertext : '',
+-    tag: typeof input.tag === 'string' ? input.tag : ''
+-  }
+-}
+-
+-/**
+- * Encrypt the human confirmation code and device identity before they leave the
+- * mobile process. A TLS-terminating tunnel can route this frame but cannot read
+- * or replay its plaintext against a different Desktop identity/QR challenge.
+- */
+-export function createPairingStartEnvelope({ desktopPublicKey, clientEphemeralPrivateKey, context, pairingCode, device }) {
+-  const clientEphemeralPublicKey = publicKeyFromPrivate(clientEphemeralPrivateKey)
+-  const aad = createPairingStartAad({ context, desktopPublicKey, clientEphemeralPublicKey })
+-  const key = derivePairingStartKey({
+-    privateKey: importPrivateKey(clientEphemeralPrivateKey, 'clientEphemeralPrivateKey'),
+-    peerPublicKey: desktopPublicKey,
+-    aad
+-  })
+-  const plaintext = canonicalBuffer({
+-    pairingCode: typeof pairingCode === 'string' ? pairingCode.replace(/\s/g, '') : '',
+-    pairingChallenge: context?.pairingChallenge || '',
+-    device
+-  })
+-  try {
+-    return {
+-      v: REMOTE_PROTOCOL_VERSION,
+-      type: 'remote.pair.start',
+-      pairingId: normalizeHandshakeContext(context).pairingId,
+-      clientEphemeralPublicKey,
+-      ...encryptAead({ key, plaintext, aad })
+-    }
+-  } finally {
+-    key.fill(0)
+-    plaintext.fill(0)
+-  }
+-}
+-
+-/** Desktop-side decrypt/validation helper for the E2EE pairing start envelope. */
+-export function openDesktopPairingStart({ desktopPrivateKey, desktopPublicKey, context, input }) {
+-  const envelope = normalizePairingStartEnvelope(input)
+-  const normalizedContext = normalizeHandshakeContext(context)
+-  if (envelope.pairingId !== normalizedContext.pairingId) throw remoteError('remote_pairing_start_invalid')
+-  const actualDesktopPublicKey = desktopPublicKey || publicKeyFromPrivate(desktopPrivateKey)
+-  const aad = createPairingStartAad({
+-    context: normalizedContext,
+-    desktopPublicKey: actualDesktopPublicKey,
+-    clientEphemeralPublicKey: envelope.clientEphemeralPublicKey
+-  })
+-  const key = derivePairingStartKey({
+-    privateKey: importPrivateKey(desktopPrivateKey, 'desktopPrivateKey'),
+-    peerPublicKey: envelope.clientEphemeralPublicKey,
+-    aad
+-  })
+-  let plaintext = null
+-  try {
+-    plaintext = decryptAead({ key, nonce: envelope.nonce, ciphertext: envelope.ciphertext, tag: envelope.tag, aad })
+-    let payload
+-    try {
+-      payload = JSON.parse(plaintext.toString('utf8'))
+-    } catch {
+-      throw remoteError('remote_pairing_start_invalid')
+-    }
+-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw remoteError('remote_pairing_start_invalid')
+-    return {
+-      pairingId: envelope.pairingId,
+-      clientEphemeralPublicKey: envelope.clientEphemeralPublicKey,
+-      pairingCode: typeof payload.pairingCode === 'string' ? payload.pairingCode : '',
+-      pairingChallenge: typeof payload.pairingChallenge === 'string' ? payload.pairingChallenge : '',
+-      device: payload.device
+-    }
+-  } finally {
+-    key.fill(0)
+-    plaintext?.fill?.(0)
+-  }
+-}
+-
+-
+-function createSessionHelloProofPayload({ deviceId, desktopId, clientNonce, clientEphemeralPublicKey }) {
+-  return canonicalBuffer({
+-    v: REMOTE_PROTOCOL_VERSION,
+-    type: 'remote.session.hello',
+-    deviceId,
+-    desktopId,
+-    clientNonce,
+-    clientEphemeralPublicKey
+-  })
+-}
+-
+-function createSessionAcceptProofPayload({ deviceId, desktopId, sessionId, clientNonce, serverNonce, clientEphemeralPublicKey, serverEphemeralPublicKey }) {
+-  return canonicalBuffer({
+-    v: REMOTE_PROTOCOL_VERSION,
+-    type: 'remote.session.accept',
+-    deviceId,
+-    desktopId,
+-    sessionId,
+-    clientNonce,
+-    serverNonce,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPublicKey
+-  })
+-}
+-
+-function deriveSessionMaterial({ rootSecret, sessionId, clientNonce, serverNonce, ephemeralSecret }) {
+-  const safeSessionId = normalizeIdentifier(sessionId, 'sessionId', { minLength: 16, maxLength: 128 })
+-  const clientNonceBytes = decodeBase64Url(clientNonce, 'clientNonce', { minBytes: 16, maxBytes: 64 })
+-  const serverNonceBytes = decodeBase64Url(serverNonce, 'serverNonce', { minBytes: 16, maxBytes: 64 })
+-  const root = normalizeSecret(rootSecret, 'rootSecret')
+-  if (!Buffer.isBuffer(ephemeralSecret) || ephemeralSecret.length !== SHARED_SECRET_BYTES) {
+-    throw remoteError('remote_ecdh_failed')
+-  }
+-  const salt = crypto.createHash('sha256').update(Buffer.concat([clientNonceBytes, serverNonceBytes])).digest()
+-  const material = hkdf(Buffer.concat([root, ephemeralSecret]), {
+-    salt,
+-    info: canonicalBuffer({ v: REMOTE_PROTOCOL_VERSION, label: SESSION_LABEL, sessionId: safeSessionId }),
+-    length: SESSION_KEY_BYTES * 2
+-  })
+-  return {
+-    sessionId: safeSessionId,
+-    clientToDesktopKey: material.subarray(0, SESSION_KEY_BYTES),
+-    desktopToClientKey: material.subarray(SESSION_KEY_BYTES, SESSION_KEY_BYTES * 2)
+-  }
+-}
+-
+-function encryptAead({ key, plaintext, aad }) {
+-  const nonce = crypto.randomBytes(NONCE_BYTES)
+-  const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce)
+-  cipher.setAAD(aad)
+-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+-  const tag = cipher.getAuthTag()
+-  return {
+-    nonce: encodeBase64Url(nonce),
+-    ciphertext: encodeBase64Url(ciphertext),
+-    tag: encodeBase64Url(tag)
+-  }
+-}
+-
+-function decryptAead({ key, nonce, ciphertext, tag, aad }) {
+-  const safeNonce = decodeBase64Url(nonce, 'frame.nonce', { minBytes: NONCE_BYTES, maxBytes: NONCE_BYTES })
+-  const safeCiphertext = decodeBase64Url(ciphertext, 'frame.ciphertext', { minBytes: 1, maxBytes: REMOTE_MAX_FRAME_BYTES })
+-  const safeTag = decodeBase64Url(tag, 'frame.tag', { minBytes: TAG_BYTES, maxBytes: TAG_BYTES })
+-  try {
+-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, safeNonce)
+-    decipher.setAAD(aad)
+-    decipher.setAuthTag(safeTag)
+-    return Buffer.concat([decipher.update(safeCiphertext), decipher.final()])
+-  } catch {
+-    throw remoteError('remote_frame_auth_failed')
+-  }
+-}
+-
+-export function createP256KeyPair() {
+-  const pair = crypto.generateKeyPairSync('ec', { namedCurve: CURVE })
+-  return {
+-    publicKey: encodeBase64Url(exportUncompressedPublicKey(pair.publicKey)),
+-    privateKey: exportPrivateKey(pair.privateKey)
+-  }
+-}
+-
+-export function publicKeyFromPrivate(privateKey) {
+-  const privateKeyObject = importPrivateKey(privateKey)
+-  return encodeBase64Url(exportUncompressedPublicKey(crypto.createPublicKey(privateKeyObject)))
+-}
+-
+-export function createPairingProof({ rootSecret, transcript, role }) {
+-  const root = normalizeSecret(rootSecret, 'rootSecret')
+-  if (!Buffer.isBuffer(transcript) || transcript.length === 0) throw remoteError('remote_pairing_transcript_invalid')
+-  if (role !== 'device' && role !== 'desktop') throw remoteError('remote_handshake_role_invalid')
+-  return encodeBase64Url(hmac(root, Buffer.concat([Buffer.from(`${HANDSHAKE_LABEL}/${role}\n`, 'utf8'), transcript])))
+-}
+-
+-export function verifyPairingProof({ rootSecret, transcript, role, proof }) {
+-  const expected = createPairingProof({ rootSecret, transcript, role })
+-  return timingSafeEqualBase64Url(expected, proof)
+-}
+-
+-/**
+- * Desktop-side pairing start. `secrets` never crosses the HTTP boundary: the
+- * gateway keeps it only until the device proves ownership in `/pair/confirm`.
+- */
+-export function createDesktopPairingResponse({ desktopPrivateKey, desktopPublicKey, devicePublicKey, clientEphemeralPublicKey, context }) {
+-  const normalizedContext = normalizeHandshakeContext(context)
+-  const actualDesktopPublicKey = desktopPublicKey || publicKeyFromPrivate(desktopPrivateKey)
+-  const serverEphemeral = createP256KeyPair()
+-  const transcript = createPairingTranscript({
+-    context: normalizedContext,
+-    desktopPublicKey: actualDesktopPublicKey,
+-    devicePublicKey,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPublicKey: serverEphemeral.publicKey
+-  })
+-  const rootSecret = derivePairingRootSecret({
+-    desktopPrivateKey: importPrivateKey(desktopPrivateKey, 'desktopPrivateKey'),
+-    devicePublicKey,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPrivateKey: importPrivateKey(serverEphemeral.privateKey, 'serverEphemeralPrivateKey'),
+-    transcript
+-  })
+-
+-  return {
+-    serverEphemeralPublicKey: serverEphemeral.publicKey,
+-    desktopProof: createPairingProof({ rootSecret, transcript, role: 'desktop' }),
+-    transcriptHash: sha256Base64Url(transcript),
+-    secrets: { rootSecret, transcript }
+-  }
+-}
+-
+-/** Mobile-side helper used by contract regression tests and future native adapters. */
+-export function completeDevicePairing({ devicePrivateKey, desktopPublicKey, serverEphemeralPublicKey, clientEphemeralPrivateKey, devicePublicKey, context, desktopProof }) {
+-  const normalizedContext = normalizeHandshakeContext(context)
+-  const clientEphemeralPublicKey = publicKeyFromPrivate(clientEphemeralPrivateKey)
+-  const transcript = createPairingTranscript({
+-    context: normalizedContext,
+-    desktopPublicKey,
+-    devicePublicKey,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPublicKey
+-  })
+-  const rootSecret = deriveClientPairingRootSecret({
+-    devicePrivateKey: importPrivateKey(devicePrivateKey, 'devicePrivateKey'),
+-    desktopPublicKey,
+-    serverEphemeralPublicKey,
+-    clientEphemeralPrivateKey: importPrivateKey(clientEphemeralPrivateKey, 'clientEphemeralPrivateKey'),
+-    transcript
+-  })
+-
+-  if (!verifyPairingProof({ rootSecret, transcript, role: 'desktop', proof: desktopProof })) {
+-    throw remoteError('remote_pairing_proof_invalid')
+-  }
+-
+-  return {
+-    deviceProof: createPairingProof({ rootSecret, transcript, role: 'device' }),
+-    rootSecret: encodeBase64Url(rootSecret),
+-    transcriptHash: sha256Base64Url(transcript)
+-  }
+-}
+-
+-/**
+- * Create the first message for each fresh WSS connection. The ephemeral private
+- * key belongs only in mobile process memory until `completeSessionHello` returns.
+- */
+-export function createSessionHello({ rootSecret, deviceId, desktopId }) {
+-  const safeDeviceId = normalizeIdentifier(deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-  const safeDesktopId = normalizeIdentifier(desktopId, 'desktopId', { minLength: 16, maxLength: 160 })
+-  const root = normalizeSecret(rootSecret, 'rootSecret')
+-  const ephemeral = createP256KeyPair()
+-  const clientNonce = randomBase64Url(32)
+-  const proofPayload = createSessionHelloProofPayload({
+-    deviceId: safeDeviceId,
+-    desktopId: safeDesktopId,
+-    clientNonce,
+-    clientEphemeralPublicKey: ephemeral.publicKey
+-  })
+-
+-  return {
+-    hello: {
+-      type: 'remote.session.hello',
+-      v: REMOTE_PROTOCOL_VERSION,
+-      deviceId: safeDeviceId,
+-      desktopId: safeDesktopId,
+-      clientNonce,
+-      clientEphemeralPublicKey: ephemeral.publicKey,
+-      proof: encodeBase64Url(hmac(root, proofPayload))
+-    },
+-    state: {
+-      rootSecret: encodeBase64Url(root),
+-      deviceId: safeDeviceId,
+-      desktopId: safeDesktopId,
+-      clientNonce,
+-      clientEphemeralPrivateKey: ephemeral.privateKey,
+-      clientEphemeralPublicKey: ephemeral.publicKey
+-    }
+-  }
+-}
+-
+-export function acceptSessionHello({ rootSecret, hello, expectedDeviceId, expectedDesktopId }) {
+-  if (!hello || typeof hello !== 'object' || hello.type !== 'remote.session.hello' || Number(hello.v) !== REMOTE_PROTOCOL_VERSION) {
+-    throw remoteError('remote_session_hello_invalid')
+-  }
+-
+-  const deviceId = normalizeIdentifier(hello.deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-  const desktopId = normalizeIdentifier(hello.desktopId, 'desktopId', { minLength: 16, maxLength: 160 })
+-  if (expectedDeviceId && deviceId !== expectedDeviceId) throw remoteError('remote_device_mismatch')
+-  if (expectedDesktopId && desktopId !== expectedDesktopId) throw remoteError('remote_desktop_mismatch')
+-
+-  const clientNonce = typeof hello.clientNonce === 'string' ? hello.clientNonce : ''
+-  const clientEphemeralPublicKey = typeof hello.clientEphemeralPublicKey === 'string' ? hello.clientEphemeralPublicKey : ''
+-  importUncompressedPublicKey(clientEphemeralPublicKey, 'clientEphemeralPublicKey')
+-  const root = normalizeSecret(rootSecret, 'rootSecret')
+-  const proofPayload = createSessionHelloProofPayload({ deviceId, desktopId, clientNonce, clientEphemeralPublicKey })
+-  const expectedProof = encodeBase64Url(hmac(root, proofPayload))
+-  if (!timingSafeEqualBase64Url(expectedProof, hello.proof)) throw remoteError('remote_session_proof_invalid')
+-
+-  const serverEphemeral = createP256KeyPair()
+-  const sessionId = randomBase64Url(24)
+-  const serverNonce = randomBase64Url(32)
+-  const ephemeralSecret = deriveSharedSecret(
+-    importPrivateKey(serverEphemeral.privateKey, 'serverEphemeralPrivateKey'),
+-    importUncompressedPublicKey(clientEphemeralPublicKey, 'clientEphemeralPublicKey')
+-  )
+-  const material = deriveSessionMaterial({ rootSecret: root, sessionId, clientNonce, serverNonce, ephemeralSecret })
+-  const ackPayload = createSessionAcceptProofPayload({
+-    deviceId,
+-    desktopId,
+-    sessionId,
+-    clientNonce,
+-    serverNonce,
+-    clientEphemeralPublicKey,
+-    serverEphemeralPublicKey: serverEphemeral.publicKey
+-  })
+-
+-  return {
+-    accept: {
+-      type: 'remote.session.accept',
+-      v: REMOTE_PROTOCOL_VERSION,
+-      sessionId,
+-      serverNonce,
+-      serverEphemeralPublicKey: serverEphemeral.publicKey,
+-      proof: encodeBase64Url(hmac(root, ackPayload))
+-    },
+-    session: createRemoteCryptoSession({
+-      sessionId,
+-      sendKey: material.desktopToClientKey,
+-      receiveKey: material.clientToDesktopKey,
+-      sendDirection: 'desktop-to-client',
+-      receiveDirection: 'client-to-desktop'
+-    })
+-  }
+-}
+-
+-export function completeSessionHello({ state, accept, expectedDeviceId, expectedDesktopId }) {
+-  if (!state || typeof state !== 'object') throw remoteError('remote_session_state_invalid')
+-  if (!accept || typeof accept !== 'object' || accept.type !== 'remote.session.accept' || Number(accept.v) !== REMOTE_PROTOCOL_VERSION) {
+-    throw remoteError('remote_session_accept_invalid')
+-  }
+-
+-  const deviceId = normalizeIdentifier(state.deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-  const desktopId = normalizeIdentifier(state.desktopId, 'desktopId', { minLength: 16, maxLength: 160 })
+-  if (expectedDeviceId && deviceId !== expectedDeviceId) throw remoteError('remote_device_mismatch')
+-  if (expectedDesktopId && desktopId !== expectedDesktopId) throw remoteError('remote_desktop_mismatch')
+-
+-  const root = normalizeSecret(state.rootSecret, 'rootSecret')
+-  const sessionId = normalizeIdentifier(accept.sessionId, 'sessionId', { minLength: 16, maxLength: 128 })
+-  const serverNonce = typeof accept.serverNonce === 'string' ? accept.serverNonce : ''
+-  const serverEphemeralPublicKey = typeof accept.serverEphemeralPublicKey === 'string' ? accept.serverEphemeralPublicKey : ''
+-  importUncompressedPublicKey(serverEphemeralPublicKey, 'serverEphemeralPublicKey')
+-  const ackPayload = createSessionAcceptProofPayload({
+-    deviceId,
+-    desktopId,
+-    sessionId,
+-    clientNonce: state.clientNonce,
+-    serverNonce,
+-    clientEphemeralPublicKey: state.clientEphemeralPublicKey,
+-    serverEphemeralPublicKey
+-  })
+-  const expectedProof = encodeBase64Url(hmac(root, ackPayload))
+-  if (!timingSafeEqualBase64Url(expectedProof, accept.proof)) throw remoteError('remote_session_proof_invalid')
+-
+-  const ephemeralSecret = deriveSharedSecret(
+-    importPrivateKey(state.clientEphemeralPrivateKey, 'clientEphemeralPrivateKey'),
+-    importUncompressedPublicKey(serverEphemeralPublicKey, 'serverEphemeralPublicKey')
+-  )
+-  const material = deriveSessionMaterial({
+-    rootSecret: root,
+-    sessionId,
+-    clientNonce: state.clientNonce,
+-    serverNonce,
+-    ephemeralSecret
+-  })
+-  return createRemoteCryptoSession({
+-    sessionId,
+-    sendKey: material.clientToDesktopKey,
+-    receiveKey: material.desktopToClientKey,
+-    sendDirection: 'client-to-desktop',
+-    receiveDirection: 'desktop-to-client'
+-  })
+-}
+-
+-export function createRemoteCryptoSession({ sessionId, sendKey, receiveKey, sendDirection, receiveDirection }) {
+-  const safeSessionId = normalizeIdentifier(sessionId, 'sessionId', { minLength: 16, maxLength: 128 })
+-  if (!Buffer.isBuffer(sendKey) || sendKey.length !== SESSION_KEY_BYTES || !Buffer.isBuffer(receiveKey) || receiveKey.length !== SESSION_KEY_BYTES) {
+-    throw remoteError('remote_session_key_invalid')
+-  }
+-
+-  let nextSendSequence = 1
+-  let nextReceiveSequence = 1
+-  let closed = false
+-
+-  function assertOpen() {
+-    if (closed) throw remoteError('remote_session_closed')
+-  }
+-
+-  return {
+-    get sessionId() {
+-      return safeSessionId
+-    },
+-    get expectedReceiveSequence() {
+-      return nextReceiveSequence
+-    },
+-    close() {
+-      if (closed) return
+-      closed = true
+-      sendKey.fill(0)
+-      receiveKey.fill(0)
+-    },
+-    encrypt(payload) {
+-      assertOpen()
+-      const sequence = nextSendSequence
+-      const plaintext = canonicalBuffer(payload)
+-      if (plaintext.length > REMOTE_MAX_FRAME_BYTES) throw remoteError('remote_payload_size_invalid')
+-      const aad = buildFrameAad({ sessionId: safeSessionId, sequence, direction: sendDirection })
+-      const encrypted = encryptAead({ key: sendKey, plaintext, aad })
+-      nextSendSequence += 1
+-      return {
+-        v: REMOTE_PROTOCOL_VERSION,
+-        type: 'remote.encrypted',
+-        sessionId: safeSessionId,
+-        sequence,
+-        ...encrypted
+-      }
+-    },
+-    decrypt(frame) {
+-      assertOpen()
+-      if (!frame || typeof frame !== 'object' || frame.type !== 'remote.encrypted' || Number(frame.v) !== REMOTE_PROTOCOL_VERSION) {
+-        throw remoteError('remote_frame_invalid')
+-      }
+-      const frameSessionId = normalizeIdentifier(frame.sessionId, 'sessionId', { minLength: 16, maxLength: 128 })
+-      if (frameSessionId !== safeSessionId) throw remoteError('remote_session_mismatch')
+-      const sequence = normalizeSequence(frame.sequence)
+-      if (sequence !== nextReceiveSequence) {
+-        throw remoteError(sequence < nextReceiveSequence ? 'remote_frame_replayed' : 'remote_frame_out_of_order')
+-      }
+-      const aad = buildFrameAad({ sessionId: safeSessionId, sequence, direction: receiveDirection })
+-      const plaintext = decryptAead({ key: receiveKey, nonce: frame.nonce, ciphertext: frame.ciphertext, tag: frame.tag, aad })
+-      let payload
+-      try {
+-        payload = JSON.parse(plaintext.toString('utf8'))
+-      } catch {
+-        throw remoteError('remote_frame_payload_invalid')
+-      }
+-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw remoteError('remote_frame_payload_invalid')
+-      nextReceiveSequence += 1
+-      return payload
+-    }
+-  }
+-}
+diff --git a/main/core/remote/index.js b/main/core/remote/index.js
+deleted file mode 100644
+index a7aa0dc..0000000
+--- a/main/core/remote/index.js
++++ /dev/null
+@@ -1,1235 +0,0 @@
+-import crypto from 'node:crypto'
+-import https from 'node:https'
+-import os from 'node:os'
+-import QRCode from 'qrcode'
+-import selfsigned from 'selfsigned'
+-import { WebSocketServer } from 'ws'
+-import {
+-  REMOTE_DEFAULT_PORT,
+-  REMOTE_HEALTH_PATH,
+-  REMOTE_MAX_DEVICES,
+-  REMOTE_MAX_FRAME_BYTES,
+-  REMOTE_MAX_REQUEST_BYTES,
+-  REMOTE_PAIRING_PATH,
+-  REMOTE_PAIRING_TTL_MS,
+-  REMOTE_PROTOCOL_VERSION,
+-  REMOTE_SOCKET_PATH,
+-  decodeBase64Url,
+-  normalizeDisplayName,
+-  normalizeIdentifier,
+-  normalizeRemoteDevice,
+-  normalizeRemoteSettings,
+-  parseJsonBuffer,
+-  randomBase64Url,
+-  remoteError,
+-  sanitizeRemoteSettingsForConfig,
+-  sha256Base64Url,
+-  timingSafeEqualBase64Url
+-} from './protocol.js'
+-import {
+-  acceptSessionHello,
+-  createDesktopPairingResponse,
+-  createP256KeyPair,
+-  openDesktopPairingStart,
+-  publicKeyFromPrivate,
+-  verifyPairingProof
+-} from './cryptoSession.js'
+-
+-const IDENTITY_STORAGE_KEY = 'remote:v2:identity'
+-const TLS_STORAGE_KEY = 'remote:v2:tls'
+-const DEVICES_STORAGE_KEY = 'remote:v2:devices'
+-const AUDIT_STORAGE_KEY = 'remote:v2:audit'
+-const PAIR_ATTEMPT_TTL_MS = 90 * 1000
+-const HANDSHAKE_TIMEOUT_MS = 12 * 1000
+-const MAX_AUDIT_ENTRIES = 200
+-const MAX_PAIRING_FAILURES = 5
+-const MAX_PAIRING_ATTEMPTS_PER_CODE = 4
+-const MAX_UNAUTHENTICATED_SOCKETS = 32
+-const MAX_AUTHENTICATED_SOCKETS = REMOTE_MAX_DEVICES * 2
+-const SESSION_HELLO_REPLAY_TTL_MS = 10 * 60 * 1000
+-
+-function clone(value) {
+-  return JSON.parse(JSON.stringify(value))
+-}
+-
+-function nowIso() {
+-  return new Date().toISOString()
+-}
+-
+-function isOpen(socket) {
+-  return Boolean(socket) && socket.readyState === 1
+-}
+-
+-function safeSocketClose(socket, code = 1000, reason = '') {
+-  if (!socket) return
+-  try {
+-    socket.close(code, reason.slice(0, 120))
+-  } catch {
+-    try {
+-      socket.terminate()
+-    } catch {
+-      // ignore close races
+-    }
+-  }
+-}
+-
+-function getLanIpv4Addresses() {
+-  const addresses = new Set()
+-  for (const items of Object.values(os.networkInterfaces())) {
+-    for (const item of items || []) {
+-      if (!item || item.family !== 'IPv4' || item.internal || !item.address) continue
+-      if (item.address.startsWith('169.254.')) continue
+-      addresses.add(item.address)
+-    }
+-  }
+-  return [...addresses].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+-}
+-
+-function normalizeFingerprint(value = '') {
+-  const normalized = String(value || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase()
+-  if (!/^[A-F0-9]{64}$/.test(normalized)) throw remoteError('remote_certificate_invalid')
+-  return normalized
+-}
+-
+-function certificateFingerprint(cert = '') {
+-  const parsed = new crypto.X509Certificate(cert)
+-  return normalizeFingerprint(parsed.fingerprint256)
+-}
+-
+-function createStoppedRuntime() {
+-  return {
+-    running: false,
+-    enabled: false,
+-    host: '0.0.0.0',
+-    port: REMOTE_DEFAULT_PORT,
+-    publicEndpoint: '',
+-    endpoints: [],
+-    certificateFingerprint: '',
+-    desktopId: '',
+-    desktopPublicKey: '',
+-    lastError: '',
+-    startedAt: '',
+-    protocolVersion: REMOTE_PROTOCOL_VERSION
+-  }
+-}
+-
+-function buildEndpoints(settings = {}) {
+-  const endpoints = []
+-  if (settings.publicEndpoint) endpoints.push(settings.publicEndpoint)
+-
+-  const hosts = settings.host === '0.0.0.0' || settings.host === '::'
+-    ? getLanIpv4Addresses()
+-    : [settings.host]
+-  for (const host of hosts) {
+-    const endpoint = `https://${host}:${settings.port}`
+-    if (!endpoints.includes(endpoint)) endpoints.push(endpoint)
+-  }
+-  return endpoints
+-}
+-
+-function statusErrorCode(error) {
+-  if (error?.code === 'EADDRINUSE') return 'remote_port_in_use'
+-  if (typeof error?.code === 'string' && error.code.startsWith('remote_')) return error.code
+-  return 'remote_start_failed'
+-}
+-
+-function validatePairingCode(value) {
+-  const code = typeof value === 'string' ? value.replace(/\s/g, '') : ''
+-  if (!/^\d{6}$/.test(code)) throw remoteError('remote_pairing_invalid')
+-  return code
+-}
+-
+-function normalizePairingStartInput(input = {}) {
+-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw remoteError('remote_pairing_start_invalid')
+-  if (input.type !== 'remote.pair.start' || Number(input.v) !== REMOTE_PROTOCOL_VERSION) {
+-    throw remoteError('remote_pairing_start_invalid')
+-  }
+-  return {
+-    v: REMOTE_PROTOCOL_VERSION,
+-    type: 'remote.pair.start',
+-    pairingId: normalizeIdentifier(input.pairingId, 'pairingId', { minLength: 16, maxLength: 160 }),
+-    clientEphemeralPublicKey: typeof input.clientEphemeralPublicKey === 'string' ? input.clientEphemeralPublicKey.trim() : '',
+-    nonce: typeof input.nonce === 'string' ? input.nonce : '',
+-    ciphertext: typeof input.ciphertext === 'string' ? input.ciphertext : '',
+-    tag: typeof input.tag === 'string' ? input.tag : ''
+-  }
+-}
+-
+-function normalizePairingConfirmation(input = {}) {
+-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw remoteError('remote_pairing_invalid')
+-  if (Number(input.v) !== REMOTE_PROTOCOL_VERSION) throw remoteError('remote_protocol_version_unsupported')
+-  return {
+-    pairingId: normalizeIdentifier(input.pairingId, 'pairingId', { minLength: 16, maxLength: 160 }),
+-    pairingAttemptId: normalizeIdentifier(input.pairingAttemptId, 'pairingAttemptId', { minLength: 16, maxLength: 160 }),
+-    deviceId: normalizeIdentifier(input.deviceId, 'deviceId', { minLength: 16, maxLength: 160 }),
+-    deviceProof: typeof input.deviceProof === 'string' ? input.deviceProof.trim() : ''
+-  }
+-}
+-
+-function parsePlainSocketMessage(raw) {
+-  const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw)
+-  return parseJsonBuffer(data, { maxBytes: REMOTE_MAX_FRAME_BYTES, code: 'remote_socket_message_invalid' })
+-}
+-
+-function createJsonResponse(response, statusCode, payload) {
+-  const text = JSON.stringify(payload)
+-  response.writeHead(statusCode, {
+-    'Content-Type': 'application/json; charset=utf-8',
+-    'Cache-Control': 'no-store, max-age=0',
+-    'Content-Length': Buffer.byteLength(text)
+-  })
+-  response.end(text)
+-}
+-
+-function createHttpError(response, error, fallback = 'remote_request_failed') {
+-  const code = typeof error?.code === 'string' && error.code.startsWith('remote_') ? error.code : fallback
+-  const statusCode = new Set([
+-    'remote_pairing_invalid',
+-    'remote_pairing_expired',
+-    'remote_pairing_attempt_expired',
+-    'remote_pairing_proof_invalid',
+-    'remote_pairing_already_used',
+-    'remote_device_limit_reached',
+-    'remote_protocol_version_unsupported',
+-    'remote_pairing_start_invalid',
+-    'remote_frame_auth_failed',
+-    'remote_request_too_large',
+-    'remote_identity_unavailable'
+-  ]).has(code) ? 400 : 500
+-  createJsonResponse(response, statusCode, { ok: false, error: code })
+-}
+-
+-export function createRemoteGateway({
+-  app,
+-  safeStorage,
+-  dbStorageGetItem,
+-  dbStorageSetItem,
+-  getAppVersion = () => '',
+-  conversationReadService = null,
+-  onStatusChanged = null,
+-  onPairingCreated = null,
+-  logger = console
+-} = {}) {
+-  if (!app || typeof app.getPath !== 'function') throw new Error('remote_app_required')
+-  if (!safeStorage || typeof safeStorage.isEncryptionAvailable !== 'function') throw new Error('remote_safe_storage_required')
+-  if (typeof dbStorageGetItem !== 'function' || typeof dbStorageSetItem !== 'function') throw new Error('remote_storage_required')
+-
+-  let server = null
+-  let webSocketServer = null
+-  let runtime = createStoppedRuntime()
+-  let configuredSettings = { enabled: false, host: '0.0.0.0', port: REMOTE_DEFAULT_PORT, publicEndpoint: '' }
+-  let operationQueue = Promise.resolve()
+-  let pairingQueue = Promise.resolve()
+-  let identityCache = null
+-  let tlsCache = null
+-  const pairings = new Map()
+-  const pairingAttempts = new Map()
+-  const socketContexts = new WeakMap()
+-  const activeSocketsByDeviceId = new Map()
+-  const seenSessionHelloNonces = new Map()
+-  let unauthenticatedSocketCount = 0
+-
+-  function log(level, message, details = null) {
+-    const writer = logger?.[level] || logger?.log
+-    try {
+-      if (details === null || details === undefined) writer?.call(logger, `[remote-v2] ${message}`)
+-      else writer?.call(logger, `[remote-v2] ${message}`, details)
+-    } catch {
+-      // never fail a remote operation because logging failed
+-    }
+-  }
+-
+-  function queue(operation) {
+-    const next = operationQueue.then(operation, operation)
+-    operationQueue = next.catch(() => {})
+-    return next
+-  }
+-
+-  function notifyStatus() {
+-    if (typeof onStatusChanged !== 'function') return
+-    try {
+-      onStatusChanged(getStatus())
+-    } catch {
+-      // renderer teardown cannot break the gateway
+-    }
+-  }
+-
+-  function queuePairing(operation) {
+-    const next = pairingQueue.then(operation, operation)
+-    pairingQueue = next.catch(() => {})
+-    return next
+-  }
+-
+-  function getCapabilities() {
+-    const capabilities = ['remote.ping', 'remote.status.get', 'remote.device.self.get']
+-    if (conversationReadService) {
+-      capabilities.push('conversation.list', 'conversation.messages.list', 'conversation.windows.list')
+-    }
+-    return capabilities
+-  }
+-
+-  function assertSecureStorage() {
+-    if (!safeStorage.isEncryptionAvailable()) throw remoteError('remote_secure_storage_unavailable')
+-  }
+-
+-  function encryptLocalSecret(value) {
+-    assertSecureStorage()
+-    return safeStorage.encryptString(String(value)).toString('base64')
+-  }
+-
+-  function decryptLocalSecret(value) {
+-    assertSecureStorage()
+-    if (typeof value !== 'string' || !value) throw remoteError('remote_secure_record_invalid')
+-    try {
+-      return safeStorage.decryptString(Buffer.from(value, 'base64'))
+-    } catch {
+-      throw remoteError('remote_secure_record_invalid')
+-    }
+-  }
+-
+-  async function storageGet(key, fallback) {
+-    const result = await dbStorageGetItem(key, fallback)
+-    return result?.value === undefined ? clone(fallback) : result.value
+-  }
+-
+-  async function storageSet(key, value) {
+-    await dbStorageSetItem(key, value)
+-  }
+-
+-  async function getIdentity() {
+-    if (identityCache) return identityCache
+-    const stored = await storageGet(IDENTITY_STORAGE_KEY, null)
+-    if (stored && typeof stored === 'object') {
+-      try {
+-        const privateKey = JSON.parse(decryptLocalSecret(stored.encryptedPrivateKey))
+-        const desktopId = normalizeIdentifier(stored.desktopId, 'desktopId', { minLength: 16, maxLength: 160 })
+-        const publicKey = typeof stored.publicKey === 'string' ? stored.publicKey : ''
+-        const derivedPublicKey = publicKeyFromPrivate(privateKey)
+-        if (!timingSafeEqualBase64Url(publicKey, derivedPublicKey)) throw remoteError('remote_identity_unavailable')
+-        identityCache = { desktopId, publicKey, privateKey }
+-        return identityCache
+-      } catch (error) {
+-        if (error?.code === 'remote_secure_record_invalid') throw error
+-        throw remoteError('remote_identity_unavailable')
+-      }
+-    }
+-
+-    const pair = createP256KeyPair()
+-    identityCache = {
+-      desktopId: randomBase64Url(24),
+-      publicKey: pair.publicKey,
+-      privateKey: pair.privateKey
+-    }
+-    await storageSet(IDENTITY_STORAGE_KEY, {
+-      version: REMOTE_PROTOCOL_VERSION,
+-      desktopId: identityCache.desktopId,
+-      publicKey: identityCache.publicKey,
+-      encryptedPrivateKey: encryptLocalSecret(JSON.stringify(identityCache.privateKey)),
+-      createdAt: nowIso()
+-    })
+-    return identityCache
+-  }
+-
+-  async function getTlsMaterial() {
+-    if (tlsCache) return tlsCache
+-    const stored = await storageGet(TLS_STORAGE_KEY, null)
+-    if (stored && typeof stored === 'object') {
+-      try {
+-        const decoded = JSON.parse(decryptLocalSecret(stored.encryptedPem))
+-        const key = typeof decoded?.key === 'string' ? decoded.key : ''
+-        const cert = typeof decoded?.cert === 'string' ? decoded.cert : ''
+-        if (!key || !cert) throw remoteError('remote_secure_record_invalid')
+-        tlsCache = { key, cert, fingerprint: certificateFingerprint(cert) }
+-        return tlsCache
+-      } catch (error) {
+-        log('warn', 'stored TLS material unavailable; regenerating certificate', { code: error?.code || 'unknown' })
+-      }
+-    }
+-
+-    assertSecureStorage()
+-    const altNames = [
+-      { type: 2, value: 'localhost' },
+-      { type: 7, ip: '127.0.0.1' },
+-      ...getLanIpv4Addresses().map((ip) => ({ type: 7, ip }))
+-    ]
+-    const generated = await selfsigned.generate(
+-      [{ name: 'commonName', value: 'Anywhere Desktop Remote v2' }],
+-      {
+-        algorithm: 'sha256',
+-        keySize: 2048,
+-        extensions: [
+-          { name: 'basicConstraints', cA: false },
+-          { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+-          { name: 'extKeyUsage', serverAuth: true },
+-          { name: 'subjectAltName', altNames }
+-        ]
+-      }
+-    )
+-    const key = typeof generated?.private === 'string' ? generated.private : generated?.privateKey
+-    const cert = generated?.cert
+-    if (typeof key !== 'string' || typeof cert !== 'string') throw remoteError('remote_certificate_generate_failed')
+-    tlsCache = { key, cert, fingerprint: certificateFingerprint(cert) }
+-    await storageSet(TLS_STORAGE_KEY, {
+-      version: REMOTE_PROTOCOL_VERSION,
+-      encryptedPem: encryptLocalSecret(JSON.stringify({ key, cert })),
+-      createdAt: nowIso()
+-    })
+-    return tlsCache
+-  }
+-
+-  async function readDevices() {
+-    const stored = await storageGet(DEVICES_STORAGE_KEY, { version: REMOTE_PROTOCOL_VERSION, devices: [] })
+-    const source = stored && typeof stored === 'object' ? stored : {}
+-    return {
+-      version: REMOTE_PROTOCOL_VERSION,
+-      devices: Array.isArray(source.devices) ? source.devices.filter((item) => item && typeof item === 'object') : []
+-    }
+-  }
+-
+-  async function writeDevices(data) {
+-    const devices = Array.isArray(data?.devices) ? data.devices.slice(0, REMOTE_MAX_DEVICES) : []
+-    await storageSet(DEVICES_STORAGE_KEY, { version: REMOTE_PROTOCOL_VERSION, devices })
+-  }
+-
+-  async function appendAudit(type, details = {}) {
+-    try {
+-      const existing = await storageGet(AUDIT_STORAGE_KEY, { version: REMOTE_PROTOCOL_VERSION, entries: [] })
+-      const entries = Array.isArray(existing?.entries) ? existing.entries : []
+-      const entry = {
+-        at: nowIso(),
+-        type: String(type || 'remote.unknown').slice(0, 80),
+-        deviceId: typeof details?.deviceId === 'string' ? details.deviceId.slice(0, 160) : '',
+-        result: typeof details?.result === 'string' ? details.result.slice(0, 80) : '',
+-        meta: details?.meta && typeof details.meta === 'object' ? clone(details.meta) : {}
+-      }
+-      entries.unshift(entry)
+-      await storageSet(AUDIT_STORAGE_KEY, {
+-        version: REMOTE_PROTOCOL_VERSION,
+-        entries: entries.slice(0, MAX_AUDIT_ENTRIES)
+-      })
+-    } catch {
+-      // audit storage is best effort and must not interrupt a trusted action
+-    }
+-  }
+-
+-  function publicDevice(device) {
+-    const sockets = activeSocketsByDeviceId.get(device.deviceId)
+-    return {
+-      deviceId: device.deviceId,
+-      displayName: normalizeDisplayName(device.displayName),
+-      platform: normalizeDisplayName(device.platform, 'unknown').slice(0, 40),
+-      appVersion: typeof device.appVersion === 'string' ? device.appVersion : '',
+-      createdAt: typeof device.createdAt === 'string' ? device.createdAt : '',
+-      lastSeenAt: typeof device.lastSeenAt === 'string' ? device.lastSeenAt : '',
+-      online: Boolean(sockets?.size)
+-    }
+-  }
+-
+-  async function getDevice(deviceId) {
+-    const normalizedId = normalizeIdentifier(deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-    const data = await readDevices()
+-    return data.devices.find((device) => device.deviceId === normalizedId) || null
+-  }
+-
+-  function getRootSecret(device) {
+-    const serialized = decryptLocalSecret(device?.encryptedRootSecret)
+-    return decodeBase64Url(serialized, 'device.rootSecret', { minBytes: 32, maxBytes: 32 })
+-  }
+-
+-  async function touchDevice(deviceId) {
+-    const data = await readDevices()
+-    const index = data.devices.findIndex((device) => device.deviceId === deviceId)
+-    if (index < 0) return
+-    data.devices[index] = { ...data.devices[index], lastSeenAt: nowIso() }
+-    await writeDevices(data)
+-  }
+-
+-  function zeroPairingAttempt(attempt) {
+-    try {
+-      attempt?.rootSecret?.fill?.(0)
+-      attempt?.transcript?.fill?.(0)
+-    } catch {
+-      // best effort secret cleanup
+-    }
+-  }
+-
+-  function cleanupExpiredPairings() {
+-    const now = Date.now()
+-    for (const [pairingId, pairing] of pairings) {
+-      if (!pairing || pairing.expiresAtMs <= now) pairings.delete(pairingId)
+-    }
+-    for (const [attemptId, attempt] of pairingAttempts) {
+-      if (!attempt || attempt.expiresAtMs <= now) {
+-        zeroPairingAttempt(attempt)
+-        pairingAttempts.delete(attemptId)
+-      }
+-    }
+-    for (const [nonceKey, expiresAtMs] of seenSessionHelloNonces) {
+-      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) seenSessionHelloNonces.delete(nonceKey)
+-    }
+-  }
+-
+-  function closeDeviceSockets(deviceId, code = 4001, reason = 'device_revoked') {
+-    const sockets = activeSocketsByDeviceId.get(deviceId)
+-    if (!sockets) return
+-    for (const socket of [...sockets]) safeSocketClose(socket, code, reason)
+-    activeSocketsByDeviceId.delete(deviceId)
+-  }
+-
+-  function removeSocketContext(socket) {
+-    const context = socketContexts.get(socket)
+-    if (!context) return
+-    context.closed = true
+-    if (context.handshakeTimer) clearTimeout(context.handshakeTimer)
+-    if (context.authenticated) {
+-      const sockets = activeSocketsByDeviceId.get(context.device?.deviceId)
+-      if (sockets) {
+-        sockets.delete(socket)
+-        if (sockets.size === 0) activeSocketsByDeviceId.delete(context.device.deviceId)
+-      }
+-      try {
+-        context.session?.close?.()
+-      } catch {
+-        // ignore session close races
+-      }
+-    } else {
+-      unauthenticatedSocketCount = Math.max(0, unauthenticatedSocketCount - 1)
+-    }
+-    socketContexts.delete(socket)
+-    notifyStatus()
+-  }
+-
+-  function sendPlain(socket, payload) {
+-    if (!isOpen(socket)) return false
+-    try {
+-      const text = JSON.stringify(payload)
+-      if (Buffer.byteLength(text) > REMOTE_MAX_FRAME_BYTES) return false
+-      socket.send(text)
+-      return true
+-    } catch {
+-      return false
+-    }
+-  }
+-
+-  function broadcastEncryptedEvent(event, payload = {}) {
+-    const eventName = typeof event === 'string' ? event.trim().slice(0, 120) : ''
+-    if (!eventName) return { ok: false, sent: 0 }
+-    let sent = 0
+-    for (const sockets of activeSocketsByDeviceId.values()) {
+-      for (const socket of [...sockets]) {
+-        const context = socketContexts.get(socket)
+-        if (!context?.authenticated || !context.session || !isOpen(socket)) continue
+-        if (sendEncrypted(socket, context, { kind: 'event', event: eventName, payload })) {
+-          sent += 1
+-        } else {
+-          safeSocketClose(socket, 1011, 'encrypted_event_send_failed')
+-        }
+-      }
+-    }
+-    return { ok: true, sent }
+-  }
+-
+-
+-  function sendEncrypted(socket, context, payload) {
+-    if (!isOpen(socket) || !context?.session) return false
+-    try {
+-      const frame = context.session.encrypt(payload)
+-      return sendPlain(socket, frame)
+-    } catch {
+-      return false
+-    }
+-  }
+-
+-  function getStatus() {
+-    const devicesOnline = [...activeSocketsByDeviceId.values()].filter((sockets) => sockets.size > 0).length
+-    return {
+-      ...clone(runtime),
+-      ...clone(configuredSettings),
+-      // Runtime values win for a live listener; configured settings remain useful while stopped.
+-      ...(runtime.running ? {
+-        host: runtime.host,
+-        port: runtime.port,
+-        publicEndpoint: runtime.publicEndpoint,
+-        endpoints: runtime.endpoints
+-      } : {}),
+-      running: runtime.running,
+-      enabled: configuredSettings.enabled,
+-      devicesOnline,
+-      protocolVersion: REMOTE_PROTOCOL_VERSION
+-    }
+-  }
+-
+-  async function createPairing() {
+-    if (!runtime.running) throw remoteError(runtime.lastError || 'remote_gateway_not_running')
+-    cleanupExpiredPairings()
+-    const identity = await getIdentity()
+-    const pairingId = randomBase64Url(24)
+-    const pairingCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
+-    const pairingChallenge = randomBase64Url(32)
+-    const expiresAtMs = Date.now() + REMOTE_PAIRING_TTL_MS
+-    const endpoint = runtime.endpoints[0]
+-    if (!endpoint) throw remoteError('remote_endpoint_unavailable')
+-
+-    const payload = {
+-      v: REMOTE_PROTOCOL_VERSION,
+-      desktopId: identity.desktopId,
+-      desktopName: app.getName?.() || 'Anywhere Desktop',
+-      endpoint,
+-      endpoints: [...runtime.endpoints],
+-      pairingId,
+-      pairingChallenge,
+-      certificateFingerprint: runtime.certificateFingerprint,
+-      desktopIdentityPublicKey: identity.publicKey,
+-      transportHints: {
+-        lan: 'certificate-pin+e2ee',
+-        tunnel: 'system-tls+e2ee'
+-      },
+-      expiresAt: new Date(expiresAtMs).toISOString()
+-    }
+-
+-    pairings.set(pairingId, {
+-      pairingId,
+-      pairingCodeHash: sha256Base64Url(pairingCode),
+-      pairingChallenge,
+-      endpoint,
+-      expiresAtMs,
+-      failureCount: 0,
+-      attemptCount: 0
+-    })
+-    await appendAudit('remote.pairing.created', { result: 'ok' })
+-    if (typeof onPairingCreated === 'function') {
+-      try {
+-        onPairingCreated(clone(payload))
+-      } catch {
+-        // Test/diagnostic observer failures cannot affect the production pairing flow.
+-      }
+-    }
+-
+-    const qrDataUrl = await QRCode.toDataURL(JSON.stringify(payload), {
+-      errorCorrectionLevel: 'M',
+-      margin: 1,
+-      width: 320,
+-      color: { dark: '#171717', light: '#ffffff' }
+-    })
+-
+-    return {
+-      ok: true,
+-      endpoint,
+-      endpoints: [...runtime.endpoints],
+-      pairingCode: `${pairingCode.slice(0, 3)} ${pairingCode.slice(3)}`,
+-      qrDataUrl,
+-      expiresAt: payload.expiresAt,
+-      certificateFingerprint: runtime.certificateFingerprint,
+-      desktopIdentityPublicKey: identity.publicKey
+-    }
+-  }
+-
+-  async function beginPairing(input) {
+-    cleanupExpiredPairings()
+-    const envelope = normalizePairingStartInput(input)
+-    const pairing = pairings.get(envelope.pairingId)
+-    if (!pairing || pairing.expiresAtMs <= Date.now()) throw remoteError('remote_pairing_expired')
+-
+-    const identity = await getIdentity()
+-    let request
+-    try {
+-      request = openDesktopPairingStart({
+-        desktopPrivateKey: identity.privateKey,
+-        desktopPublicKey: identity.publicKey,
+-        context: {
+-          pairingId: envelope.pairingId,
+-          pairingChallenge: pairing.pairingChallenge,
+-          desktopId: identity.desktopId
+-        },
+-        input: envelope
+-      })
+-    } catch (error) {
+-      pairing.failureCount = Number(pairing.failureCount || 0) + 1
+-      if (pairing.failureCount >= MAX_PAIRING_FAILURES) pairings.delete(envelope.pairingId)
+-      throw error?.code ? error : remoteError('remote_pairing_invalid')
+-    }
+-
+-    let pairingCode = ''
+-    try {
+-      pairingCode = validatePairingCode(request.pairingCode)
+-      const isCodeValid = timingSafeEqualBase64Url(pairing.pairingCodeHash, sha256Base64Url(pairingCode))
+-      const isChallengeValid = timingSafeEqualBase64Url(
+-        sha256Base64Url(pairing.pairingChallenge),
+-        sha256Base64Url(request.pairingChallenge)
+-      )
+-      if (!isCodeValid || !isChallengeValid) throw remoteError('remote_pairing_invalid')
+-      request.device = normalizeRemoteDevice(request.device)
+-    } catch (error) {
+-      pairing.failureCount = Number(pairing.failureCount || 0) + 1
+-      if (pairing.failureCount >= MAX_PAIRING_FAILURES) pairings.delete(envelope.pairingId)
+-      throw error?.code ? error : remoteError('remote_pairing_invalid')
+-    }
+-    if (Number(pairing.attemptCount || 0) >= MAX_PAIRING_ATTEMPTS_PER_CODE) {
+-      throw remoteError('remote_pairing_attempt_limit_reached')
+-    }
+-
+-    const devices = await readDevices()
+-    const existing = devices.devices.find((device) => device.deviceId === request.device.deviceId)
+-    if (!existing && devices.devices.length >= REMOTE_MAX_DEVICES) {
+-      throw remoteError('remote_device_limit_reached')
+-    }
+-
+-    const response = createDesktopPairingResponse({
+-      desktopPrivateKey: identity.privateKey,
+-      desktopPublicKey: identity.publicKey,
+-      devicePublicKey: request.device.publicKey,
+-      clientEphemeralPublicKey: envelope.clientEphemeralPublicKey,
+-      context: {
+-        pairingId: envelope.pairingId,
+-        pairingChallenge: pairing.pairingChallenge,
+-        desktopId: identity.desktopId
+-      }
+-    })
+-
+-    const attemptId = randomBase64Url(24)
+-    const expiresAtMs = Math.min(pairing.expiresAtMs, Date.now() + PAIR_ATTEMPT_TTL_MS)
+-    pairing.attemptCount = Number(pairing.attemptCount || 0) + 1
+-    pairingAttempts.set(attemptId, {
+-      attemptId,
+-      pairingId: envelope.pairingId,
+-      device: request.device,
+-      rootSecret: response.secrets.rootSecret,
+-      transcript: response.secrets.transcript,
+-      expiresAtMs
+-    })
+-
+-    return {
+-      v: REMOTE_PROTOCOL_VERSION,
+-      pairingAttemptId: attemptId,
+-      desktopId: identity.desktopId,
+-      desktopName: app.getName?.() || 'Anywhere Desktop',
+-      desktopIdentityPublicKey: identity.publicKey,
+-      serverEphemeralPublicKey: response.serverEphemeralPublicKey,
+-      desktopProof: response.desktopProof,
+-      transcriptHash: response.transcriptHash,
+-      certificateFingerprint: runtime.certificateFingerprint,
+-      expiresAt: new Date(expiresAtMs).toISOString()
+-    }
+-  }
+-
+-  async function confirmPairing(input) {
+-    cleanupExpiredPairings()
+-    const confirmation = normalizePairingConfirmation(input)
+-    const pairing = pairings.get(confirmation.pairingId)
+-    if (!pairing || pairing.expiresAtMs <= Date.now()) throw remoteError('remote_pairing_expired')
+-    const attempt = pairingAttempts.get(confirmation.pairingAttemptId)
+-    if (!attempt || attempt.expiresAtMs <= Date.now()) throw remoteError('remote_pairing_attempt_expired')
+-    if (attempt.pairingId !== confirmation.pairingId || attempt.device.deviceId !== confirmation.deviceId) {
+-      throw remoteError('remote_pairing_invalid')
+-    }
+-    if (!verifyPairingProof({
+-      rootSecret: attempt.rootSecret,
+-      transcript: attempt.transcript,
+-      role: 'device',
+-      proof: confirmation.deviceProof
+-    })) {
+-      pairingAttempts.delete(confirmation.pairingAttemptId)
+-      zeroPairingAttempt(attempt)
+-      throw remoteError('remote_pairing_proof_invalid')
+-    }
+-
+-    // Consume before any awaited storage write. A second concurrent confirm cannot reuse this proof.
+-    pairingAttempts.delete(confirmation.pairingAttemptId)
+-    const persistedRootSecret = attempt.rootSecret.toString('base64url')
+-    const identity = await getIdentity()
+-    const devices = await readDevices()
+-    const existingIndex = devices.devices.findIndex((device) => device.deviceId === attempt.device.deviceId)
+-    const createdAt = existingIndex >= 0 ? devices.devices[existingIndex].createdAt || nowIso() : nowIso()
+-    const nextDevice = {
+-      ...(existingIndex >= 0 ? devices.devices[existingIndex] : {}),
+-      ...attempt.device,
+-      rootSecretVersion: REMOTE_PROTOCOL_VERSION,
+-      encryptedRootSecret: encryptLocalSecret(persistedRootSecret),
+-      createdAt,
+-      lastSeenAt: nowIso()
+-    }
+-    if (existingIndex >= 0) devices.devices.splice(existingIndex, 1, nextDevice)
+-    else devices.devices.push(nextDevice)
+-    await writeDevices(devices)
+-
+-    pairings.delete(attempt.pairingId)
+-    for (const [attemptId, candidate] of pairingAttempts) {
+-      if (candidate?.pairingId !== attempt.pairingId) continue
+-      pairingAttempts.delete(attemptId)
+-      zeroPairingAttempt(candidate)
+-    }
+-    zeroPairingAttempt(attempt)
+-    closeDeviceSockets(nextDevice.deviceId, 4002, 'device_repaired')
+-    await appendAudit('remote.device.paired', { deviceId: nextDevice.deviceId, result: 'ok' })
+-    notifyStatus()
+-
+-    return {
+-      v: REMOTE_PROTOCOL_VERSION,
+-      desktopId: identity.desktopId,
+-      desktopName: app.getName?.() || 'Anywhere Desktop',
+-      device: publicDevice(nextDevice),
+-      certificateFingerprint: runtime.certificateFingerprint,
+-      desktopIdentityPublicKey: identity.publicKey
+-    }
+-  }
+-
+-  async function handleHttp(request, response) {
+-    try {
+-      const parsed = new URL(request.url || '/', 'https://localhost')
+-      if (request.method === 'GET' && parsed.pathname === REMOTE_HEALTH_PATH) {
+-        createJsonResponse(response, 200, {
+-          ok: true,
+-          service: 'anywhere-desktop-remote',
+-          protocolVersion: REMOTE_PROTOCOL_VERSION
+-        })
+-        return
+-      }
+-
+-      if (request.method === 'POST' && parsed.pathname === `${REMOTE_PAIRING_PATH}/start`) {
+-        const body = await readJsonRequest(request)
+-        const result = await queuePairing(() => beginPairing(body))
+-        createJsonResponse(response, 201, { ok: true, ...result })
+-        return
+-      }
+-
+-      if (request.method === 'POST' && parsed.pathname === `${REMOTE_PAIRING_PATH}/confirm`) {
+-        const body = await readJsonRequest(request)
+-        const result = await queuePairing(() => confirmPairing(body))
+-        createJsonResponse(response, 201, { ok: true, ...result })
+-        return
+-      }
+-
+-      createJsonResponse(response, 404, { ok: false, error: 'remote_not_found' })
+-    } catch (error) {
+-      createHttpError(response, error)
+-    }
+-  }
+-
+-  async function readJsonRequest(request) {
+-    const chunks = []
+-    let total = 0
+-    for await (const chunk of request) {
+-      total += chunk.length
+-      if (total > REMOTE_MAX_REQUEST_BYTES) throw remoteError('remote_request_too_large')
+-      chunks.push(chunk)
+-    }
+-    return parseJsonBuffer(Buffer.concat(chunks), { maxBytes: REMOTE_MAX_REQUEST_BYTES })
+-  }
+-
+-  async function handleEncryptedRpc({ socket, context, request }) {
+-    const requestId = normalizeIdentifier(request.requestId, 'requestId', { minLength: 8, maxLength: 160 })
+-    const method = typeof request.method === 'string' ? request.method.trim() : ''
+-    const params = request.params && typeof request.params === 'object' && !Array.isArray(request.params) ? request.params : {}
+-
+-    try {
+-      let result
+-      switch (method) {
+-        case 'remote.ping':
+-          result = { at: nowIso() }
+-          break
+-        case 'remote.status.get':
+-          result = {
+-            status: getStatus(),
+-            device: publicDevice(context.device),
+-            capabilities: getCapabilities()
+-          }
+-          break
+-        case 'remote.device.self.get':
+-          result = { device: publicDevice(context.device) }
+-          break
+-        case 'conversation.list':
+-          if (!conversationReadService) throw remoteError('remote_method_unavailable')
+-          result = await conversationReadService.listConversations(params)
+-          break
+-        case 'conversation.messages.list':
+-          if (!conversationReadService) throw remoteError('remote_method_unavailable')
+-          result = await conversationReadService.listMessages(params)
+-          break
+-        case 'conversation.windows.list':
+-          if (!conversationReadService) throw remoteError('remote_method_unavailable')
+-          result = conversationReadService.getWindows(params)
+-          break
+-        default:
+-          throw remoteError('remote_method_unavailable')
+-      }
+-
+-      if (!sendEncrypted(socket, context, { kind: 'response', requestId, ok: true, result })) {
+-        safeSocketClose(socket, 1011, 'response_send_failed')
+-        return
+-      }
+-      await appendAudit('remote.rpc', { deviceId: context.device.deviceId, result: 'ok', meta: { method } })
+-    } catch (error) {
+-      const rawCode = typeof error?.code === 'string' ? error.code : typeof error?.message === 'string' ? error.message : ''
+-      const code = rawCode.startsWith('remote_')
+-        ? rawCode
+-        : rawCode === 'conversation_not_found'
+-          ? 'remote_conversation_not_found'
+-          : 'remote_request_failed'
+-      if (!sendEncrypted(socket, context, {
+-        kind: 'response',
+-        requestId,
+-        ok: false,
+-        error: { code }
+-      })) {
+-        safeSocketClose(socket, 1011, 'error_response_send_failed')
+-        return
+-      }
+-      await appendAudit('remote.rpc', { deviceId: context.device.deviceId, result: code, meta: { method } })
+-    }
+-  }
+-
+-  async function authenticateSocket(socket, context, hello) {
+-    if (context.closed || context.authenticating || context.authenticated) {
+-      throw remoteError('remote_session_state_invalid')
+-    }
+-    context.authenticating = true
+-    let helloReplayKey = ''
+-    let helloReplayExpiry = 0
+-    try {
+-      const deviceId = normalizeIdentifier(hello?.deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-      const clientNonce = typeof hello?.clientNonce === 'string' ? hello.clientNonce : ''
+-      decodeBase64Url(clientNonce, 'clientNonce', { minBytes: 16, maxBytes: 64 })
+-      cleanupExpiredPairings()
+-      helloReplayKey = `${deviceId}:${clientNonce}`
+-      if (seenSessionHelloNonces.has(helloReplayKey)) throw remoteError('remote_session_hello_replayed')
+-      helloReplayExpiry = Date.now() + SESSION_HELLO_REPLAY_TTL_MS
+-      // Reserve before any awaited lookup. Concurrent sockets cannot race the same hello.
+-      seenSessionHelloNonces.set(helloReplayKey, helloReplayExpiry)
+-
+-      const device = await getDevice(deviceId)
+-      if (!device) throw remoteError('remote_device_not_found')
+-      const identity = await getIdentity()
+-      const rootSecretBuffer = getRootSecret(device)
+-      let accepted
+-      try {
+-        accepted = acceptSessionHello({
+-          rootSecret: rootSecretBuffer,
+-          hello,
+-          expectedDeviceId: device.deviceId,
+-          expectedDesktopId: identity.desktopId
+-        })
+-      } finally {
+-        rootSecretBuffer.fill(0)
+-      }
+-      if (!sendPlain(socket, accepted.accept)) throw remoteError('remote_session_accept_send_failed')
+-
+-      if (context.handshakeTimer) clearTimeout(context.handshakeTimer)
+-      context.authenticated = true
+-      context.device = device
+-      context.session = accepted.session
+-      unauthenticatedSocketCount = Math.max(0, unauthenticatedSocketCount - 1)
+-      closeDeviceSockets(device.deviceId, 4002, 'device_session_replaced')
+-      const sockets = activeSocketsByDeviceId.get(device.deviceId) || new Set()
+-      sockets.add(socket)
+-      activeSocketsByDeviceId.set(device.deviceId, sockets)
+-      await touchDevice(device.deviceId)
+-      notifyStatus()
+-      await appendAudit('remote.session.opened', { deviceId: device.deviceId, result: 'ok' })
+-
+-      if (!sendEncrypted(socket, context, {
+-        kind: 'event',
+-        event: 'remote.welcome',
+-        payload: {
+-          protocolVersion: REMOTE_PROTOCOL_VERSION,
+-          desktopId: identity.desktopId,
+-          device: publicDevice(device),
+-          capabilities: getCapabilities()
+-        }
+-      })) {
+-        throw remoteError('remote_welcome_send_failed')
+-      }
+-    } catch (error) {
+-      if (!context.authenticated && helloReplayKey && seenSessionHelloNonces.get(helloReplayKey) === helloReplayExpiry) {
+-        seenSessionHelloNonces.delete(helloReplayKey)
+-      }
+-      throw error
+-    } finally {
+-      context.authenticating = false
+-    }
+-  }
+-
+-  async function handleSocketMessage(socket, raw) {
+-    const context = socketContexts.get(socket)
+-    if (!context) return
+-    try {
+-      const message = parsePlainSocketMessage(raw)
+-      if (!context.authenticated) {
+-        await authenticateSocket(socket, context, message)
+-        return
+-      }
+-
+-      const request = context.session.decrypt(message)
+-      if (request.kind !== 'request') throw remoteError('remote_request_invalid')
+-      await handleEncryptedRpc({ socket, context, request })
+-    } catch (error) {
+-      const code = typeof error?.code === 'string' ? error.code : 'remote_socket_error'
+-      log('warn', 'socket message rejected', { code, deviceId: context.device?.deviceId || '' })
+-      if (context.authenticated) {
+-        sendEncrypted(socket, context, { kind: 'event', event: 'remote.error', payload: { code } })
+-      }
+-      safeSocketClose(socket, 4003, code)
+-    }
+-  }
+-
+-  function attachWebSocketHandlers(wss) {
+-    wss.on('connection', (socket, request) => {
+-      if (unauthenticatedSocketCount >= MAX_UNAUTHENTICATED_SOCKETS) {
+-        safeSocketClose(socket, 1013, 'too_many_pending_connections')
+-        return
+-      }
+-      const activeCount = [...activeSocketsByDeviceId.values()].reduce((count, sockets) => count + sockets.size, 0)
+-      if (activeCount >= MAX_AUTHENTICATED_SOCKETS) {
+-        safeSocketClose(socket, 1013, 'too_many_connections')
+-        return
+-      }
+-
+-      const context = {
+-        closed: false,
+-        authenticated: false,
+-        authenticating: false,
+-        device: null,
+-        session: null,
+-        messageQueue: Promise.resolve(),
+-        remoteAddress: typeof request?.socket?.remoteAddress === 'string' ? request.socket.remoteAddress : ''
+-      }
+-      unauthenticatedSocketCount += 1
+-      context.handshakeTimer = setTimeout(() => {
+-        if (!context.authenticated) safeSocketClose(socket, 4008, 'session_handshake_timeout')
+-      }, HANDSHAKE_TIMEOUT_MS)
+-      socketContexts.set(socket, context)
+-
+-      socket.on('message', (raw, isBinary) => {
+-        if (isBinary) {
+-          safeSocketClose(socket, 1003, 'binary_frames_not_supported')
+-          return
+-        }
+-        // ws emits message callbacks without awaiting async handlers. Serialize per socket so
+-        // AEAD sequence checks observe the exact arrival order and fail closed on a bad frame.
+-        context.messageQueue = context.messageQueue
+-          .then(async () => {
+-            if (!context.closed) await handleSocketMessage(socket, raw)
+-          })
+-          .catch(() => {})
+-      })
+-      socket.on('close', () => removeSocketContext(socket))
+-      socket.on('error', () => removeSocketContext(socket))
+-    })
+-
+-    wss.on('wsClientError', (_error, socket) => {
+-      try {
+-        socket.destroy()
+-      } catch {
+-        // ignore malformed upgrade races
+-      }
+-    })
+-  }
+-
+-  async function startServer(settings) {
+-    assertSecureStorage()
+-    const [identity, tls] = await Promise.all([getIdentity(), getTlsMaterial()])
+-    const nextServer = https.createServer({ key: tls.key, cert: tls.cert }, handleHttp)
+-    const nextWebSocketServer = new WebSocketServer({
+-      noServer: true,
+-      maxPayload: REMOTE_MAX_FRAME_BYTES,
+-      perMessageDeflate: false
+-    })
+-    attachWebSocketHandlers(nextWebSocketServer)
+-
+-    nextServer.on('upgrade', (request, socket, head) => {
+-      try {
+-        const parsed = new URL(request.url || '/', 'wss://localhost')
+-        if (parsed.pathname !== REMOTE_SOCKET_PATH) {
+-          socket.destroy()
+-          return
+-        }
+-        nextWebSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+-          nextWebSocketServer.emit('connection', webSocket, request)
+-        })
+-      } catch {
+-        socket.destroy()
+-      }
+-    })
+-
+-    await new Promise((resolve, reject) => {
+-      const onError = (error) => {
+-        nextServer.off('listening', onListening)
+-        reject(error)
+-      }
+-      const onListening = () => {
+-        nextServer.off('error', onError)
+-        resolve()
+-      }
+-      nextServer.once('error', onError)
+-      nextServer.once('listening', onListening)
+-      nextServer.listen(settings.port, settings.host)
+-    })
+-
+-    server = nextServer
+-    webSocketServer = nextWebSocketServer
+-    runtime = {
+-      running: true,
+-      enabled: true,
+-      host: settings.host,
+-      port: settings.port,
+-      publicEndpoint: settings.publicEndpoint,
+-      endpoints: buildEndpoints(settings),
+-      certificateFingerprint: tls.fingerprint,
+-      desktopId: identity.desktopId,
+-      desktopPublicKey: identity.publicKey,
+-      lastError: '',
+-      startedAt: nowIso(),
+-      protocolVersion: REMOTE_PROTOCOL_VERSION
+-    }
+-    await appendAudit('remote.gateway.started', { result: 'ok', meta: { host: settings.host, port: settings.port } })
+-    notifyStatus()
+-  }
+-
+-  async function stopNow({ clearEnabled = false } = {}) {
+-    cleanupExpiredPairings()
+-    pairings.clear()
+-    for (const attempt of pairingAttempts.values()) zeroPairingAttempt(attempt)
+-    pairingAttempts.clear()
+-
+-    for (const deviceId of [...activeSocketsByDeviceId.keys()]) closeDeviceSockets(deviceId, 4000, 'gateway_stopped')
+-    const closingWss = webSocketServer
+-    const closingServer = server
+-    webSocketServer = null
+-    server = null
+-    unauthenticatedSocketCount = 0
+-
+-    if (closingWss) {
+-      try {
+-        closingWss.clients.forEach((socket) => safeSocketClose(socket, 4000, 'gateway_stopped'))
+-        closingWss.close()
+-      } catch {
+-        // ignore close race
+-      }
+-    }
+-    if (closingServer) {
+-      await new Promise((resolve) => {
+-        try {
+-          closingServer.close(() => resolve())
+-        } catch {
+-          resolve()
+-        }
+-      })
+-    }
+-
+-    if (clearEnabled) configuredSettings = { ...configuredSettings, enabled: false }
+-    runtime = {
+-      ...createStoppedRuntime(),
+-      host: configuredSettings.host,
+-      port: configuredSettings.port,
+-      publicEndpoint: configuredSettings.publicEndpoint,
+-      enabled: configuredSettings.enabled,
+-      protocolVersion: REMOTE_PROTOCOL_VERSION
+-    }
+-    notifyStatus()
+-  }
+-
+-  async function configureNow(config = {}) {
+-    const settings = normalizeRemoteSettings(config)
+-    configuredSettings = { ...settings }
+-    const sameListener = runtime.running && runtime.host === settings.host && runtime.port === settings.port
+-    if (!settings.enabled) {
+-      await stopNow({ clearEnabled: true })
+-      return getStatus()
+-    }
+-
+-    if (sameListener) {
+-      runtime = {
+-        ...runtime,
+-        enabled: true,
+-        publicEndpoint: settings.publicEndpoint,
+-        endpoints: buildEndpoints(settings),
+-        lastError: ''
+-      }
+-      notifyStatus()
+-      return getStatus()
+-    }
+-
+-    await stopNow()
+-    try {
+-      await startServer(settings)
+-    } catch (error) {
+-      runtime = {
+-        ...createStoppedRuntime(),
+-        enabled: true,
+-        host: settings.host,
+-        port: settings.port,
+-        publicEndpoint: settings.publicEndpoint,
+-        endpoints: buildEndpoints(settings),
+-        lastError: statusErrorCode(error),
+-        protocolVersion: REMOTE_PROTOCOL_VERSION
+-      }
+-      log('error', 'gateway startup failed', { code: runtime.lastError })
+-      notifyStatus()
+-    }
+-    return getStatus()
+-  }
+-
+-  async function listDevices() {
+-    const data = await readDevices()
+-    return {
+-      ok: true,
+-      devices: data.devices.map(publicDevice).sort((left, right) => String(right.lastSeenAt).localeCompare(String(left.lastSeenAt)))
+-    }
+-  }
+-
+-  async function revokeDevice(deviceId) {
+-    const normalizedId = normalizeIdentifier(deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-    const data = await readDevices()
+-    const nextDevices = data.devices.filter((device) => device.deviceId !== normalizedId)
+-    const removed = nextDevices.length !== data.devices.length
+-    if (removed) {
+-      await writeDevices({ version: REMOTE_PROTOCOL_VERSION, devices: nextDevices })
+-      closeDeviceSockets(normalizedId, 4001, 'device_revoked')
+-      await appendAudit('remote.device.revoked', { deviceId: normalizedId, result: 'ok' })
+-      notifyStatus()
+-    }
+-    return { ok: true, removed, deviceId: normalizedId }
+-  }
+-
+-  async function renameDevice(deviceId, displayName) {
+-    const normalizedId = normalizeIdentifier(deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-    const normalizedName = normalizeDisplayName(displayName, '')
+-    if (!normalizedName) throw remoteError('remote_device_name_required')
+-    const data = await readDevices()
+-    const index = data.devices.findIndex((device) => device.deviceId === normalizedId)
+-    if (index < 0) throw remoteError('remote_device_not_found')
+-    data.devices[index] = { ...data.devices[index], displayName: normalizedName }
+-    await writeDevices(data)
+-    await appendAudit('remote.device.renamed', { deviceId: normalizedId, result: 'ok' })
+-    notifyStatus()
+-    return { ok: true, device: publicDevice(data.devices[index]) }
+-  }
+-
+-  async function getAuditLog() {
+-    const stored = await storageGet(AUDIT_STORAGE_KEY, { version: REMOTE_PROTOCOL_VERSION, entries: [] })
+-    return {
+-      ok: true,
+-      entries: Array.isArray(stored?.entries) ? stored.entries.map((entry) => clone(entry)) : []
+-    }
+-  }
+-
+-  return {
+-    configure: (config = {}) => queue(() => configureNow(config)),
+-    stop: () => queue(() => stopNow({ clearEnabled: false })),
+-    getStatus,
+-    getPublicSettings: () => sanitizeRemoteSettingsForConfig(configuredSettings),
+-    broadcastEvent: (event, payload = {}) => broadcastEncryptedEvent(event, payload),
+-    createPairing: () => queue(() => createPairing()),
+-    listDevices,
+-    revokeDevice: (deviceId) => queue(() => revokeDevice(deviceId)),
+-    renameDevice: (deviceId, displayName) => queue(() => renameDevice(deviceId, displayName)),
+-    getAuditLog,
+-    // Pairing endpoints are intentionally internal to the HTTPS request handler.
+-    // Exporting no direct secret/root-key API prevents accidental IPC exposure.
+-    get protocolVersion() {
+-      return REMOTE_PROTOCOL_VERSION
+-    },
+-    get appVersion() {
+-      return String(getAppVersion?.() || '')
+-    }
+-  }
+-}
+diff --git a/main/core/remote/protocol.js b/main/core/remote/protocol.js
+deleted file mode 100644
+index 8f37a64..0000000
+--- a/main/core/remote/protocol.js
++++ /dev/null
+@@ -1,237 +0,0 @@
+-import crypto from 'node:crypto'
+-
+-export const REMOTE_PROTOCOL_VERSION = 2
+-export const REMOTE_PAIRING_PATH = '/api/v2/pair'
+-export const REMOTE_SOCKET_PATH = '/api/v2/socket'
+-export const REMOTE_HEALTH_PATH = '/health'
+-export const REMOTE_DEFAULT_PORT = 17860
+-export const REMOTE_PAIRING_TTL_MS = 2 * 60 * 1000
+-export const REMOTE_MAX_DEVICES = 20
+-export const REMOTE_MAX_FRAME_BYTES = 256 * 1024
+-export const REMOTE_MAX_REQUEST_BYTES = 128 * 1024
+-
+-const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
+-const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]+$/
+-
+-export class RemoteProtocolError extends Error {
+-  constructor(code, message = code) {
+-    super(message)
+-    this.name = 'RemoteProtocolError'
+-    this.code = code
+-  }
+-}
+-
+-export function remoteError(code, message = code) {
+-  return new RemoteProtocolError(code, message)
+-}
+-
+-export function encodeBase64Url(value) {
+-  return Buffer.from(value).toString('base64url')
+-}
+-
+-export function decodeBase64Url(value, field = 'base64url', { minBytes = 1, maxBytes = 1024 * 1024 } = {}) {
+-  if (typeof value !== 'string' || !BASE64URL_PATTERN.test(value)) {
+-    throw remoteError('remote_invalid_base64url', `${field} must be an unpadded base64url string`)
+-  }
+-
+-  const decoded = Buffer.from(value, 'base64url')
+-  if (decoded.length < minBytes || decoded.length > maxBytes || decoded.toString('base64url') !== value) {
+-    throw remoteError('remote_invalid_base64url', `${field} has an invalid byte length or encoding`)
+-  }
+-
+-  return decoded
+-}
+-
+-export function randomBase64Url(bytes = 32) {
+-  const size = Number(bytes)
+-  if (!Number.isInteger(size) || size < 16 || size > 4096) {
+-    throw remoteError('remote_random_size_invalid')
+-  }
+-  return crypto.randomBytes(size).toString('base64url')
+-}
+-
+-export function sha256Base64Url(value) {
+-  return crypto.createHash('sha256').update(value).digest('base64url')
+-}
+-
+-export function timingSafeEqualBase64Url(left, right) {
+-  try {
+-    const leftBuffer = decodeBase64Url(left, 'left')
+-    const rightBuffer = decodeBase64Url(right, 'right')
+-    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer)
+-  } catch {
+-    return false
+-  }
+-}
+-
+-export function normalizeIdentifier(value, field = 'identifier', { minLength = 1, maxLength = 160 } = {}) {
+-  const normalized = typeof value === 'string' ? value.trim() : ''
+-  if (
+-    normalized.length < minLength ||
+-    normalized.length > maxLength ||
+-    !SAFE_IDENTIFIER_PATTERN.test(normalized)
+-  ) {
+-    throw remoteError('remote_identifier_invalid', `${field} is invalid`)
+-  }
+-  return normalized
+-}
+-
+-export function normalizeDisplayName(value, fallback = '移动设备') {
+-  const normalized = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : ''
+-  return (normalized || fallback).slice(0, 80)
+-}
+-
+-export function normalizePlatform(value) {
+-  const normalized = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : ''
+-  return (normalized || 'unknown').slice(0, 40)
+-}
+-
+-export function normalizeAppVersion(value) {
+-  const normalized = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : ''
+-  return normalized.slice(0, 80)
+-}
+-
+-export function normalizeRemoteEndpoint(value, field = 'endpoint') {
+-  let url
+-  try {
+-    url = new URL(String(value || '').trim())
+-  } catch {
+-    throw remoteError('remote_endpoint_invalid', `${field} must be an HTTPS URL`)
+-  }
+-
+-  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash) {
+-    throw remoteError('remote_endpoint_invalid', `${field} must be an HTTPS origin without credentials, query, or fragment`)
+-  }
+-
+-  const pathname = url.pathname.replace(/\/$/, '')
+-  return `${url.protocol}//${url.host}${pathname}`
+-}
+-
+-export function normalizePort(value, fallback = REMOTE_DEFAULT_PORT) {
+-  const port = Number(value)
+-  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : fallback
+-}
+-
+-export function normalizeHost(value, fallback = '0.0.0.0') {
+-  const host = typeof value === 'string' ? value.trim() : ''
+-  return host || fallback
+-}
+-
+-export function stableStringify(value) {
+-  if (value === null) return 'null'
+-
+-  const type = typeof value
+-  if (type === 'string') return JSON.stringify(value)
+-  if (type === 'boolean') return value ? 'true' : 'false'
+-  if (type === 'number') {
+-    if (!Number.isFinite(value)) throw remoteError('remote_canonical_value_invalid')
+-    return JSON.stringify(value)
+-  }
+-  if (type === 'bigint' || type === 'undefined' || type === 'function' || type === 'symbol') {
+-    throw remoteError('remote_canonical_value_invalid')
+-  }
+-
+-  if (Array.isArray(value)) {
+-    return `[${value.map((item) => stableStringify(item)).join(',')}]`
+-  }
+-
+-  if (type === 'object') {
+-    const entries = Object.entries(value)
+-      .filter(([, item]) => item !== undefined)
+-      .sort(([left], [right]) => left.localeCompare(right))
+-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`
+-  }
+-
+-  throw remoteError('remote_canonical_value_invalid')
+-}
+-
+-export function canonicalBuffer(value) {
+-  return Buffer.from(stableStringify(value), 'utf8')
+-}
+-
+-export function parseJsonBuffer(buffer, { maxBytes = REMOTE_MAX_REQUEST_BYTES, code = 'remote_invalid_json' } = {}) {
+-  if (!Buffer.isBuffer(buffer)) throw remoteError(code)
+-  if (buffer.length === 0 || buffer.length > maxBytes) throw remoteError('remote_payload_size_invalid')
+-
+-  try {
+-    const parsed = JSON.parse(buffer.toString('utf8'))
+-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw remoteError(code)
+-    return parsed
+-  } catch (error) {
+-    if (error instanceof RemoteProtocolError) throw error
+-    throw remoteError(code)
+-  }
+-}
+-
+-export function parsePlainJson(value, { maxBytes = REMOTE_MAX_REQUEST_BYTES, code = 'remote_invalid_json' } = {}) {
+-  if (typeof value !== 'string') throw remoteError(code)
+-  return parseJsonBuffer(Buffer.from(value, 'utf8'), { maxBytes, code })
+-}
+-
+-export function normalizeSequence(value) {
+-  const sequence = Number(value)
+-  if (!Number.isSafeInteger(sequence) || sequence < 1) {
+-    throw remoteError('remote_sequence_invalid')
+-  }
+-  return sequence
+-}
+-
+-export function buildFrameAad({ sessionId, sequence, direction }) {
+-  const safeSessionId = normalizeIdentifier(sessionId, 'sessionId', { minLength: 16, maxLength: 128 })
+-  const safeSequence = normalizeSequence(sequence)
+-  if (direction !== 'client-to-desktop' && direction !== 'desktop-to-client') {
+-    throw remoteError('remote_frame_direction_invalid')
+-  }
+-
+-  return canonicalBuffer({
+-    v: REMOTE_PROTOCOL_VERSION,
+-    type: 'remote.encrypted',
+-    sessionId: safeSessionId,
+-    sequence: safeSequence,
+-    direction
+-  })
+-}
+-
+-export function normalizeRemoteDevice(input = {}) {
+-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+-    throw remoteError('remote_device_invalid')
+-  }
+-
+-  const deviceId = normalizeIdentifier(input.deviceId, 'deviceId', { minLength: 16, maxLength: 160 })
+-  const publicKey = typeof input.publicKey === 'string' ? input.publicKey.trim() : ''
+-  decodeBase64Url(publicKey, 'device.publicKey', { minBytes: 65, maxBytes: 65 })
+-
+-  return {
+-    deviceId,
+-    displayName: normalizeDisplayName(input.displayName),
+-    platform: normalizePlatform(input.platform),
+-    appVersion: normalizeAppVersion(input.appVersion),
+-    publicKey
+-  }
+-}
+-
+-export function normalizeRemoteSettings(config = {}) {
+-  const source = config?.remote && typeof config.remote === 'object' && !Array.isArray(config.remote)
+-    ? config.remote
+-    : {}
+-  const publicEndpoint = typeof source.publicEndpoint === 'string' && source.publicEndpoint.trim()
+-    ? normalizeRemoteEndpoint(source.publicEndpoint, 'publicEndpoint')
+-    : ''
+-
+-  return {
+-    enabled: source.enabled === true,
+-    host: normalizeHost(source.host),
+-    port: normalizePort(source.port),
+-    publicEndpoint
+-  }
+-}
+-
+-export function sanitizeRemoteSettingsForConfig(settings = {}) {
+-  const normalized = normalizeRemoteSettings({ remote: settings })
+-  return {
+-    enabled: normalized.enabled,
+-    host: normalized.host,
+-    port: normalized.port,
+-    publicEndpoint: normalized.publicEndpoint
+-  }
+-}
 diff --git a/main/core/skill.js b/main/core/skill.js
 index 5449460..211ea39 100644
 --- a/main/core/skill.js
@@ -212,7 +2787,7 @@ index 5449460..211ea39 100644
  
        zip.writeZip(outputPath)
 diff --git a/main/index.js b/main/index.js
-index b82eac0..f64431e 100644
+index b82eac0..bfb9ca3 100644
 --- a/main/index.js
 +++ b/main/index.js
 @@ -17,6 +17,7 @@
@@ -223,7 +2798,21 @@ index b82eac0..f64431e 100644
  import { electronApp, optimizer } from '@electron-toolkit/utils'
  import { registerIpcHandlers } from './ipcHandler.js'
  import {
-@@ -63,6 +64,8 @@ import { createRemoteConversationReadService } from './core/remote/conversationR
+@@ -35,7 +36,6 @@ import {
+   handleFastInputWindowEvent,
+   appendPayloadToWindow,
+   setMainWindowCloseBehavior,
+-  setWindowMetadataNotifier,
+   updateConversationWindowMetadata,
+   markAppQuitting,
+   isSingletonWindowVisible
+@@ -57,69 +57,20 @@ import * as skillApi from './core/skill.js'
+ import * as screenshotApi from './core/screenshot.js'
+ import * as updaterApi from './core/updater.js'
+ import * as compactApi from './core/compact.js'
+-import { createRemoteGateway } from './core/remote/index.js'
+-import { createRemoteConversationReadService } from './core/remote/conversationRead.js'
+ 
  
  import { applyNetworkProxyConfig, installRequestHeaderBridge } from './core/net.js'
  import { startTaskScheduler } from './core/task_scheduler.js'
@@ -232,18 +2821,77 @@ index b82eac0..f64431e 100644
  
  let appTray = null
  let appQuitStarted = false
-@@ -121,6 +124,10 @@ setWindowMetadataNotifier((change = {}) => {
- 
+-const remoteConversationReadService = createRemoteConversationReadService({
+-  getConfig: dataApi.getConfig,
+-  listLocalConversations: conversationApi.listLocalConversations,
+-  readLocalProjects: projectsApi.readLocalProjects,
+-  loadRemoteConversationPage: conversationApi.loadRemoteConversationPage,
+-  listWindows
+-})
+-
+-
+-
+-const remoteGateway = createRemoteGateway({
+-  app,
+-  safeStorage,
+-  dbStorageGetItem: dbApi.dbStorageGetItem,
+-  dbStorageSetItem: dbApi.dbStorageSetItem,
+-  getAppVersion: () => app.getVersion(),
+-  conversationReadService: remoteConversationReadService,
+-  onStatusChanged: (status) => {
+-    for (const item of listWindows('main')) {
+-      const win = getWindowByRef(item.id)
+-      if (!win || win.isDestroyed()) continue
+-      try {
+-        win.webContents.send('remote:status-changed', status)
+-      } catch {
+-        // A renderer teardown must not interrupt gateway state changes.
+-      }
+-    }
+-  }
+-})
+-
+-setWindowMetadataNotifier((change = {}) => {
+-  const windows = (Array.isArray(change.windows) ? change.windows : [])
+-    .filter((item) => typeof item?.conversationId === 'string' && item.conversationId)
+-    .map((item) => ({
+-      windowId: typeof item.id === 'string' ? item.id : '',
+-      conversationId: item.conversationId,
+-      title: typeof item.conversationTitle === 'string' ? item.conversationTitle : '',
+-      revision: Math.max(0, Number(item.conversationRevision) || 0),
+-      visible: item.visible === true,
+-      busy: item.busy === true,
+-      generating: item.generating === true,
+-      compacting: item.compacting === true,
+-      readOnly: item.readOnly === true,
+-      leasePending: item.leasePending === true
+-    }))
+-  remoteGateway.broadcastEvent('conversation.windows.changed', {
+-    reason: typeof change.reason === 'string' ? change.reason : 'updated',
+-    windows,
+-    updatedAt: new Date().toISOString()
+-  })
+-})
+-
  
  
 +const relayUserData = path.join(path.dirname(process.execPath), 'user-data')
 +app.setPath('userData', relayUserData)
 +app.setName('anywhere-desktop-relay')
-+
+ 
  const hasSingleInstanceLock = app.requestSingleInstanceLock()
  
- function focusPrimaryInstanceMainWindow() {
-@@ -724,7 +731,7 @@ async function syncDesktopRuntimeFromConfig() {
+@@ -590,9 +541,6 @@ function beginAppQuit() {
+   markAppQuitting(true)
+   clearDesktopShortcuts()
+   systemApi.stopClipboardWatcher()
+-  remoteGateway.stop().catch((error) => {
+-    console.error('remote-gateway:stop-failed', error?.message || error)
+-  })
+   dataApi.setWindowChannelNotifier(null)
+ }
+ 
+@@ -724,7 +672,7 @@ async function syncDesktopRuntimeFromConfig() {
  }
  
  app.whenReady().then(async () => {
@@ -252,8 +2900,23 @@ index b82eac0..f64431e 100644
  
    installRequestHeaderBridge()
  
-@@ -795,6 +802,11 @@ app.whenReady().then(async () => {
-   })
+@@ -770,7 +718,6 @@ app.whenReady().then(async () => {
+     mcpApi,
+     skillApi,
+     compactApi,
+-    remoteGateway,
+ 
+     updaterApi,
+ 
+@@ -789,12 +736,14 @@ app.whenReady().then(async () => {
+   systemApi.startClipboardWatcher()
+   startTaskScheduler({ dataApi, openWindow })
+ 
+-  const initialRuntime = await syncDesktopRuntimeFromConfig()
+-  await remoteGateway.configure(initialRuntime?.config || {}).catch((error) => {
+-    console.error('remote-gateway:startup-failed', error?.message || error)
+-  })
++  await syncDesktopRuntimeFromConfig()
    ensureTray()
    await openWindow('main')
 +
@@ -265,7 +2928,7 @@ index b82eac0..f64431e 100644
      preheatScreenshotWindow()
    }, 800)
 diff --git a/main/ipcHandler.js b/main/ipcHandler.js
-index 3d0b346..f35ec10 100644
+index 3d0b346..06233c7 100644
 --- a/main/ipcHandler.js
 +++ b/main/ipcHandler.js
 @@ -3,6 +3,7 @@ import crypto from 'node:crypto'
@@ -276,7 +2939,66 @@ index 3d0b346..f35ec10 100644
  
  const GITHUB_PACKAGE_JSON_URL = 'https://raw.githubusercontent.com/Komorebi-yaodong/anywheredesktop/main/package.json'
  const GITEE_PACKAGE_JSON_URL = 'https://gitee.com/Komorebi-yaodong/anywheredesktop/raw/main/package.json'
-@@ -1336,11 +1337,17 @@ handleInvoke('file:isFileTypeSupported', async (_event, fileName = '') => {
+@@ -122,7 +123,6 @@ export function registerIpcHandlers({
+   mcpApi,
+   skillApi,
+   compactApi,
+-  remoteGateway,
+ 
+   updaterApi,
+ 
+@@ -420,50 +420,6 @@ export function registerIpcHandlers({
+     }
+   })
+ 
+-  handleInvoke('remote:getStatus', async () => {
+-    return remoteGateway.getStatus()
+-  })
+-
+-  handleInvoke('remote:saveAndConfigure', async (_event, remoteSettings = {}) => {
+-    const current = await dataApi.getConfig()
+-    const currentConfig = current?.config && typeof current.config === 'object' ? current.config : {}
+-    const candidateSettings = remoteSettings && typeof remoteSettings === 'object' ? remoteSettings : {}
+-    const candidateConfig = { ...currentConfig, remote: candidateSettings }
+-    const status = await remoteGateway.configure(candidateConfig)
+-    if (candidateSettings.enabled === true && !status.running) {
+-      await remoteGateway.configure(currentConfig)
+-      return { ok: false, error: { message: status.lastError || 'remote_start_failed' }, status }
+-    }
+-    const normalizedSettings = remoteGateway.getPublicSettings()
+-    const persisted = await dataApi.saveSetting('remote', normalizedSettings)
+-    if (persisted?.success === false) {
+-      await remoteGateway.configure(currentConfig)
+-      return { ok: false, error: { message: persisted?.message || 'remote_config_save_failed' }, status }
+-    }
+-    return { ok: true, status: remoteGateway.getStatus() }
+-  })
+-
+-  handleInvoke('remote:createPairing', async () => {
+-    return remoteGateway.createPairing()
+-  })
+-
+-  handleInvoke('remote:listDevices', async () => {
+-    return remoteGateway.listDevices()
+-  })
+-
+-  handleInvoke('remote:renameDevice', async (_event, deviceId = '', displayName = '') => {
+-    return remoteGateway.renameDevice(deviceId, displayName)
+-  })
+-
+-  handleInvoke('remote:revokeDevice', async (_event, deviceId = '') => {
+-    return remoteGateway.revokeDevice(deviceId)
+-  })
+-
+-  handleInvoke('remote:getAuditLog', async () => {
+-    return remoteGateway.getAuditLog()
+-  })
+-
+-
+   handleInvoke('app:checkLatestVersion', async () => {
+     const currentVersion = app.getVersion()
+     const sources = [
+@@ -1336,11 +1292,17 @@ handleInvoke('file:isFileTypeSupported', async (_event, fileName = '') => {
  
  
    handleInvoke('conversation:rename', async (_event, input = {}) => {
@@ -3558,19 +6280,25 @@ index 0c26e04..94c5965 100644
  }
  
 diff --git a/package.json b/package.json
-index 38e2436..e40adc1 100644
+index 38e2436..2ba8302 100644
 --- a/package.json
 +++ b/package.json
-@@ -18,6 +18,9 @@
+@@ -18,12 +18,9 @@
      "build": "electron-vite build",
      "test:conversation-lease": "node tests/conversation-lease.test.mjs",
      "test:conversation-time": "node tests/conversation-time.test.mjs",
+-    "test:remote-crypto": "node tests/remote-crypto.test.mjs",
+-    "test:remote-gateway": "node tests/remote-gateway.test.mjs",
+-    "test:remote-config": "node tests/remote-config-local.test.mjs",
+-    "test:remote-conversation-read": "node tests/remote-conversation-read.test.mjs",
+-    "test:remote-conversation-service": "node tests/remote-conversation-service.test.mjs",
+-    "test:remote": "pnpm run test:remote-crypto && pnpm run test:remote-gateway && pnpm run test:remote-config && pnpm run test:remote-conversation-read && pnpm run test:remote-conversation-service",
 +    "test:relay-routing": "node tests/relay-routing.test.mjs",
 +    "test:conversation-order": "node tests/conversation-order.test.mjs",
 +    "test:project-move": "node tests/project-move.test.mjs",
-     "test:remote-crypto": "node tests/remote-crypto.test.mjs",
-     "test:remote-gateway": "node tests/remote-gateway.test.mjs",
-     "test:remote-config": "node tests/remote-config-local.test.mjs",
+     "postinstall": "electron-builder install-app-deps",
+     "build:unpack": "pnpm run build && electron-builder --dir --publish never",
+     "build:win": "pnpm run build && electron-builder --win nsis --publish never",
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
 index b31cec8..071a54b 100644
 --- a/pnpm-lock.yaml
@@ -3665,10 +6393,33 @@ index b31cec8..071a54b 100644
    global-agent@3.0.0:
      resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
 diff --git a/preload/main_preload.js b/preload/main_preload.js
-index a1872a6..68d8469 100644
+index a1872a6..f9f75db 100644
 --- a/preload/main_preload.js
 +++ b/preload/main_preload.js
-@@ -91,6 +91,14 @@ const api = {
+@@ -67,22 +67,6 @@ const api = {
+   }),
+   
+   getAppVersion: () => invokeOrThrow('app:getVersion'),
+-  // ===== Remote v2: management-only surface. No gateway/device private key is exposed. =====
+-  getRemoteStatus: () => invokeOrThrow('remote:getStatus'),
+-  saveAndConfigureRemote: (settings = {}) =>
+-    invokeOrThrow('remote:saveAndConfigure', toPlainPayload(settings) || {}),
+-  createRemotePairing: () => invokeOrThrow('remote:createPairing'),
+-  listRemoteDevices: () => invokeOrThrow('remote:listDevices'),
+-  renameRemoteDevice: (deviceId = '', displayName = '') =>
+-    invokeOrThrow('remote:renameDevice', deviceId, displayName),
+-  revokeRemoteDevice: (deviceId = '') => invokeOrThrow('remote:revokeDevice', deviceId),
+-  getRemoteAuditLog: () => invokeOrThrow('remote:getAuditLog'),
+-  onRemoteStatusChanged: (callback) => {
+-    if (typeof callback !== 'function') return () => {}
+-    const listener = (_event, payload) => callback(payload)
+-    electronAPI.ipcRenderer.on('remote:status-changed', listener)
+-    return () => electronAPI.ipcRenderer.removeListener('remote:status-changed', listener)
+-  },
+   checkLatestVersion: () => electronAPI.ipcRenderer.invoke('app:checkLatestVersion'),
+   getAppUpdateStatus: () => electronAPI.ipcRenderer.invoke('app:update:getStatus'),
+   checkAppUpdate: () => electronAPI.ipcRenderer.invoke('app:update:check'),
+@@ -91,6 +75,14 @@ const api = {
    installAppUpdate: () => electronAPI.ipcRenderer.invoke('app:update:install'),
    clearAppUpdateCache: () => electronAPI.ipcRenderer.invoke('app:update:clearCache'),
  
@@ -3704,10 +6455,34 @@ index 03cfac5..4c9d2ca 100644
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
 diff --git a/render/main/App.vue b/render/main/App.vue
-index 8f724d1..9714d5d 100644
+index 8f724d1..5b0030e 100644
 --- a/render/main/App.vue
 +++ b/render/main/App.vue
-@@ -737,7 +737,13 @@ const fetchAndParseDoc = async (filename) => {
+@@ -7,10 +7,9 @@ import Mcp from './components/Mcp.vue'
+ import Setting from './components/Setting.vue'
+ import Providers from './components/Providers.vue'
+ import Skills from './components/Skills.vue'
+-import RemoteConnections from './components/RemoteConnections.vue'
+ 
+ import { useI18n } from 'vue-i18n'
+-import { Collection, Bell, Connection, Document } from '@element-plus/icons-vue'
++import { Collection, Bell, Document } from '@element-plus/icons-vue'
+ import { marked } from 'marked';
+ import DOMPurify from 'dompurify';
+ import { ElBadge, ElMessage, ElMessageBox } from 'element-plus'; // 确保引入 ElBadge
+@@ -20,11 +19,7 @@ const tab = ref(0);
+ const header_text = ref(t('app.header.chats'));
+ 
+ const config = ref(null);
+-const remoteConnectionsRef = ref(null);
+ 
+-function openRemoteConnections() {
+-  remoteConnectionsRef.value?.openDialog?.();
+-}
+ 
+ const fallbackDefaultConfig = {
+   defaultTaskModel: '',
+@@ -737,7 +732,13 @@ const fetchAndParseDoc = async (filename) => {
        return `![${alt}](${imgBaseUrl}${encodeURIComponent(imgFilename)})`;
      });
  
@@ -3722,6 +6497,26 @@ index 8f724d1..9714d5d 100644
  
      // 等待 DOM 更新后，将滚动条回到顶部
      nextTick(() => {
+@@ -978,11 +979,6 @@ watch(locale, () => {
+               </el-badge>
+             </el-button>
+           </el-tooltip>
+-          <el-tooltip content="手机远程" placement="bottom">
+-            <el-button class="tab-button" text @click="openRemoteConnections">
+-              <el-icon :size="20"><Connection /></el-icon>
+-            </el-button>
+-          </el-tooltip>
+         </el-col>
+ 
+         <el-col :span="12" class="header-title-col">
+@@ -1099,7 +1095,6 @@ watch(locale, () => {
+       </KeepAlive>
+     </el-main>
+ 
+-    <RemoteConnections ref="remoteConnectionsRef" />
+ 
+ 
+     <!-- 帮助文档弹窗 -->
 diff --git a/render/main/components/Chats.vue b/render/main/components/Chats.vue
 index bd6927b..81b1caa 100644
 --- a/render/main/components/Chats.vue
@@ -3770,6 +6565,341 @@ index 7ded1c4..b72f44b 100644
            </div>
          </div>
        </div>
+diff --git a/render/main/components/RemoteConnections.vue b/render/main/components/RemoteConnections.vue
+deleted file mode 100644
+index 84a6370..0000000
+--- a/render/main/components/RemoteConnections.vue
++++ /dev/null
+@@ -1,329 +0,0 @@
+-<script setup>
+-import { computed, onBeforeUnmount, ref } from 'vue'
+-import { Connection, CopyDocument, Delete, Document, Refresh, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+-import { ElMessage, ElMessageBox } from 'element-plus'
+-
+-const visible = ref(false)
+-const loading = ref(false)
+-const pairingLoading = ref(false)
+-const status = ref({
+-  running: false,
+-  enabled: false,
+-  host: '0.0.0.0',
+-  port: 17860,
+-  publicEndpoint: '',
+-  endpoints: [],
+-  certificateFingerprint: '',
+-  lastError: '',
+-  devicesOnline: 0,
+-  protocolVersion: 2
+-})
+-const settings = ref({ enabled: false, host: '0.0.0.0', port: 17860, publicEndpoint: '' })
+-const pairing = ref(null)
+-const devices = ref([])
+-const auditEntries = ref([])
+-let removeStatusListener = null
+-
+-const primaryEndpoint = computed(() => status.value.endpoints?.[0] || '')
+-const isEnabled = computed(() => settings.value.enabled === true)
+-
+-function normalizeSettings(source = {}) {
+-  return {
+-    enabled: source.enabled === true,
+-    host: typeof source.host === 'string' && source.host.trim() ? source.host.trim() : '0.0.0.0',
+-    port: Number.isInteger(Number(source.port)) ? Number(source.port) : 17860,
+-    publicEndpoint: typeof source.publicEndpoint === 'string' ? source.publicEndpoint.trim() : ''
+-  }
+-}
+-
+-function statusErrorText(code = '') {
+-  const map = {
+-    remote_port_in_use: '端口已被占用，请更换端口后重试。',
+-    remote_secure_storage_unavailable: '系统安全存储不可用，无法安全保存远程身份密钥。',
+-    remote_start_failed: '远程服务启动失败。',
+-    remote_endpoint_invalid: '公开连接地址必须是完整 HTTPS 地址。'
+-  }
+-  return map[code] || (code ? `服务异常：${code}` : '')
+-}
+-
+-async function refresh() {
+-  loading.value = true
+-  try {
+-    const [nextStatus, deviceResult, auditResult] = await Promise.all([
+-      window.api.getRemoteStatus(),
+-      window.api.listRemoteDevices(),
+-      window.api.getRemoteAuditLog()
+-    ])
+-    status.value = nextStatus || status.value
+-    settings.value = normalizeSettings(nextStatus || settings.value)
+-    devices.value = Array.isArray(deviceResult?.devices) ? deviceResult.devices : []
+-    auditEntries.value = Array.isArray(auditResult?.entries) ? auditResult.entries.slice(0, 8) : []
+-  } catch (error) {
+-    ElMessage.error(`读取手机远程状态失败：${error.message || error}`)
+-  } finally {
+-    loading.value = false
+-  }
+-}
+-
+-async function saveAndConfigure(enabled = settings.value.enabled) {
+-  const port = Number(settings.value.port)
+-  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+-    ElMessage.warning('端口必须是 1024 至 65535 之间的整数。')
+-    return
+-  }
+-  const next = { ...settings.value, enabled: enabled === true, port }
+-  loading.value = true
+-  try {
+-    const result = await window.api.saveAndConfigureRemote(next)
+-    if (result?.ok === false) {
+-      status.value = result.status || status.value
+-      throw new Error(result?.error?.message || result?.status?.lastError || 'remote_start_failed')
+-    }
+-    status.value = result.status || status.value
+-    settings.value = normalizeSettings(status.value)
+-    pairing.value = null
+-    await refresh()
+-    ElMessage.success(next.enabled ? '手机远程服务已启动。' : '手机远程服务已关闭，所有手机连接已断开。')
+-  } catch (error) {
+-    ElMessage.error(statusErrorText(error?.message) || `保存远程服务失败：${error.message || error}`)
+-  } finally {
+-    loading.value = false
+-  }
+-}
+-
+-async function createPairing() {
+-  if (!status.value.running) {
+-    ElMessage.warning('请先启用手机远程服务。')
+-    return
+-  }
+-  pairingLoading.value = true
+-  try {
+-    pairing.value = await window.api.createRemotePairing()
+-  } catch (error) {
+-    ElMessage.error(`生成配对二维码失败：${error.message || error}`)
+-  } finally {
+-    pairingLoading.value = false
+-  }
+-}
+-
+-async function copyText(value, successMessage) {
+-  if (!value) return
+-  try {
+-    await window.api.copyText(value)
+-    ElMessage.success(successMessage)
+-  } catch (error) {
+-    ElMessage.error(`复制失败：${error.message || error}`)
+-  }
+-}
+-
+-async function renameDevice(device) {
+-  try {
+-    const { value } = await ElMessageBox.prompt('请输入设备名称', '重命名已配对设备', {
+-      inputValue: device.displayName,
+-      inputPattern: /\S+/,
+-      inputErrorMessage: '设备名称不能为空。'
+-    })
+-    await window.api.renameRemoteDevice(device.deviceId, value)
+-    await refresh()
+-  } catch (error) {
+-    if (error !== 'cancel' && error !== 'close') ElMessage.error(`重命名失败：${error.message || error}`)
+-  }
+-}
+-
+-async function revokeDevice(device) {
+-  try {
+-    await ElMessageBox.confirm(
+-      `撤销“${device.displayName}”后，该手机必须重新扫码并输入验证码配对。`,
+-      '撤销设备访问',
+-      { type: 'warning', confirmButtonText: '撤销', cancelButtonText: '取消' }
+-    )
+-    await window.api.revokeRemoteDevice(device.deviceId)
+-    await refresh()
+-    ElMessage.success('设备访问已撤销。')
+-  } catch (error) {
+-    if (error !== 'cancel' && error !== 'close') ElMessage.error(`撤销失败：${error.message || error}`)
+-  }
+-}
+-
+-function formatTime(value = '') {
+-  if (!value) return '—'
+-  const parsed = new Date(value)
+-  return Number.isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString()
+-}
+-
+-async function openDialog() {
+-  visible.value = true
+-  pairing.value = null
+-  await refresh()
+-  if (!removeStatusListener && window.api?.onRemoteStatusChanged) {
+-    removeStatusListener = window.api.onRemoteStatusChanged((nextStatus) => {
+-      status.value = nextStatus || status.value
+-      settings.value = normalizeSettings(status.value)
+-      if (visible.value) {
+-        window.api.listRemoteDevices().then((result) => {
+-          devices.value = Array.isArray(result?.devices) ? result.devices : []
+-        }).catch(() => {})
+-      }
+-    })
+-  }
+-}
+-
+-onBeforeUnmount(() => {
+-  removeStatusListener?.()
+-  removeStatusListener = null
+-})
+-
+-defineExpose({ openDialog })
+-</script>
+-
+-<template>
+-  <el-dialog v-model="visible" title="手机远程（Remote v2）" width="720px" :close-on-click-modal="false" class="remote-v2-dialog">
+-    <div v-loading="loading" class="remote-v2-content">
+-      <el-alert
+-        title="默认关闭。启用后仅允许经二维码配对、应用层端到端加密的手机连接；关闭服务会立即断开全部已连接设备。"
+-        type="warning"
+-        :closable="false"
+-        show-icon
+-      />
+-
+-      <section class="remote-service-card">
+-        <div>
+-          <h3>局域网服务</h3>
+-          <p v-if="status.running">正在监听 {{ status.host }}:{{ status.port }}，在线设备 {{ status.devicesOnline || 0 }} 台。</p>
+-          <p v-else>关闭状态。启用后，手机可在同一局域网扫码配对。</p>
+-        </div>
+-        <div class="remote-service-actions">
+-          <el-input-number v-model="settings.port" :min="1024" :max="65535" :step="1" :disabled="loading" controls-position="right" />
+-          <el-button plain :disabled="loading" @click="saveAndConfigure(settings.enabled)">应用配置</el-button>
+-          <el-button :type="isEnabled ? 'danger' : 'primary'" :icon="isEnabled ? VideoPause : VideoPlay" :loading="loading" @click="saveAndConfigure(!isEnabled)">
+-            {{ isEnabled ? '关闭服务' : '启用服务' }}
+-          </el-button>
+-        </div>
+-      </section>
+-
+-      <el-alert v-if="status.lastError" :title="statusErrorText(status.lastError)" type="error" :closable="false" show-icon />
+-
+-      <section class="remote-section">
+-        <div class="section-heading">
+-          <div>
+-            <h3>高级：公开 Tunnel 地址</h3>
+-            <p>可填写 Cloudflare Tunnel、Tailscale Funnel 或反向代理提供的 HTTPS 地址。Tunnel 仅传输密文，仍由应用层端到端加密保护内容。</p>
+-          </div>
+-        </div>
+-        <el-input v-model="settings.publicEndpoint" placeholder="https://remote.example.com（可选）" :disabled="loading" @change="saveAndConfigure(settings.enabled)" />
+-      </section>
+-
+-      <template v-if="status.running">
+-        <section class="remote-section">
+-          <div class="section-heading">
+-            <div>
+-              <h3>连接新手机</h3>
+-              <p>扫码后，手机还必须输入下面的 6 位验证码。二维码不包含验证码，2 分钟后自动失效。</p>
+-            </div>
+-            <el-button :icon="Refresh" :loading="pairingLoading" @click="createPairing">生成二维码</el-button>
+-          </div>
+-
+-          <div class="endpoint-list">
+-            <div v-for="endpoint in status.endpoints" :key="endpoint" class="endpoint-row">
+-              <code>{{ endpoint }}</code>
+-              <el-button link :icon="CopyDocument" @click="copyText(endpoint, '连接地址已复制。')">复制</el-button>
+-            </div>
+-            <el-empty v-if="!status.endpoints?.length" description="未检测到可用局域网 IPv4 地址" :image-size="56" />
+-          </div>
+-
+-          <div v-if="pairing" class="pairing-card">
+-            <img :src="pairing.qrDataUrl" alt="手机远程配对二维码">
+-            <div class="pairing-details">
+-              <h3>扫描二维码配对</h3>
+-              <span class="pairing-label">在手机上输入验证码</span>
+-              <strong>{{ pairing.pairingCode }}</strong>
+-              <small>有效至 {{ formatTime(pairing.expiresAt) }}</small>
+-              <small>证书指纹：{{ pairing.certificateFingerprint }}</small>
+-              <el-button link :icon="CopyDocument" @click="copyText(primaryEndpoint, '连接地址已复制。')">复制当前连接地址</el-button>
+-            </div>
+-          </div>
+-        </section>
+-
+-        <section class="remote-section">
+-          <div class="section-heading">
+-            <div>
+-              <h3>已配对设备</h3>
+-              <p>撤销设备会立即断开它的连接，并使其无法再次登录。</p>
+-            </div>
+-            <el-button :icon="Refresh" circle @click="refresh" />
+-          </div>
+-          <el-empty v-if="devices.length === 0" description="暂无已配对设备" :image-size="60" />
+-          <div v-else class="remote-device-list">
+-            <article v-for="device in devices" :key="device.deviceId" class="remote-device-item">
+-              <el-icon class="device-icon"><Connection /></el-icon>
+-              <div class="device-meta">
+-                <strong>{{ device.displayName }}</strong>
+-                <span>{{ device.platform || 'unknown' }}{{ device.appVersion ? ` · ${device.appVersion}` : '' }}</span>
+-                <small>{{ device.online ? '在线' : `最后在线：${formatTime(device.lastSeenAt)}` }}</small>
+-              </div>
+-              <div class="device-actions">
+-                <el-button link @click="renameDevice(device)">重命名</el-button>
+-                <el-button link type="danger" :icon="Delete" @click="revokeDevice(device)">撤销</el-button>
+-              </div>
+-            </article>
+-          </div>
+-        </section>
+-
+-        <section class="remote-section">
+-          <div class="section-heading">
+-            <div>
+-              <h3>安全审计</h3>
+-              <p>仅记录时间、设备 ID、操作类型和结果；不记录消息正文、配置秘密、附件或密钥。</p>
+-            </div>
+-            <el-button :icon="Refresh" circle @click="refresh" />
+-          </div>
+-          <el-empty v-if="auditEntries.length === 0" description="暂无审计事件" :image-size="48" />
+-          <div v-else class="audit-list">
+-            <div v-for="entry in auditEntries" :key="`${entry.at}-${entry.type}-${entry.deviceId}`" class="audit-row">
+-              <el-icon><Document /></el-icon>
+-              <span>{{ formatTime(entry.at) }}</span>
+-              <strong>{{ entry.type }}</strong>
+-              <small>{{ entry.deviceId ? entry.deviceId.slice(0, 12) : '桌面端' }} · {{ entry.result || '—' }}</small>
+-            </div>
+-          </div>
+-        </section>
+-      </template>
+-    </div>
+-  </el-dialog>
+-</template>
+-
+-<style scoped>
+-.remote-v2-content { display: grid; gap: 16px; }
+-.remote-service-card, .remote-device-item { display: flex; align-items: center; gap: 16px; border: 1px solid var(--el-border-color-lighter); border-radius: 12px; padding: 16px; }
+-.remote-service-card { justify-content: space-between; background: var(--el-fill-color-lighter); }
+-.remote-service-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+-.remote-service-actions :deep(.el-input-number) { width: 124px; }
+-.remote-section { display: grid; gap: 10px; }
+-.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+-h3, p { margin: 0; }
+-h3 { font-size: 15px; font-weight: 650; }
+-p { margin-top: 5px; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.5; }
+-.endpoint-list, .remote-device-list, .audit-list { display: grid; gap: 8px; }
+-.endpoint-row, .audit-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; background: var(--el-fill-color-light); }
+-.endpoint-row { justify-content: space-between; }
+-.endpoint-row code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+-.pairing-card { display: flex; align-items: center; gap: 16px; padding: 14px; border: 1px solid var(--el-border-color-lighter); border-radius: 12px; background: var(--el-fill-color-lighter); }
+-.pairing-card img { width: 152px; height: 152px; border-radius: 8px; background: white; image-rendering: pixelated; }
+-.pairing-details { display: grid; gap: 6px; min-width: 0; }
+-.pairing-details strong { font-size: 28px; letter-spacing: 4px; }
+-.pairing-label, .pairing-details small { color: var(--el-text-color-secondary); font-size: 12px; word-break: break-all; }
+-.device-icon { font-size: 24px; color: var(--el-color-primary); }
+-.device-meta { display: grid; gap: 2px; flex: 1; min-width: 0; }
+-.device-meta span, .device-meta small { color: var(--el-text-color-secondary); font-size: 12px; }
+-.device-actions { display: flex; gap: 4px; }
+-.audit-row { font-size: 12px; }
+-.audit-row > span { color: var(--el-text-color-secondary); width: 145px; }
+-.audit-row > strong { flex: 1; font-weight: 550; }
+-.audit-row > small { color: var(--el-text-color-secondary); }
+-@media (max-width: 640px) {
+-  .remote-service-card, .pairing-card { align-items: stretch; flex-direction: column; }
+-  .remote-service-actions { justify-content: space-between; }
+-  .pairing-card img { width: 180px; height: 180px; align-self: center; }
+-  .audit-row > span { width: auto; }
+-}
+-</style>
 diff --git a/render/main/components/Setting.vue b/render/main/components/Setting.vue
 index 23ba179..b845918 100644
 --- a/render/main/components/Setting.vue
@@ -5526,3 +8656,1082 @@ index 0000000..005eef3
 +assert.equal(dispatches[0].payload.__relayOptions.promptKey, undefined);
 +assert.equal(dispatches[0].payload.__relayOptions.model, 'p|m');
 +console.log('PASS relay new conversation and bound conversation routing');
+diff --git a/tests/remote-config-local.test.mjs b/tests/remote-config-local.test.mjs
+deleted file mode 100644
+index 3dc2025..0000000
+--- a/tests/remote-config-local.test.mjs
++++ /dev/null
+@@ -1,58 +0,0 @@
+-import assert from 'node:assert/strict'
+-import {
+-  DEFAULT_REMOTE_SETTINGS,
+-  mergeLocalRemoteSettings,
+-  preserveLocalRemoteSettings,
+-  splitLocalRemoteSettings
+-} from '../main/core/remote/configLocal.js'
+-
+-function run() {
+-  const localRemote = {
+-    enabled: true,
+-    host: '127.0.0.1',
+-    port: 19443,
+-    publicEndpoint: 'https://remote.example.test'
+-  }
+-  const fullConfig = {
+-    language: 'zh',
+-    themeMode: 'system',
+-    remote: localRemote,
+-    webdav: { url: 'https://dav.example.test', localChatPath: 'E:/Chats' }
+-  }
+-
+-  const split = splitLocalRemoteSettings(fullConfig)
+-  assert.equal(Object.hasOwn(split.sharedConfig, 'remote'), false)
+-  assert.deepEqual(split.remote, localRemote)
+-  assert.equal(split.sharedConfig.language, 'zh')
+-
+-  const merged = mergeLocalRemoteSettings(
+-    { ...split.sharedConfig, remote: { enabled: false, port: 28888 } },
+-    { remote: split.remote }
+-  )
+-  assert.deepEqual(merged.remote, localRemote)
+-  assert.equal(merged.language, 'zh')
+-
+-  const preserved = preserveLocalRemoteSettings(
+-    {
+-      language: 'en',
+-      remote: { enabled: false, host: '0.0.0.0', port: 39999, publicEndpoint: '' }
+-    },
+-    merged
+-  )
+-  assert.equal(preserved.language, 'en')
+-  assert.deepEqual(preserved.remote, localRemote)
+-
+-  const invalidLocal = mergeLocalRemoteSettings(
+-    { language: 'zh' },
+-    { remote: { enabled: true, publicEndpoint: 'http://plaintext.example.test' } }
+-  )
+-  assert.deepEqual(invalidLocal.remote, DEFAULT_REMOTE_SETTINGS)
+-
+-  const disabledSplit = splitLocalRemoteSettings({ language: 'zh' })
+-  assert.deepEqual(disabledSplit.remote, DEFAULT_REMOTE_SETTINGS)
+-  assert.equal(Object.hasOwn(disabledSplit.sharedConfig, 'remote'), false)
+-
+-  console.log(JSON.stringify({ ok: true, suite: 'remote-config-local' }))
+-}
+-
+-run()
+diff --git a/tests/remote-conversation-read.test.mjs b/tests/remote-conversation-read.test.mjs
+deleted file mode 100644
+index 988f362..0000000
+--- a/tests/remote-conversation-read.test.mjs
++++ /dev/null
+@@ -1,167 +0,0 @@
+-import assert from 'node:assert/strict'
+-import fs from 'node:fs/promises'
+-import os from 'node:os'
+-import path from 'node:path'
+-import { DatabaseSync } from 'node:sqlite'
+-import * as store from '../main/core/conversationStore.js'
+-
+-const PIXEL_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nH0AAAAASUVORK5CYII='
+-
+-function buildSession() {
+-  const system = {
+-    role: 'system',
+-    content: 'remote fixture system',
+-    storageId: 'message-system',
+-    uiStorageId: 'ui-system'
+-  }
+-  const messages = [system]
+-  const chatShow = [system]
+-
+-  for (let index = 1; index <= 5; index += 1) {
+-    const isLast = index === 5
+-    const message = {
+-      role: index % 2 === 1 ? 'user' : 'assistant',
+-      content: isLast
+-        ? [
+-            { type: 'text', text: 'latest body' },
+-            {
+-              type: 'file',
+-              file: {
+-                filename: 'pixel.png',
+-                file_data: PIXEL_DATA_URL,
+-                path: 'E:/private/pixel.png'
+-              }
+-            },
+-            { type: 'image_url', image_url: { url: PIXEL_DATA_URL } }
+-          ]
+-        : `message-${index}`,
+-      storageId: `message-${index}`,
+-      uiStorageId: `ui-${index}`,
+-      timestamp: `2026-01-01T00:00:0${index}.000Z`,
+-      path: `E:/secret/${index}.txt`,
+-      file_path: `E:/secret/${index}-file.txt`,
+-      dirPath: 'E:/secret',
+-      dir_path: 'E:/secret/under_score',
+-      db_file: 'E:/secret/conversation.db',
+-      api_key: 'SECRET_API_KEY',
+-      password: 'SECRET_PASSWORD',
+-      env: { SECRET_ENV: 'SECRET_ENV_VALUE' },
+-      headers: { Authorization: 'Bearer SECRET_TOKEN' },
+-      tool_calls: isLast
+-        ? [{
+-            id: 'tool-secret',
+-            function: { name: 'read_file', arguments: JSON.stringify({ file_path: 'E:/secret/private.txt' }) },
+-            approvalStatus: 'finished',
+-            result: 'SECRET_TOOL_RESULT'
+-          }]
+-        : []
+-    }
+-    messages.push(message)
+-    chatShow.push({ ...message })
+-  }
+-
+-  return {
+-    anywhere_history: true,
+-    CODE: 'AI',
+-    sessionMetadata: { title: 'remote read fixture' },
+-    fullHistory: messages,
+-    history: [],
+-    chat_show: chatShow
+-  }
+-}
+-
+-function readActiveLease(databasePath) {
+-  const db = new DatabaseSync(databasePath, { readOnly: true })
+-  try {
+-    return db.prepare("SELECT holder_instance_id, lease_epoch FROM write_lease WHERE resource = 'conversation'").get() || null
+-  } finally {
+-    db.close()
+-  }
+-}
+-
+-async function main() {
+-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'anywhere-remote-read-'))
+-  try {
+-    const created = await store.createConversation({
+-      dirPath: root,
+-      title: 'remote read fixture',
+-      sessionData: buildSession(),
+-      projectId: 'project-fixture',
+-      projectName: 'Remote Fixture Project'
+-    })
+-    const conversationId = created.descriptor.conversationId
+-    assert.equal(readActiveLease(created.databasePath), null)
+-
+-    const first = await store.loadRemoteConversationPage({
+-      dirPath: root,
+-      conversationId,
+-      pageSize: 2
+-    })
+-    assert.equal(first.ok, true)
+-    assert.equal(first.conversation.conversationId, conversationId)
+-    assert.deepEqual(first.conversation.project, {
+-      projectId: 'project-fixture',
+-      name: 'Remote Fixture Project'
+-    })
+-    assert.equal(first.page.hasMore, true)
+-    assert.equal(first.page.nextBeforeUiOrder, 5)
+-    assert.deepEqual(first.messages.map((message) => message.role), ['system', 'assistant', 'user'])
+-    assert.deepEqual(first.messages.map((message) => message.uiMessageId), ['ui-system', 'ui-4', 'ui-5'])
+-
+-    const latest = first.messages.at(-1)
+-    assert.deepEqual(latest.payload.toolCalls, [{ id: 'tool-secret', name: 'read_file', status: 'finished' }])
+-    const serializedFirst = JSON.stringify(first)
+-    for (const forbidden of [
+-      PIXEL_DATA_URL,
+-      'E:/private/pixel.png',
+-      'E:/secret/private.txt',
+-      'E:/secret/5-file.txt',
+-      'E:/secret/under_score',
+-      'E:/secret/conversation.db',
+-      'SECRET_API_KEY',
+-      'SECRET_PASSWORD',
+-      'SECRET_ENV_VALUE',
+-      'SECRET_TOKEN',
+-      'SECRET_TOOL_RESULT',
+-      'dbFile',
+-      'dirPath',
+-      'legacyJson'
+-    ]) {
+-      assert.equal(serializedFirst.includes(forbidden), false, `remote DTO leaked: ${forbidden}`)
+-    }
+-    assert.ok(serializedFirst.includes('pixel.png'))
+-    assert.ok(serializedFirst.includes('attachmentId'))
+-    assert.ok(serializedFirst.includes('sha256'))
+-
+-    const second = await store.loadRemoteConversationPage({
+-      dirPath: root,
+-      conversationId,
+-      beforeUiOrder: first.page.nextBeforeUiOrder,
+-      pageSize: 2
+-    })
+-    assert.deepEqual(second.messages.map((message) => message.uiMessageId), ['ui-2', 'ui-3'])
+-    assert.equal(second.page.hasMore, true)
+-    assert.equal(second.page.nextBeforeUiOrder, 3)
+-
+-    const third = await store.loadRemoteConversationPage({
+-      dirPath: root,
+-      conversationId,
+-      beforeUiOrder: second.page.nextBeforeUiOrder,
+-      pageSize: 1000
+-    })
+-    assert.deepEqual(third.messages.map((message) => message.uiMessageId), ['ui-1'])
+-    assert.equal(third.page.pageSize, 100)
+-    assert.equal(third.page.hasMore, false)
+-    assert.equal(third.page.nextBeforeUiOrder, null)
+-
+-    assert.equal(readActiveLease(created.databasePath), null)
+-    console.log(JSON.stringify({ ok: true, suite: 'remote-conversation-read', conversationId }))
+-  } finally {
+-    await fs.rm(root, { recursive: true, force: true })
+-  }
+-}
+-
+-main().catch((error) => {
+-  console.error(error?.stack || error)
+-  process.exitCode = 1
+-})
+diff --git a/tests/remote-conversation-service.test.mjs b/tests/remote-conversation-service.test.mjs
+deleted file mode 100644
+index 274547c..0000000
+--- a/tests/remote-conversation-service.test.mjs
++++ /dev/null
+@@ -1,156 +0,0 @@
+-import assert from 'node:assert/strict'
+-import { createRemoteConversationReadService } from '../main/core/remote/conversationRead.js'
+-
+-function expectCode(operation, code) {
+-  return assert.rejects(operation, (error) => error?.code === code)
+-}
+-
+-async function main() {
+-  const messageCalls = []
+-  const localFiles = [
+-    {
+-      format: 'sqlite',
+-      conversationId: 'conversation-fixture-000000000001',
+-      title: 'Newest',
+-      revision: 7,
+-      size: 200,
+-      createdAt: '2026-01-01T00:00:00.000Z',
+-      updatedAt: '2026-01-03T00:00:00.000Z'
+-    },
+-    {
+-      format: 'json',
+-      basename: 'legacy.json',
+-      filename: 'legacy.json',
+-      title: 'Legacy',
+-      size: 100,
+-      createdAt: '2025-01-01T00:00:00.000Z',
+-      updatedAt: '2026-01-02T00:00:00.000Z'
+-    },
+-    {
+-      format: 'sqlite',
+-      conversationId: 'conversation-fixture-000000000002',
+-      title: 'Oldest',
+-      revision: 2,
+-      size: 150,
+-      createdAt: '2024-01-01T00:00:00.000Z',
+-      updatedAt: '2026-01-01T00:00:00.000Z'
+-    }
+-  ]
+-  const service = createRemoteConversationReadService({
+-    getConfig: async () => ({ config: { webdav: { localChatPath: 'E:/DesktopOnly/Chats' } } }),
+-    listLocalConversations: async (dirPath) => {
+-      assert.equal(dirPath, 'E:/DesktopOnly/Chats')
+-      return localFiles
+-    },
+-    readLocalProjects: async (dirPath) => {
+-      assert.equal(dirPath, 'E:/DesktopOnly/Chats')
+-      return {
+-        projects: [
+-          {
+-            id: 'project-one',
+-            name: 'Project One',
+-            conversationIds: ['conversation-fixture-000000000001'],
+-            files: ['legacy.json']
+-          }
+-        ]
+-      }
+-    },
+-    loadRemoteConversationPage: async (input) => {
+-      messageCalls.push(input)
+-      return { ok: true, conversation: { conversationId: input.conversationId }, messages: [], page: { hasMore: false } }
+-    },
+-    listWindows: () => [
+-      {
+-        id: 'window-fixture-1',
+-        type: 'window',
+-        conversationId: 'conversation-fixture-000000000001',
+-        conversationTitle: 'Newest Live',
+-        conversationRevision: 8,
+-        visible: true,
+-        busy: true,
+-        generating: true,
+-        compacting: false,
+-        readOnly: false,
+-        leasePending: false,
+-        promptCode: 'AI',
+-        icon: 'data:image/png;base64,SHOULD_NOT_LEAK',
+-        dirPath: 'E:/DesktopOnly/Chats'
+-      },
+-      { id: 'window-no-conversation', type: 'window', displayName: 'Unsaved' }
+-    ]
+-  })
+-
+-  const first = await service.listConversations({ limit: 2 })
+-  assert.equal(first.configured, true)
+-  assert.equal(first.conversations.length, 2)
+-  assert.equal(first.conversations[0].conversationId, 'conversation-fixture-000000000001')
+-  assert.equal(first.conversations[0].window.busy, true)
+-  assert.equal(first.conversations[0].window.title, 'Newest Live')
+-  assert.equal(first.conversations[1].format, 'legacy-json')
+-  assert.equal(first.conversations[1].readable, false)
+-  assert.equal(first.conversations[1].migrationRequired, true)
+-  assert.match(first.conversations[1].conversationId, /^legacy_[a-f0-9]{32}$/)
+-  assert.deepEqual(first.projects, [{
+-    projectId: 'project-one',
+-    name: 'Project One',
+-    conversationIds: [
+-      'conversation-fixture-000000000001',
+-      first.conversations[1].conversationId
+-    ]
+-  }])
+-  assert.equal(first.page.hasMore, true)
+-  assert.equal(typeof first.page.nextCursor, 'string')
+-  const serialized = JSON.stringify(first)
+-  for (const forbidden of ['E:/DesktopOnly/Chats', 'data:image/png', 'dirPath', 'dbFile', 'legacyJson']) {
+-    assert.equal(serialized.includes(forbidden), false, `conversation list leaked: ${forbidden}`)
+-  }
+-
+-  const second = await service.listConversations({ limit: 2, cursor: first.page.nextCursor })
+-  assert.deepEqual(second.conversations.map((item) => item.conversationId), ['conversation-fixture-000000000002'])
+-  assert.equal(second.page.hasMore, false)
+-
+-  await expectCode(() => service.listConversations({ dirPath: 'C:/attacker' }), 'remote_path_parameter_forbidden')
+-  await expectCode(() => service.listConversations({ unexpected: true }), 'remote_parameter_unknown')
+-  await expectCode(async () => service.getWindows({ includeSecrets: true }), 'remote_parameter_unknown')
+-  await expectCode(() => service.listMessages({
+-    conversationId: 'conversation-fixture-000000000001',
+-    path: 'C:/attacker'
+-  }), 'remote_path_parameter_forbidden')
+-  await expectCode(() => service.listMessages({
+-    conversationId: first.conversations[1].conversationId
+-  }), 'remote_conversation_migration_required')
+-
+-  const messages = await service.listMessages({
+-    conversationId: 'conversation-fixture-000000000001',
+-    beforeUiOrder: 10,
+-    pageSize: 25
+-  })
+-  assert.equal(messages.ok, true)
+-  assert.deepEqual(messageCalls, [{
+-    dirPath: 'E:/DesktopOnly/Chats',
+-    conversationId: 'conversation-fixture-000000000001',
+-    beforeUiOrder: 10,
+-    pageSize: 25
+-  }])
+-
+-  const unconfigured = createRemoteConversationReadService({
+-    getConfig: async () => ({ config: { webdav: { localChatPath: '' } } }),
+-    listLocalConversations: async () => { throw new Error('should_not_list') },
+-    readLocalProjects: async () => ({ projects: [] }),
+-    loadRemoteConversationPage: async () => { throw new Error('should_not_load') },
+-    listWindows: () => []
+-  })
+-  const empty = await unconfigured.listConversations({})
+-  assert.equal(empty.configured, false)
+-  assert.deepEqual(empty.conversations, [])
+-  await expectCode(() => unconfigured.listMessages({
+-    conversationId: 'conversation-fixture-000000000001'
+-  }), 'remote_conversation_directory_not_configured')
+-
+-  console.log(JSON.stringify({ ok: true, suite: 'remote-conversation-service' }))
+-}
+-
+-main().catch((error) => {
+-  console.error(error?.stack || error)
+-  process.exitCode = 1
+-})
+diff --git a/tests/remote-crypto.test.mjs b/tests/remote-crypto.test.mjs
+deleted file mode 100644
+index c13d36d..0000000
+--- a/tests/remote-crypto.test.mjs
++++ /dev/null
+@@ -1,223 +0,0 @@
+-import assert from 'node:assert/strict'
+-import {
+-  acceptSessionHello,
+-  completeDevicePairing,
+-  completeSessionHello,
+-  createDesktopPairingResponse,
+-  createP256KeyPair,
+-  createPairingStartEnvelope,
+-  createSessionHello,
+-  openDesktopPairingStart,
+-  publicKeyFromPrivate,
+-  verifyPairingProof
+-} from '../main/core/remote/cryptoSession.js'
+-import {
+-  REMOTE_PROTOCOL_VERSION,
+-  normalizeRemoteSettings,
+-  remoteError
+-} from '../main/core/remote/protocol.js'
+-
+-function expectCode(callback, code) {
+-  assert.throws(callback, (error) => error?.code === code)
+-}
+-
+-function buildPairingFixture() {
+-  const desktop = createP256KeyPair()
+-  const device = createP256KeyPair()
+-  const clientEphemeral = createP256KeyPair()
+-  const context = {
+-    pairingId: 'pairing-remote-v2-fixture-0001',
+-    pairingChallenge: 'Q2hhbmdlTWUtcmVtb3RlLXYyLWNoYWxsZW5nZQ',
+-    desktopId: 'desktop-remote-v2-fixture-0001'
+-  }
+-
+-  const desktopResponse = createDesktopPairingResponse({
+-    desktopPrivateKey: desktop.privateKey,
+-    desktopPublicKey: desktop.publicKey,
+-    devicePublicKey: device.publicKey,
+-    clientEphemeralPublicKey: clientEphemeral.publicKey,
+-    context
+-  })
+-  const deviceResponse = completeDevicePairing({
+-    devicePrivateKey: device.privateKey,
+-    desktopPublicKey: desktop.publicKey,
+-    serverEphemeralPublicKey: desktopResponse.serverEphemeralPublicKey,
+-    clientEphemeralPrivateKey: clientEphemeral.privateKey,
+-    devicePublicKey: device.publicKey,
+-    context,
+-    desktopProof: desktopResponse.desktopProof
+-  })
+-
+-  return { desktop, device, clientEphemeral, context, desktopResponse, deviceResponse }
+-}
+-
+-function createConnectedSessions({ rootSecret, deviceId, desktopId }) {
+-  const clientHandshake = createSessionHello({ rootSecret, deviceId, desktopId })
+-  const accepted = acceptSessionHello({
+-    rootSecret,
+-    hello: clientHandshake.hello,
+-    expectedDeviceId: deviceId,
+-    expectedDesktopId: desktopId
+-  })
+-  const deviceSession = completeSessionHello({
+-    state: clientHandshake.state,
+-    accept: accepted.accept,
+-    expectedDeviceId: deviceId,
+-    expectedDesktopId: desktopId
+-  })
+-  return { clientHandshake, accepted, deviceSession }
+-}
+-
+-function run() {
+-  const fixture = buildPairingFixture()
+-  const desktopRootSecret = fixture.desktopResponse.secrets.rootSecret.toString('base64url')
+-  assert.equal(desktopRootSecret, fixture.deviceResponse.rootSecret)
+-  assert.equal(fixture.desktopResponse.transcriptHash, fixture.deviceResponse.transcriptHash)
+-  assert.equal(
+-    verifyPairingProof({
+-      rootSecret: fixture.desktopResponse.secrets.rootSecret,
+-      transcript: fixture.desktopResponse.secrets.transcript,
+-      role: 'device',
+-      proof: fixture.deviceResponse.deviceProof
+-    }),
+-    true,
+-    'device proof must verify only against the exact pairing transcript'
+-  )
+-  assert.equal(
+-    verifyPairingProof({
+-      rootSecret: fixture.desktopResponse.secrets.rootSecret,
+-      transcript: Buffer.from('tampered transcript', 'utf8'),
+-      role: 'device',
+-      proof: fixture.deviceResponse.deviceProof
+-    }),
+-    false,
+-    'proof must bind the exact transcript'
+-  )
+-
+-  const pairStart = createPairingStartEnvelope({
+-    desktopPublicKey: fixture.desktop.publicKey,
+-    clientEphemeralPrivateKey: fixture.clientEphemeral.privateKey,
+-    context: fixture.context,
+-    pairingCode: '123 456',
+-    device: {
+-      deviceId: 'device-remote-v2-fixture-0001',
+-      displayName: 'Fixture Phone',
+-      platform: 'android',
+-      appVersion: 'test',
+-      publicKey: fixture.device.publicKey
+-    }
+-  })
+-  assert.equal(JSON.stringify(pairStart).includes('123456'), false, 'pair-start must not expose the human code')
+-  const openedPairStart = openDesktopPairingStart({
+-    desktopPrivateKey: fixture.desktop.privateKey,
+-    desktopPublicKey: fixture.desktop.publicKey,
+-    context: fixture.context,
+-    input: pairStart
+-  })
+-  assert.equal(openedPairStart.pairingCode, '123456')
+-  assert.equal(openedPairStart.device.deviceId, 'device-remote-v2-fixture-0001')
+-  const tamperedPairStart = { ...pairStart, tag: `${pairStart.tag.slice(0, -1)}${pairStart.tag.endsWith('A') ? 'B' : 'A'}` }
+-  expectCode(() => openDesktopPairingStart({
+-    desktopPrivateKey: fixture.desktop.privateKey,
+-    desktopPublicKey: fixture.desktop.publicKey,
+-    context: fixture.context,
+-    input: tamperedPairStart
+-  }), 'remote_frame_auth_failed')
+-
+-
+-  const deviceId = 'device-remote-v2-fixture-0001'
+-  const { accepted, deviceSession } = createConnectedSessions({
+-    rootSecret: fixture.deviceResponse.rootSecret,
+-    deviceId,
+-    desktopId: fixture.context.desktopId
+-  })
+-
+-  const encryptedRequest = deviceSession.encrypt({
+-    kind: 'request',
+-    method: 'remote.status.get',
+-    params: { includeDevices: true },
+-    requestId: 'request-remote-v2-fixture-0001'
+-  })
+-  assert.equal(encryptedRequest.v, REMOTE_PROTOCOL_VERSION)
+-  assert.deepEqual(accepted.session.decrypt(encryptedRequest), {
+-    kind: 'request',
+-    method: 'remote.status.get',
+-    params: { includeDevices: true },
+-    requestId: 'request-remote-v2-fixture-0001'
+-  })
+-  expectCode(() => accepted.session.decrypt(encryptedRequest), 'remote_frame_replayed')
+-
+-  const encryptedResponse = accepted.session.encrypt({
+-    kind: 'response',
+-    ok: true,
+-    result: { running: true }
+-  })
+-  assert.deepEqual(deviceSession.decrypt(encryptedResponse), {
+-    kind: 'response',
+-    ok: true,
+-    result: { running: true }
+-  })
+-
+-  // A rejected oversize send must not consume a sequence number.
+-  const sequenceConnection = createConnectedSessions({
+-    rootSecret: fixture.deviceResponse.rootSecret,
+-    deviceId,
+-    desktopId: fixture.context.desktopId
+-  })
+-  expectCode(() => sequenceConnection.deviceSession.encrypt({ content: 'x'.repeat(300 * 1024) }), 'remote_payload_size_invalid')
+-  const postFailureFrame = sequenceConnection.deviceSession.encrypt({ kind: 'request', method: 'remote.ping', requestId: 'request-sequence-safe-0001' })
+-  assert.equal(postFailureFrame.sequence, 1)
+-  assert.equal(sequenceConnection.accepted.session.decrypt(postFailureFrame).method, 'remote.ping')
+-
+-  // A fresh WSS connection uses new ephemeral key material even for the same paired device.
+-  const nextConnection = createConnectedSessions({
+-    rootSecret: fixture.deviceResponse.rootSecret,
+-    deviceId,
+-    desktopId: fixture.context.desktopId
+-  })
+-  const oldFrame = deviceSession.encrypt({ kind: 'request', method: 'remote.ping', requestId: 'request-old-session-0001' })
+-  expectCode(() => nextConnection.accepted.session.decrypt(oldFrame), 'remote_session_mismatch')
+-
+-  // Authentication failures and sequence gaps intentionally require a new transport session.
+-  const failureConnection = createConnectedSessions({
+-    rootSecret: fixture.deviceResponse.rootSecret,
+-    deviceId,
+-    desktopId: fixture.context.desktopId
+-  })
+-  const tampered = failureConnection.deviceSession.encrypt({ kind: 'request', method: 'remote.status.get', requestId: 'request-tampered-0001' })
+-  tampered.tag = `${tampered.tag.slice(0, -1)}${tampered.tag.endsWith('A') ? 'B' : 'A'}`
+-  expectCode(() => failureConnection.accepted.session.decrypt(tampered), 'remote_frame_auth_failed')
+-  const nextFrame = failureConnection.deviceSession.encrypt({ kind: 'request', method: 'remote.status.get', requestId: 'request-after-tamper-0001' })
+-  expectCode(() => failureConnection.accepted.session.decrypt(nextFrame), 'remote_frame_out_of_order')
+-
+-  const orderConnection = createConnectedSessions({
+-    rootSecret: fixture.deviceResponse.rootSecret,
+-    deviceId,
+-    desktopId: fixture.context.desktopId
+-  })
+-  const orderFrame = orderConnection.deviceSession.encrypt({ kind: 'request', method: 'remote.status.get', requestId: 'request-order-0001' })
+-  const outOfOrder = { ...orderFrame, sequence: orderFrame.sequence + 1 }
+-  expectCode(() => orderConnection.accepted.session.decrypt(outOfOrder), 'remote_frame_out_of_order')
+-  assert.deepEqual(orderConnection.accepted.session.decrypt(orderFrame), {
+-    kind: 'request',
+-    method: 'remote.status.get',
+-    requestId: 'request-order-0001'
+-  })
+-
+-  assert.equal(publicKeyFromPrivate(fixture.desktop.privateKey), fixture.desktop.publicKey)
+-  assert.deepEqual(normalizeRemoteSettings({ remote: { enabled: true, host: '', port: 17860 } }), {
+-    enabled: true,
+-    host: '0.0.0.0',
+-    port: 17860,
+-    publicEndpoint: ''
+-  })
+-  assert.equal(remoteError('fixture').code, 'fixture')
+-
+-  accepted.session.close()
+-  deviceSession.close()
+-  expectCode(() => deviceSession.encrypt({ kind: 'request', method: 'after.close', requestId: 'request-after-close-0001' }), 'remote_session_closed')
+-
+-  console.log(JSON.stringify({ ok: true, suite: 'remote-crypto', protocolVersion: REMOTE_PROTOCOL_VERSION }))
+-}
+-
+-run()
+diff --git a/tests/remote-gateway.test.mjs b/tests/remote-gateway.test.mjs
+deleted file mode 100644
+index f441e00..0000000
+--- a/tests/remote-gateway.test.mjs
++++ /dev/null
+@@ -1,445 +0,0 @@
+-import assert from 'node:assert/strict'
+-import crypto from 'node:crypto'
+-import https from 'node:https'
+-import { once } from 'node:events'
+-import { WebSocket } from 'ws'
+-import { createRemoteGateway } from '../main/core/remote/index.js'
+-import {
+-  completeDevicePairing,
+-  completeSessionHello,
+-  createP256KeyPair,
+-  createPairingStartEnvelope,
+-  createSessionHello
+-} from '../main/core/remote/cryptoSession.js'
+-
+-function createMemorySecureStorage() {
+-  const key = crypto.randomBytes(32)
+-  return {
+-    isEncryptionAvailable: () => true,
+-    encryptString(value) {
+-      const nonce = crypto.randomBytes(12)
+-      const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce)
+-      const body = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()])
+-      return Buffer.concat([nonce, cipher.getAuthTag(), body])
+-    },
+-    decryptString(buffer) {
+-      const data = Buffer.from(buffer)
+-      const nonce = data.subarray(0, 12)
+-      const tag = data.subarray(12, 28)
+-      const body = data.subarray(28)
+-      const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce)
+-      decipher.setAuthTag(tag)
+-      return Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8')
+-    }
+-  }
+-}
+-
+-function createStorage() {
+-  const map = new Map()
+-  return {
+-    async get(key, fallback) {
+-      return { ok: true, value: map.has(key) ? structuredClone(map.get(key)) : structuredClone(fallback) }
+-    },
+-    async set(key, value) {
+-      map.set(key, structuredClone(value))
+-      return { ok: true, key }
+-    }
+-  }
+-}
+-
+-async function findFreePort() {
+-  const server = https.createServer()
+-  server.listen(0, '127.0.0.1')
+-  await once(server, 'listening')
+-  const address = server.address()
+-  await new Promise((resolve) => server.close(resolve))
+-  return address.port
+-}
+-
+-function requestSelfSignedJson({ url, method = 'GET', body = null }) {
+-  return new Promise((resolve, reject) => {
+-    const target = new URL(url)
+-    const text = body ? JSON.stringify(body) : ''
+-    const request = https.request({
+-      hostname: target.hostname,
+-      port: target.port,
+-      path: `${target.pathname}${target.search}`,
+-      method,
+-      rejectUnauthorized: false,
+-      headers: body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) } : undefined
+-    }, (response) => {
+-      const chunks = []
+-      response.on('data', (chunk) => chunks.push(chunk))
+-      response.on('end', () => {
+-        try {
+-          resolve({ status: response.statusCode || 0, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+-        } catch (error) {
+-          reject(error)
+-        }
+-      })
+-    })
+-    request.on('error', reject)
+-    request.end(text || undefined)
+-  })
+-}
+-
+-function waitForMessage(socket, predicate, timeoutMs = 5000) {
+-  return new Promise((resolve, reject) => {
+-    const timer = setTimeout(() => {
+-      cleanup()
+-      reject(new Error('timed_out_waiting_for_websocket_message'))
+-    }, timeoutMs)
+-    const onMessage = (raw) => {
+-      try {
+-        const parsed = JSON.parse(raw.toString())
+-        if (!predicate(parsed)) return
+-        cleanup()
+-        resolve(parsed)
+-      } catch {
+-        // Ignore unrelated malformed frames in this isolated test transport.
+-      }
+-    }
+-    const onError = (error) => {
+-      cleanup()
+-      reject(error)
+-    }
+-    const cleanup = () => {
+-      clearTimeout(timer)
+-      socket.off('message', onMessage)
+-      socket.off('error', onError)
+-    }
+-    socket.on('message', onMessage)
+-    socket.on('error', onError)
+-  })
+-}
+-
+-async function connectEncrypted({ endpoint, rootSecret, deviceId, desktopId }) {
+-  const socket = new WebSocket(`${endpoint.replace(/^https:/, 'wss:')}/api/v2/socket`, { rejectUnauthorized: false })
+-  await once(socket, 'open')
+-  const clientHandshake = createSessionHello({ rootSecret, deviceId, desktopId })
+-  socket.send(JSON.stringify(clientHandshake.hello))
+-  const accept = await waitForMessage(socket, (message) => message.type === 'remote.session.accept')
+-  const session = completeSessionHello({
+-    state: clientHandshake.state,
+-    accept,
+-    expectedDeviceId: deviceId,
+-    expectedDesktopId: desktopId
+-  })
+-  const welcomeFrame = await waitForMessage(socket, (message) => message.type === 'remote.encrypted')
+-  const welcome = session.decrypt(welcomeFrame)
+-  assert.equal(welcome.kind, 'event')
+-  assert.equal(welcome.event, 'remote.welcome', JSON.stringify(welcome))
+-  return { socket, session, welcome }
+-}
+-
+-async function sendEncryptedRequest({ socket, session, requestId, method, params = {} }) {
+-  const responsePromise = waitForMessage(socket, (message) => message.type === 'remote.encrypted')
+-  socket.send(JSON.stringify(session.encrypt({ kind: 'request', requestId, method, params })))
+-  return session.decrypt(await responsePromise)
+-}
+-
+-async function main() {
+-  const storage = createStorage()
+-  const port = await findFreePort()
+-  const app = {
+-    getPath: () => process.cwd(),
+-    getName: () => 'Anywhere Remote Test'
+-  }
+-  let observedPairing = null
+-  const conversationCalls = []
+-  const conversationReadService = {
+-    async listConversations(params = {}) {
+-      conversationCalls.push({ method: 'conversation.list', params: structuredClone(params) })
+-      if (Object.hasOwn(params, 'dirPath')) {
+-        const error = new Error('remote_path_parameter_forbidden')
+-        error.code = 'remote_path_parameter_forbidden'
+-        throw error
+-      }
+-      return {
+-        ok: true,
+-        configured: true,
+-        conversations: [{
+-          conversationId: 'conversation-gateway-fixture-0001',
+-          title: 'Gateway Fixture',
+-          revision: 3,
+-          format: 'sqlite'
+-        }],
+-        projects: [],
+-        page: { hasMore: false, nextCursor: null }
+-      }
+-    },
+-    async listMessages(params = {}) {
+-      conversationCalls.push({ method: 'conversation.messages.list', params: structuredClone(params) })
+-      return {
+-        ok: true,
+-        conversation: { conversationId: params.conversationId, title: 'Gateway Fixture', revision: 3 },
+-        messages: [{ messageId: 'message-1', role: 'user', order: 1, payload: { content: 'hello' } }],
+-        page: { hasMore: false, nextBeforeUiOrder: null }
+-      }
+-    },
+-    getWindows() {
+-      conversationCalls.push({ method: 'conversation.windows.list', params: {} })
+-      return {
+-        ok: true,
+-        windows: [{
+-          windowId: 'window-fixture',
+-          conversationId: 'conversation-gateway-fixture-0001',
+-          title: 'Gateway Fixture',
+-          revision: 3,
+-          visible: true,
+-          busy: false,
+-          generating: false,
+-          compacting: false,
+-          readOnly: false,
+-          leasePending: false,
+-          promptCode: 'AI'
+-        }]
+-      }
+-    }
+-  }
+-
+-  const gateway = createRemoteGateway({
+-    app,
+-    safeStorage: createMemorySecureStorage(),
+-    dbStorageGetItem: storage.get,
+-    dbStorageSetItem: storage.set,
+-    conversationReadService,
+-    onPairingCreated: (payload) => { observedPairing = payload },
+-    logger: { log() {}, warn() {}, error() {} }
+-  })
+-
+-  try {
+-    const started = await gateway.configure({ remote: { enabled: true, host: '127.0.0.1', port } })
+-    assert.equal(started.running, true)
+-    assert.equal(started.protocolVersion, 2)
+-    assert.equal(started.endpoints.length, 1)
+-    const endpoint = started.endpoints[0]
+-
+-    const health = await requestSelfSignedJson({ url: `${endpoint}/health` })
+-    assert.equal(health.status, 200)
+-    assert.equal(health.body.protocolVersion, 2)
+-
+-    const pairing = await gateway.createPairing()
+-    assert.equal(pairing.ok, true)
+-    assert.ok(observedPairing)
+-    assert.equal(Object.hasOwn(observedPairing, 'pairingCode'), false, 'QR payload must not contain the human confirmation code')
+-    assert.equal(pairing.qrDataUrl.includes(pairing.pairingCode.replace(/\s/g, '')), false, 'PNG transport must not contain the human code as plain text')
+-
+-    const device = createP256KeyPair()
+-    const clientEphemeral = createP256KeyPair()
+-    const deviceId = 'device-remote-gateway-fixture-0001'
+-    const deviceDescriptor = {
+-      deviceId,
+-      displayName: 'Test Phone',
+-      platform: 'android',
+-      appVersion: 'test',
+-      publicKey: device.publicKey
+-    }
+-    const startBody = createPairingStartEnvelope({
+-      desktopPublicKey: observedPairing.desktopIdentityPublicKey,
+-      clientEphemeralPrivateKey: clientEphemeral.privateKey,
+-      context: {
+-        pairingId: observedPairing.pairingId,
+-        pairingChallenge: observedPairing.pairingChallenge,
+-        desktopId: observedPairing.desktopId
+-      },
+-      pairingCode: pairing.pairingCode,
+-      device: deviceDescriptor
+-    })
+-    assert.equal(JSON.stringify(startBody).includes(pairing.pairingCode.replace(/\s/g, '')), false)
+-    assert.equal(JSON.stringify(startBody).includes(observedPairing.pairingChallenge), false)
+-    assert.equal(JSON.stringify(startBody).includes(device.publicKey), false)
+-
+-    const start = await requestSelfSignedJson({ url: `${endpoint}/api/v2/pair/start`, method: 'POST', body: startBody })
+-    assert.equal(start.status, 201, JSON.stringify(start.body))
+-    assert.equal(start.body.ok, true, JSON.stringify(start.body))
+-    assert.equal(start.body.desktopId, observedPairing.desktopId)
+-
+-    const mobilePairing = completeDevicePairing({
+-      devicePrivateKey: device.privateKey,
+-      desktopPublicKey: observedPairing.desktopIdentityPublicKey,
+-      serverEphemeralPublicKey: start.body.serverEphemeralPublicKey,
+-      clientEphemeralPrivateKey: clientEphemeral.privateKey,
+-      devicePublicKey: device.publicKey,
+-      context: {
+-        pairingId: observedPairing.pairingId,
+-        pairingChallenge: observedPairing.pairingChallenge,
+-        desktopId: observedPairing.desktopId
+-      },
+-      desktopProof: start.body.desktopProof
+-    })
+-
+-    const rejected = await requestSelfSignedJson({
+-      url: `${endpoint}/api/v2/pair/confirm`,
+-      method: 'POST',
+-      body: {
+-        v: 2,
+-        pairingId: observedPairing.pairingId,
+-        pairingAttemptId: start.body.pairingAttemptId,
+-        deviceId,
+-        deviceProof: `${mobilePairing.deviceProof.slice(0, -1)}${mobilePairing.deviceProof.endsWith('A') ? 'B' : 'A'}`
+-      }
+-    })
+-    assert.equal(rejected.status, 400)
+-    assert.equal(rejected.body.error, 'remote_pairing_proof_invalid')
+-
+-    // Start a fresh pairing after the deliberately rejected proof consumed the prior attempt.
+-    observedPairing = null
+-    const pairing2 = await gateway.createPairing()
+-    const qr2 = observedPairing
+-    const clientEphemeral2 = createP256KeyPair()
+-    const startBody2 = createPairingStartEnvelope({
+-      desktopPublicKey: qr2.desktopIdentityPublicKey,
+-      clientEphemeralPrivateKey: clientEphemeral2.privateKey,
+-      context: {
+-        pairingId: qr2.pairingId,
+-        pairingChallenge: qr2.pairingChallenge,
+-        desktopId: qr2.desktopId
+-      },
+-      pairingCode: pairing2.pairingCode,
+-      device: deviceDescriptor
+-    })
+-    const start2 = await requestSelfSignedJson({
+-      url: `${endpoint}/api/v2/pair/start`,
+-      method: 'POST',
+-      body: startBody2
+-    })
+-    assert.equal(start2.status, 201)
+-    const mobilePairing2 = completeDevicePairing({
+-      devicePrivateKey: device.privateKey,
+-      desktopPublicKey: qr2.desktopIdentityPublicKey,
+-      serverEphemeralPublicKey: start2.body.serverEphemeralPublicKey,
+-      clientEphemeralPrivateKey: clientEphemeral2.privateKey,
+-      devicePublicKey: device.publicKey,
+-      context: { pairingId: qr2.pairingId, pairingChallenge: qr2.pairingChallenge, desktopId: qr2.desktopId },
+-      desktopProof: start2.body.desktopProof
+-    })
+-    const confirm = await requestSelfSignedJson({
+-      url: `${endpoint}/api/v2/pair/confirm`,
+-      method: 'POST',
+-      body: {
+-        v: 2,
+-        pairingId: qr2.pairingId,
+-        pairingAttemptId: start2.body.pairingAttemptId,
+-        deviceId,
+-        deviceProof: mobilePairing2.deviceProof
+-      }
+-    })
+-    assert.equal(confirm.status, 201)
+-    assert.equal(confirm.body.ok, true)
+-
+-    const devices = await gateway.listDevices()
+-    assert.equal(devices.devices.length, 1)
+-    assert.equal(devices.devices[0].deviceId, deviceId)
+-
+-    const { socket, session, welcome } = await connectEncrypted({
+-      endpoint,
+-      rootSecret: mobilePairing2.rootSecret,
+-      deviceId,
+-      desktopId: qr2.desktopId
+-    })
+-    assert.ok(welcome.payload.capabilities.includes('conversation.list'))
+-    assert.ok(welcome.payload.capabilities.includes('conversation.messages.list'))
+-    assert.ok(welcome.payload.capabilities.includes('conversation.windows.list'))
+-
+-    const statusResponse = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-remote-gateway-status-0001',
+-      method: 'remote.status.get'
+-    })
+-    assert.equal(statusResponse.kind, 'response')
+-    assert.equal(statusResponse.result.device.deviceId, deviceId)
+-    assert.ok(statusResponse.result.capabilities.includes('conversation.list'))
+-
+-    const listResponse = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-conversation-list-0001',
+-      method: 'conversation.list',
+-      params: { limit: 20 }
+-    })
+-    assert.equal(listResponse.ok, true)
+-    assert.equal(listResponse.result.conversations[0].conversationId, 'conversation-gateway-fixture-0001')
+-
+-    const messagesResponse = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-conversation-messages-0001',
+-      method: 'conversation.messages.list',
+-      params: { conversationId: 'conversation-gateway-fixture-0001', pageSize: 25 }
+-    })
+-    assert.equal(messagesResponse.ok, true)
+-    assert.equal(messagesResponse.result.messages[0].payload.content, 'hello')
+-
+-    const windowsResponse = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-conversation-windows-0001',
+-      method: 'conversation.windows.list'
+-    })
+-    assert.equal(windowsResponse.ok, true)
+-    assert.equal(windowsResponse.result.windows[0].windowId, 'window-fixture')
+-
+-    const forbiddenResponse = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-conversation-forbidden-0001',
+-      method: 'conversation.list',
+-      params: { dirPath: 'C:/attacker' }
+-    })
+-    assert.equal(forbiddenResponse.ok, false)
+-    assert.equal(forbiddenResponse.error.code, 'remote_path_parameter_forbidden')
+-
+-    const pingAfterError = await sendEncryptedRequest({
+-      socket,
+-      session,
+-      requestId: 'request-ping-after-error-0001',
+-      method: 'remote.ping'
+-    })
+-    assert.equal(pingAfterError.ok, true)
+-
+-    const eventPromise = waitForMessage(socket, (message) => message.type === 'remote.encrypted')
+-    const broadcast = gateway.broadcastEvent('conversation.windows.changed', {
+-      reason: 'updated',
+-      windows: [{ windowId: 'window-fixture', conversationId: 'conversation-gateway-fixture-0001', busy: true }]
+-    })
+-    assert.equal(broadcast.sent, 1)
+-    const windowEvent = session.decrypt(await eventPromise)
+-    assert.equal(windowEvent.kind, 'event')
+-    assert.equal(windowEvent.event, 'conversation.windows.changed')
+-    assert.equal(windowEvent.payload.windows[0].busy, true)
+-
+-    assert.deepEqual(conversationCalls.map((item) => item.method), [
+-      'conversation.list',
+-      'conversation.messages.list',
+-      'conversation.windows.list',
+-      'conversation.list'
+-    ])
+-
+-    const revoked = await gateway.revokeDevice(deviceId)
+-    assert.equal(revoked.removed, true)
+-    const [closeCode] = await once(socket, 'close')
+-    assert.equal(closeCode, 4001)
+-    session.close()
+-
+-    const audit = await gateway.getAuditLog()
+-    assert.ok(audit.entries.some((entry) => entry.type === 'remote.device.paired'))
+-    assert.ok(audit.entries.every((entry) => !JSON.stringify(entry).includes(mobilePairing2.rootSecret)))
+-
+-    const stopped = await gateway.configure({ remote: { enabled: false, host: '127.0.0.1', port, publicEndpoint: 'https://tunnel.example.test' } })
+-    assert.equal(stopped.running, false)
+-    assert.equal(stopped.enabled, false)
+-    assert.equal(stopped.port, port)
+-    assert.equal(stopped.publicEndpoint, 'https://tunnel.example.test')
+-
+-    console.log(JSON.stringify({ ok: true, suite: 'remote-gateway', protocolVersion: 2 }))
+-  } finally {
+-    await gateway.stop()
+-  }
+-}
+-
+-main().catch((error) => {
+-  console.error(error?.stack || error)
+-  process.exitCode = 1
+-})
