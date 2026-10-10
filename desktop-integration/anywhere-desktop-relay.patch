@@ -6406,7 +6406,7 @@ index b31cec8..071a54b 100644
    global-agent@3.0.0:
      resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
 diff --git a/preload/main_preload.js b/preload/main_preload.js
-index a1872a6..f9f75db 100644
+index a1872a6..3818926 100644
 --- a/preload/main_preload.js
 +++ b/preload/main_preload.js
 @@ -67,22 +67,6 @@ const api = {
@@ -6447,6 +6447,18 @@ index a1872a6..f9f75db 100644
  
  getDroppedFilePath: (file) => {
      try {
+@@ -348,6 +340,11 @@ getDroppedFilePath: (file) => {
+   onAlwaysOnTopChanged: (callback) => {
+     if (typeof callback !== 'function') return
+     electronAPI.ipcRenderer.on('window:alwaysOnTopChanged', (_event, payload) => callback(payload))
++  },
++  onConfigUpdated: (callback) => {
++    if (typeof callback !== 'function') return
++    electronAPI.ipcRenderer.on('window:configUpdated', (_event, newConfig) => callback(newConfig))
++    electronAPI.ipcRenderer.on('config-updated', (_event, newConfig) => callback(newConfig))
+   }
+ }
+ 
 diff --git a/preload/window_preload.js b/preload/window_preload.js
 index 03cfac5..4c9d2ca 100644
 --- a/preload/window_preload.js
@@ -6468,7 +6480,7 @@ index 03cfac5..4c9d2ca 100644
      if (typeof callback !== 'function') return
      electronAPI.ipcRenderer.on('window:event-bus', (_event, data) => callback(data))
 diff --git a/render/main/App.vue b/render/main/App.vue
-index 8f724d1..5b0030e 100644
+index 8f724d1..fdbbf50 100644
 --- a/render/main/App.vue
 +++ b/render/main/App.vue
 @@ -7,10 +7,9 @@ import Mcp from './components/Mcp.vue'
@@ -6510,7 +6522,22 @@ index 8f724d1..5b0030e 100644
  
      // 等待 DOM 更新后，将滚动条回到顶部
      nextTick(() => {
-@@ -978,11 +979,6 @@ watch(locale, () => {
+@@ -885,6 +886,14 @@ onMounted(async () => {
+     }
+   });
+ 
++  // 手机新建/修改定时任务会直接改配置。主窗口以前只在启动时读一次，
++  // 所以任务页一直停在旧列表上，看起来像「电脑端没反应」。
++  window.api?.onConfigUpdated?.((next) => {
++    if (!next || typeof next !== 'object') return;
++    config.value = normalizeConfigPayload({ config: next });
++    applyDocumentTheme(resolveDocumentDarkMode(config.value));
++  });
++
+   window.addEventListener('keydown', handleGlobalEsc, true);
+   mediaQuery.addEventListener('change', handleSystemThemeChange);
+   try {
+@@ -978,11 +987,6 @@ watch(locale, () => {
                </el-badge>
              </el-button>
            </el-tooltip>
@@ -6522,7 +6549,7 @@ index 8f724d1..5b0030e 100644
          </el-col>
  
          <el-col :span="12" class="header-title-col">
-@@ -1099,7 +1095,6 @@ watch(locale, () => {
+@@ -1099,7 +1103,6 @@ watch(locale, () => {
        </KeepAlive>
      </el-main>
  
@@ -7203,6 +7230,35 @@ index 23ba179..b845918 100644
                  </div>
                </el-collapse-transition>
              </div>
+diff --git a/render/main/components/Tasks.vue b/render/main/components/Tasks.vue
+index e783dcb..23c5233 100644
+--- a/render/main/components/Tasks.vue
++++ b/render/main/components/Tasks.vue
+@@ -171,12 +171,18 @@ onDeactivated(() => {
+     window.removeEventListener('keydown', handleGlobalKeyDown);
+ });
+ 
+-watch(() => currentConfig.value?.tasks, (newTasks) => {
+-    if (newTasks && !activeTaskId.value) {
+-        const taskIds = Object.keys(newTasks);
+-        if (taskIds.length > 0) {
+-            activeTaskId.value = taskIds[0];
+-        }
++watch(() => currentConfig.value?.tasks, (newTasks, oldTasks) => {
++    const ids = Object.keys(newTasks || {});
++    const prev = new Set(Object.keys(oldTasks || {}));
++    const added = ids.filter((id) => !prev.has(id));
++    if (added.length > 0) {
++        activeTaskId.value = added[added.length - 1];
++        return;
++    }
++    if (activeTaskId.value && newTasks && !newTasks[activeTaskId.value]) {
++        activeTaskId.value = ids[0] || null;
++    } else if (!activeTaskId.value && ids.length > 0) {
++        activeTaskId.value = ids[0];
+     }
+ }, { deep: true });
+ 
 diff --git a/render/window/App.vue b/render/window/App.vue
 index 68ac2ff..98eee77 100644
 --- a/render/window/App.vue
