@@ -332,12 +332,12 @@ void main() {
       expect(t.historyCount, 0);
     });
 
-    test('weeklyDays 里的脏数据被过滤', () {
+    test('weeklyDays 保留周日 0，脏数据被过滤', () {
       final t = TaskOption.fromJson({
         'id': 'x',
         'weeklyDays': [0, 2, null, 'bad'],
       });
-      expect(t.weeklyDays, [2]);
+      expect(t.weeklyDays, [0, 2]);
     });
 
     test('删除单个任务的消息后仍能解析', () {
