@@ -54,6 +54,9 @@ class AppState extends ChangeNotifier {
   /// 电脑端项目的名字列表（用于列表分组）
   List<String> conversationProjects = const [];
 
+  /// 定时任务「保存到」用的项目（id + 名字）
+  List<Map<String, String>> taskProjects = const [];
+
   /// 某个会话的消息（会话详情页看）
   /// 每个会话各自一份消息列表，按 conversationId 隔离。
   ///
@@ -1174,6 +1177,17 @@ class AppState extends ChangeNotifier {
     return _sendTaskManage({'op': 'clearHistory', 'taskId': taskId});
   }
 
+  void _applyTaskProjects(Map<String, dynamic> decoded) {
+    final projs = (decoded['projects'] as List?) ?? const [];
+    taskProjects = projs.whereType<Map>().map((e) {
+      final m = e.cast<String, dynamic>();
+      return {
+        'id': (m['id'] ?? '').toString(),
+        'name': (m['name'] ?? m['id'] ?? '').toString(),
+      };
+    }).where((p) => p['id']!.isNotEmpty).toList();
+  }
+
   bool _sendTaskManage(Map<String, dynamic> body) {
     return _client.send(Envelope(
       type: MsgType.chat,
@@ -1364,6 +1378,7 @@ class AppState extends ChangeNotifier {
             .map((e) => TaskOption.fromJson((e as Map).cast<String, dynamic>()))
             .where((t) => t.id.isNotEmpty)
             .toList();
+        _applyTaskProjects(decoded);
         loadingTasks = false;
         notifyListeners();
       } catch (e) {
@@ -1659,6 +1674,7 @@ class AppState extends ChangeNotifier {
             .where((t) => t.id.isNotEmpty)
             .toList();
         tasks = next;
+        _applyTaskProjects(decoded);
         capabilities = capabilities.withTasks(next);
         loadingTasks = false;
         notifyListeners();

@@ -1102,6 +1102,7 @@ class TaskOption {
   final String triggerType;
   final int intervalMinutes;
   final String intervalStartTime;
+  final List<List<String>> intervalTimeRanges;
   final String dailyTime;
   final List<int> weeklyDays;
   final String weeklyTime;
@@ -1109,6 +1110,11 @@ class TaskOption {
   final String monthlyTime;
   final String singleDate;
   final String singleTime;
+  final List<String> extraMcp;
+  final List<String> extraSkills;
+  final bool autoSave;
+  final String autoSaveProjectId;
+  final bool autoClose;
   final int historyCount;
 
   TaskOption({
@@ -1123,6 +1129,7 @@ class TaskOption {
     this.triggerType = 'interval',
     this.intervalMinutes = 60,
     this.intervalStartTime = '00:00',
+    this.intervalTimeRanges = const [],
     this.dailyTime = '12:00',
     this.weeklyDays = const [1, 2, 3, 4, 5],
     this.weeklyTime = '12:00',
@@ -1130,8 +1137,31 @@ class TaskOption {
     this.monthlyTime = '12:00',
     this.singleDate = '',
     this.singleTime = '12:00',
+    this.extraMcp = const [],
+    this.extraSkills = const [],
+    this.autoSave = true,
+    this.autoSaveProjectId = '',
+    this.autoClose = false,
     this.historyCount = 0,
   });
+
+  static List<String> _strList(dynamic v) {
+    if (v is! List) return const [];
+    return v.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+  }
+
+  static List<List<String>> _ranges(dynamic v) {
+    if (v is! List) return const [];
+    final out = <List<String>>[];
+    for (final e in v) {
+      if (e is List && e.length >= 2) {
+        final a = e[0].toString();
+        final b = e[1].toString();
+        if (a.isNotEmpty && b.isNotEmpty) out.add([a, b]);
+      }
+    }
+    return out;
+  }
 
   static List<int> _intList(dynamic v) {
     if (v is! List) return const [];
@@ -1139,7 +1169,7 @@ class TaskOption {
     for (final e in v) {
       // 不能直接 as num?，脏数据（字符串）会抛类型错误
       final n = e is num ? e.toInt() : int.tryParse(e?.toString() ?? '');
-      if (n != null && n > 0) out.add(n);
+      if (n != null && n >= 0) out.add(n);
     }
     return out;
   }
@@ -1156,6 +1186,7 @@ class TaskOption {
         triggerType: j['triggerType'] as String? ?? 'interval',
         intervalMinutes: (j['intervalMinutes'] as num?)?.toInt() ?? 60,
         intervalStartTime: j['intervalStartTime'] as String? ?? '00:00',
+        intervalTimeRanges: _ranges(j['intervalTimeRanges']),
         dailyTime: j['dailyTime'] as String? ?? '12:00',
         weeklyDays: _intList(j['weeklyDays']),
         weeklyTime: j['weeklyTime'] as String? ?? '12:00',
@@ -1163,6 +1194,11 @@ class TaskOption {
         monthlyTime: j['monthlyTime'] as String? ?? '12:00',
         singleDate: j['singleDate'] as String? ?? '',
         singleTime: j['singleTime'] as String? ?? '12:00',
+        extraMcp: _strList(j['extraMcp']),
+        extraSkills: _strList(j['extraSkills']),
+        autoSave: j['autoSave'] as bool? ?? true,
+        autoSaveProjectId: j['autoSaveProjectId'] as String? ?? '',
+        autoClose: j['autoClose'] as bool? ?? false,
         historyCount: (j['historyCount'] as num?)?.toInt() ?? 0,
       );
 }

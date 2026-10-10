@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/models.dart';
 import '../services/app_state.dart';
+import 'task_editor_page.dart';
 
 /// 定时任务：查看 / 新建 / 改名 / 启停 / 改调度 / 立即运行 / 清空历史 / 删除。
 ///
@@ -297,16 +298,10 @@ class _TasksPageState extends State<TasksPage> {
             ),
             ListTile(
               dense: true,
-              leading: const Icon(Icons.schedule),
-              title: const Text('修改调度'),
+              leading: const Icon(Icons.tune),
+              title: const Text('编辑任务'),
               subtitle: Text(t.schedule, style: const TextStyle(fontSize: 11.5)),
-              onTap: () => Navigator.pop(ctx, 'schedule'),
-            ),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.auto_awesome_outlined),
-              title: const Text('换助手 / 改说明'),
-              onTap: () => Navigator.pop(ctx, 'prompt'),
+              onTap: () => Navigator.pop(ctx, 'edit'),
             ),
             ListTile(
               dense: true,
@@ -334,10 +329,10 @@ class _TasksPageState extends State<TasksPage> {
         state.setTaskEnabled(t.id, !t.enabled);
       case 'rename':
         await _rename(context, state, t);
-      case 'schedule':
-        await _editSchedule(context, state, t);
-      case 'prompt':
-        await _editAssistant(context, state, t);
+      case 'edit':
+        await Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => TaskEditorPage(task: t),
+        ));
       case 'clearHistory':
         await _clearHistory(context, state, t);
       case 'delete':
@@ -456,209 +451,6 @@ class _TasksPageState extends State<TasksPage> {
       return null;
     }
     return res;
-  }
-
-  // ------------------------------------------------------------ 改调度（简化版）
-
-  Future<void> _editSchedule(
-      BuildContext context, AppState state, TaskOption t) async {
-    var type = t.triggerType.isEmpty ? 'interval' : t.triggerType;
-    final intervalCtrl =
-        TextEditingController(text: t.intervalMinutes.toString());
-    final dailyCtrl = TextEditingController(text: t.dailyTime);
-    final descCtrl = TextEditingController(text: t.description);
-
-    final save = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          title: const Text('修改调度'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 用 Wrap + ChoiceChip 而不是 DropdownButtonFormField：
-                // 后者在 Flutter 3.35 把 value 改名成了 initialValue，
-                // 两边都传会有 deprecation/编译风险，这里直接绕开。
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('触发方式', style: TextStyle(fontSize: 12)),
-                ),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: <(String, String)>[
-                    ('interval', '每隔一段时间'),
-                    ('daily', '每天固定时刻'),
-                    ('weekly', '每周'),
-                    ('monthly', '每月'),
-                    ('single', '仅一次'),
-                  ]
-                      .map((e) => ChoiceChip(
-                            label: Text(e.$2, style: const TextStyle(fontSize: 12)),
-                            selected: type == e.$1,
-                            onSelected: (_) => setLocal(() => type = e.$1),
-                          ))
-                      .toList(),
-                ),
-                if (type == 'interval') ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: intervalCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                        labelText: '间隔（分钟）', hintText: '60'),
-                  ),
-                ],
-                if (type == 'daily' ||
-                    type == 'weekly' ||
-                    type == 'monthly') ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: dailyCtrl,
-                    decoration:
-                        const InputDecoration(labelText: '时刻', hintText: '12:00'),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                TextField(
-                  controller: descCtrl,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                      labelText: '说明（可选）', hintText: '这个任务是干什么的'),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  '提示：更复杂的调度（每周几 / 每月几号 / 时间段）建议在电脑端设置。',
-                  style: TextStyle(fontSize: 11, color: Colors.white38, height: 1.4),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('取消')),
-            FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('保存')),
-          ],
-        ),
-      ),
-    );
-
-    if (save != true) {
-      intervalCtrl.dispose();
-      dailyCtrl.dispose();
-      descCtrl.dispose();
-      return;
-    }
-
-    final patch = <String, dynamic>{
-      'triggerType': type,
-      'description': descCtrl.text.trim(),
-    };
-    if (type == 'interval') {
-      final m = int.tryParse(intervalCtrl.text.trim());
-      if (m != null && m > 0) patch['intervalMinutes'] = m;
-    }
-    if (type == 'daily') patch['dailyTime'] = dailyCtrl.text.trim();
-    if (type == 'weekly') patch['weeklyTime'] = dailyCtrl.text.trim();
-    if (type == 'monthly') patch['monthlyTime'] = dailyCtrl.text.trim();
-
-    intervalCtrl.dispose();
-    dailyCtrl.dispose();
-    descCtrl.dispose();
-
-    if (!context.mounted) return;
-    state.updateTaskSchedule(t.id, patch);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已保存调度（电脑端刷新后生效）')),
-    );
-  }
-
-  // ------------------------------------------------------------ 换助手
-
-  Future<void> _editAssistant(
-      BuildContext context, AppState state, TaskOption t) async {
-    final prompts = state.capabilities.prompts;
-    if (prompts.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('电脑端还没上报助手列表，请先点刷新'),
-      ));
-      return;
-    }
-    final descCtrl = TextEditingController(text: t.description);
-
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: const Color(0xFF1B1F2B),
-      isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(14),
-              child: Text('任务使用的助手',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: TextField(
-                controller: descCtrl,
-                decoration: const InputDecoration(
-                    labelText: '说明（可选）', isDense: true),
-              ),
-            ),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  ListTile(
-                    dense: true,
-                    title: const Text('跟随电脑端默认（__DEFAULT__）'),
-                    trailing: t.promptKey == '__DEFAULT__'
-                        ? const Icon(Icons.check, color: Colors.lightBlueAccent)
-                        : null,
-                    onTap: () => Navigator.pop(ctx, '__DEFAULT__'),
-                  ),
-                  ...prompts.map((p) => ListTile(
-                        dense: true,
-                        title: Text(p.label),
-                        subtitle: Text(
-                          p.hasPreset ? '预设：${p.presetSummary}' : '无预设',
-                          style: const TextStyle(fontSize: 11.5),
-                        ),
-                        trailing: t.promptKey == p.key
-                            ? const Icon(Icons.check, color: Colors.lightBlueAccent)
-                            : null,
-                        onTap: () => Navigator.pop(ctx, p.key),
-                      )),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    if (picked == null || !context.mounted) {
-      descCtrl.dispose();
-      return;
-    }
-    final desc = descCtrl.text.trim();
-    descCtrl.dispose();
-
-    state.updateTaskSchedule(t.id, {
-      'promptKey': picked,
-      'description': desc,
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已保存（电脑端刷新后生效）')),
-    );
   }
 
   Future<void> _run(BuildContext context, AppState state, TaskOption t) async {
