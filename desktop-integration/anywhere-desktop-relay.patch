@@ -3020,10 +3020,10 @@ index 3d0b346..06233c7 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..c2c0035
+index 0000000..1e53583
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2887 @@
+@@ -0,0 +1,2925 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -4216,6 +4216,34 @@ index 0000000..c2c0035
 +  return typeof preset === 'string' ? preset.trim() : ''
 +}
 +
++/**
++ * 按 conversationId 反查电脑端**已经打开**的会话窗口。
++ *
++ * convWindows 只登记「relay 自己开过」的窗口；用户在电脑端自己点开的会话窗口
++ * 不在里面，于是手机再打开同一个会话时，openPhoneConversation 会误判「没开过」
++ * 再新建一个窗口 —— 表现为「电脑端先开、手机再开就重复启动一次」。
++ *
++ * 窗口的 conversationId 存在 windowManager 的 windowMetadataStore（开窗时写入，
++ * 渲染层再经 window:conversationStatus 持续更新），通过 listWindows('window')
++ * 能读到。这里反查一次，命中就接管复用，不再另开。
++ */
++function findOpenWindowForConversation(conversationId) {
++  const cid = String(conversationId || '').trim()
++  if (!cid || typeof ctx?.listWindows !== 'function') return null
++  let items = []
++  try {
++    items = ctx.listWindows('window') || []
++  } catch {
++    return null
++  }
++  for (const item of items) {
++    if (!item || item.type !== 'window') continue
++    if (String(item.conversationId || '').trim() !== cid) continue
++    if (typeof item.id === 'string' && isWindowAlive(item.id)) return item.id
++  }
++  return null
++}
++
 +async function openPhoneConversation(conversationId, relayTo, relayOpts = null) {
 +  const dirPath = await readChatDirPath()
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
@@ -4239,7 +4267,17 @@ index 0000000..c2c0035
 +  // 走「不复用 → 关旧窗 → 开新窗」，既慢又打断了另一个会话正在跑的生成。
 +  // 现在每个会话各有各的窗口，切回来直接复用，另一个会话不受影响。
 +  const convId = opened.descriptor.conversationId
-+  const existingWin = convWindows.get(convId)
++  let existingWin = convWindows.get(convId)
++  // convWindows 只认得 relay 开过的窗口。电脑端自己先打开的会话窗口不在里面，
++  // 这里按 conversationId 反查当前活着的窗口，命中就接管，避免重复开窗。
++  if ((!existingWin || !isWindowAlive(existingWin)) && convId) {
++    const adopted = findOpenWindowForConversation(convId)
++    if (adopted) {
++      existingWin = adopted
++      convWindows.set(convId, adopted)
++      rlog('[relay] adopt desktop-opened conversation window:', adopted, 'conv =', convId)
++    }
++  }
 +  if (existingWin && isWindowAlive(existingWin)) {
 +    try {
 +      ctx.dispatchWindowEvent(
