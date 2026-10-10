@@ -929,6 +929,10 @@ class AppState extends ChangeNotifier {
     final converted = <ChatMessage>[];
     for (final m in incoming) {
       if (m.pending) continue;
+      // 系统提示词（role=system）是电脑端 AI 的人格设定，不是对话内容：
+      // 不进聊天流，避免在手机上显示成一条普通消息。会话详情页读的是另一份
+      // 原始数据，仍能看到它。
+      if (m.isSystem) continue;
       if (m.text.trim().isEmpty && !m.isUser) continue;
       converted.add(_convToChatMessage(m, convId));
     }
@@ -980,6 +984,8 @@ class AppState extends ChangeNotifier {
     }
     for (final m in messages) {
       if (usedLocalIds.contains(m.id)) continue;
+      // 顺手剔除本地已落盘的系统提示词（旧版本留下的），保证聊天流干净。
+      if (m.role == ChatRole.system) continue;
       merged.add(m);
     }
 

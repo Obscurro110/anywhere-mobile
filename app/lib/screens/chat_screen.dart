@@ -101,20 +101,27 @@ class _ChatScreenState extends State<ChatScreen> {
     final state = context.watch<AppState>();
     _scrollToBottom();
 
+    // 系统提示词（role=system）不进聊天流：它是电脑端 AI 的人格设定，
+    // 不是对话内容，显示出来会像一条普通消息，容易误解。这里兜一层，
+    // 确保任何来源（含旧版本已落盘的）都不会在聊天页出现。
+    final visible = state.messages
+        .where((m) => m.role != ChatRole.system)
+        .toList(growable: false);
+
     return Column(
       children: [
         Expanded(
-          child: state.messages.isEmpty
+          child: visible.isEmpty
               ? const _EmptyChat()
               : ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
-                  itemCount: state.messages.length,
+                  itemCount: visible.length,
                   itemBuilder: (context, i) => _Bubble(
-                    msg: state.messages[i],
+                    msg: visible[i],
                     onOpenFile: _openFile,
                     // 电脑端的「重新回答」只对最后一条生效，这里同步这个规则
-                    isLast: i == state.messages.length - 1,
+                    isLast: i == visible.length - 1,
                   ),
                 ),
         ),

@@ -157,4 +157,19 @@ void main() {
     await settle();
     expect(state.messages.where((m) => m.role == 'user').length, 1);
   });
+
+  test('desktop system prompt does not enter the chat stream', () async {
+    relay.opened('conversation-A', 'A');
+    await settle();
+    expect(state.activeConversationId, 'conversation-A');
+    // 电脑端的历史里带一条系统提示词（role=system）—— 它不该出现在聊天消息流
+    relay.history('conversation-A', [
+      {'id': 'sys', 'index': 0, 'role': 'system', 'text': '你是一个AI助手', 'time': ''},
+      {'id': '1', 'index': 1, 'role': 'user', 'text': '你觉得亚马逊怎么样?', 'time': ''},
+    ]);
+    await settle();
+    expect(state.messages.any((m) => m.role == ChatRole.system), isFalse);
+    expect(state.messages.any((m) => m.text == '你是一个AI助手'), isFalse);
+    expect(state.messages.any((m) => m.text == '你觉得亚马逊怎么样?'), isTrue);
+  });
 }
