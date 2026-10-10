@@ -173,6 +173,11 @@ class AppState extends ChangeNotifier {
   /// 是否还有气泡在等电脑端回复
   bool get hasPendingReply => _firstPendingIndex() >= 0;
 
+  /// 当前会话是否还在生成。流式开始后 pending 会被清掉，所以还要看 streaming。
+  bool get generating => messages.any(
+        (m) => m.pending || (m.desktopMeta?.streaming ?? false),
+      );
+
   RelayClient get client => _client;
   String get deviceId => config.deviceId;
 
@@ -836,6 +841,25 @@ class AppState extends ChangeNotifier {
         'text': '',
         'conversationId': conversationId,
         'title': t,
+      },
+    ));
+  }
+
+  /// 让电脑端停掉当前这一轮生成（相当于电脑端的取消按钮）。
+  bool cancelGeneration() {
+    if (!_client.isConnected) return false;
+    final cid = _activeConversationId ?? '';
+    lastMessageAction = null;
+    notifyListeners();
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.messageAction,
+        'text': '',
+        'action': 'cancel',
+        if (cid.isNotEmpty) 'conversationId': cid,
       },
     ));
   }
@@ -1693,6 +1717,12 @@ class AppState extends ChangeNotifier {
         // 这样在手机里继续对话时，用的还是这个会话原来的助手预设。
         if (ok) {
           applyPrompt(openPromptKey.isEmpty ? null : openPromptKey, fromUser: false);
+          // 助手预设的模型和这个会话实际在用的可能不是同一个。
+          // 底部芯片必须跟会话走，否则显示的是助手默认模型，发出去却是另一套。
+          final sessionModel = r['model']?.toString().trim() ?? '';
+          if (sessionModel.isNotEmpty && sessionModel != options.model) {
+            options = options.copyWith(model: sessionModel);
+          }
         }
         lastConversationOpen = {
           'ok': ok,

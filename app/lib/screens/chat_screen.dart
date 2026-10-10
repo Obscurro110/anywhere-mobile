@@ -123,6 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _Composer(
           controller: _controller,
           onSend: _send,
+          onStop: state.generating ? () => state.cancelGeneration() : null,
           onAttach: _uploading ? null : _pickAndSendFile,
           uploading: _uploading,
           awaiting: state.awaitingReply,
@@ -1174,6 +1175,7 @@ class _ActionBar extends StatelessWidget {
 class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final VoidCallback onSend;
+  final VoidCallback? onStop;
   final VoidCallback? onAttach;
   final bool uploading;
   final bool awaiting;
@@ -1181,6 +1183,7 @@ class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
     required this.onSend,
+    required this.onStop,
     required this.onAttach,
     required this.uploading,
     required this.awaiting,
@@ -1224,8 +1227,12 @@ class _Composer extends StatelessWidget {
             ),
             const SizedBox(width: 6),
             IconButton.filled(
-              onPressed: onSend,
-              icon: const Icon(Icons.send),
+              tooltip: onStop != null ? '暂停生成' : '发送',
+              style: onStop != null
+                  ? IconButton.styleFrom(backgroundColor: Colors.redAccent)
+                  : null,
+              onPressed: onStop ?? onSend,
+              icon: Icon(onStop != null ? Icons.stop_rounded : Icons.send),
             ),
           ],
         ),

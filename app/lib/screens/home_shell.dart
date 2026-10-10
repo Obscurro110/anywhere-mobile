@@ -620,6 +620,9 @@ class _ConversationBindingBar extends StatelessWidget {
         ? prompt.label
         : (key.isEmpty ? '默认（跟随电脑端）' : key);
 
+    // 没进会话时这行只写「新会话」。换助手本身就会开新会话，这行没有信息量。
+    if (!inConv) return const SizedBox.shrink();
+
     return Material(
       color: const Color(0xFF141821),
       child: Padding(

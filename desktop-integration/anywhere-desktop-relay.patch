@@ -3020,10 +3020,10 @@ index 3d0b346..06233c7 100644
    handleInvoke('conversation:acquireLease', async (_event, input = {}) => {
 diff --git a/main/relay/index.js b/main/relay/index.js
 new file mode 100644
-index 0000000..bf508f5
+index 0000000..bb7c345
 --- /dev/null
 +++ b/main/relay/index.js
-@@ -0,0 +1,2850 @@
+@@ -0,0 +1,2863 @@
 +/**
 + * Anywhere Desktop ⇆ Relay bridge (main process / Electron)
 + * =========================================================
@@ -4186,6 +4186,16 @@ index 0000000..bf508f5
 +  return ''
 +}
 +
++/** 会话实际在用的模型。优先会话自己存的，没有才退回助手预设。 */
++function conversationModel(sessionData) {
++  if (!sessionData || typeof sessionData !== 'object') return ''
++  if (typeof sessionData.model === 'string' && sessionData.model.trim()) {
++    return sessionData.model.trim()
++  }
++  const preset = sessionData.currentPromptConfig?.model
++  return typeof preset === 'string' ? preset.trim() : ''
++}
++
 +async function openPhoneConversation(conversationId, relayTo, relayOpts = null) {
 +  const dirPath = await readChatDirPath()
 +  if (!dirPath) return { ok: false, reason: 'chat_dir_not_configured' }
@@ -4199,6 +4209,7 @@ index 0000000..bf508f5
 +
 +  // 这个会话自己的助手（键名可能是 CODE，见 conversationPromptKey 的注释）
 +  const promptKey = conversationPromptKey(opened.sessionData) || phonePromptKey
++  const model = conversationModel(opened.sessionData)
 +
 +  // 已经为这个会话开过窗口就复用。
 +  //
@@ -4229,7 +4240,7 @@ index 0000000..bf508f5
 +      phoneWindowId = existingWin
 +      phoneWindowKey = `conv:${convId}`
 +      touchConvWindow(convId)
-+      return { ok: true, windowId: existingWin, reused: true, title: opened.descriptor.title, promptKey }
++      return { ok: true, windowId: existingWin, reused: true, title: opened.descriptor.title, promptKey, model }
 +    } catch (err) {
 +      rwarn('[relay] reuse conversation window failed:', err?.message || err)
 +    }
@@ -4293,7 +4304,8 @@ index 0000000..bf508f5
 +      windowId: res.id,
 +      title: opened.descriptor.title,
 +      promptKey,
-+      assistantName
++      assistantName,
++      model
 +    }
 +  }
 +  rwarn('[relay] openWindow for conversation returned:', res)
@@ -4653,6 +4665,7 @@ index 0000000..bf508f5
 +            title: res.title || '',
 +            promptKey: res.promptKey || '',
 +            assistantName: res.assistantName || '',
++            model: res.model || '',
 +            reused: !!res.reused
 +          }
 +        }),
@@ -7191,10 +7204,10 @@ index 23ba179..b845918 100644
                </el-collapse-transition>
              </div>
 diff --git a/render/window/App.vue b/render/window/App.vue
-index 68ac2ff..aeab69c 100644
+index 68ac2ff..98eee77 100644
 --- a/render/window/App.vue
 +++ b/render/window/App.vue
-@@ -741,9 +741,199 @@ const normalizeWindowEventPayload = (input) => {
+@@ -741,9 +741,209 @@ const normalizeWindowEventPayload = (input) => {
      return input.payload;
    }
  
@@ -7249,6 +7262,16 @@ index 68ac2ff..aeab69c 100644
 +  }
 +
 +  try {
++    if (action === 'cancel') {
++      if (!loading.value) {
++        reply(false, { reason: 'not_generating' });
++        return;
++      }
++      cancelAskAI();
++      reply(true);
++      return;
++    }
++
 +    if (action === 'reask') {
 +      // 电脑端要求传 assistant 消息 id
 +      const requestedId = String(cmd.messageId ?? '');
@@ -7394,7 +7417,7 @@ index 68ac2ff..aeab69c 100644
  const enqueueWindowPayload = (payload) => {
    if (!payload || typeof payload !== 'object') return;
    pendingWindowPayloadQueue.push(payload);
-@@ -759,6 +949,35 @@ const flushPendingWindowPayloadQueue = async () => {
+@@ -759,6 +959,35 @@ const flushPendingWindowPayloadQueue = async () => {
  };
  
  
@@ -7430,7 +7453,7 @@ index 68ac2ff..aeab69c 100644
  const handleAppendMessageEvent = async (data, options = {}) => {
    if (!data || !ensureConversationWriteAccess(true)) return;
  
-@@ -769,6 +988,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -769,6 +998,23 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        preview: getAppendPayloadPreview(data)
      });
      showDismissibleMessage.info('正在生成，追问已加入缓冲区，将在本轮结束后自动发送');
@@ -7454,7 +7477,7 @@ index 68ac2ff..aeab69c 100644
      return;
    }
  
-@@ -790,7 +1026,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -790,7 +1036,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: multilineText });
@@ -7465,7 +7488,7 @@ index 68ac2ff..aeab69c 100644
      }
    } else if (data.type === "over" && data.payload) {
      const overText = String(data.payload);
-@@ -799,7 +1037,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
+@@ -799,7 +1047,9 @@ const handleAppendMessageEvent = async (data, options = {}) => {
        shouldAutoSend = false;
      } else {
        appendFullHistory({ role: "user", content: overText });
@@ -7476,7 +7499,7 @@ index 68ac2ff..aeab69c 100644
      }
    } else if (data.type === "img" && data.payload) {
      if (shouldRespectDirectSendConfig && !directSendConfig.image) {
-@@ -3114,7 +3354,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
+@@ -3114,7 +3364,15 @@ const getAssistantTerminalNoticeMarkdown = (aborted, errorDisplay) => {
  };
  
  const getCurrentAssistantDisplayName = () => {
@@ -7493,7 +7516,7 @@ index 68ac2ff..aeab69c 100644
  };
  
  const findAssistantTurnBubbleIndex = (turnMeta = activeAssistantTurnMeta) => {
-@@ -5286,6 +5534,7 @@ onMounted(async () => {
+@@ -5286,6 +5544,7 @@ onMounted(async () => {
  
    window.__AGENT_API__ = {
      isBusy: () => loading.value || compacting.value,
@@ -7501,7 +7524,7 @@ index 68ac2ff..aeab69c 100644
  
      getChatLength: () => chat_show.value.length,
  
-@@ -5755,7 +6004,18 @@ onMounted(async () => {
+@@ -5755,7 +6014,18 @@ onMounted(async () => {
    if (window.api && typeof window.api.onWindowEvent === 'function') {
      window.api.onWindowEvent(async (envelope) => {
        const payload = normalizeWindowEventPayload(envelope);
@@ -7521,7 +7544,7 @@ index 68ac2ff..aeab69c 100644
          if (!isWindowBootstrapped.value) {
            enqueueWindowPayload(payload);
            return;
-@@ -6909,6 +7169,8 @@ const getSessionDataAsObject = (options = {}) => {
+@@ -6909,6 +7179,8 @@ const getSessionDataAsObject = (options = {}) => {
      pendingAppendBuffer: normalizePendingInputBuffer(pendingAppendBuffer.value),
      activeMcpServerIds: sessionMcpServerIds.value || [],
      activeSkillIds: sessionSkillIds.value || [],
@@ -7530,7 +7553,7 @@ index 68ac2ff..aeab69c 100644
      isAutoApproveTools: isAutoApproveTools.value,
      taskList: taskList.value,
      conversationOwnerId: ensureConversationOwnerId(),
-@@ -8286,6 +8548,15 @@ const loadSession = async (jsonData) => {
+@@ -8286,6 +8558,15 @@ const loadSession = async (jsonData) => {
        tempSessionSkillIds.value = [];
      }
  
@@ -7546,7 +7569,7 @@ index 68ac2ff..aeab69c 100644
      if (chat_show.value && chat_show.value.length > 0) {
        chat_show.value.forEach(msg => { if (msg.id === undefined) msg.id = messageIdCounter.value++; });
        const maxId = Math.max(...chat_show.value.map(m => m.id || 0));
-@@ -10071,6 +10342,12 @@ const deleteMessage = (index) => {
+@@ -10071,6 +10352,12 @@ const deleteMessage = (index) => {
      }
      fullHistory.value.splice(fullStartIndex, fullDeleteCount);
    }
@@ -7559,7 +7582,7 @@ index 68ac2ff..aeab69c 100644
    chat_show.value.splice(show_start_idx, show_delete_count);
    markOutermostCanRestore();
    syncHistoryFromFullHistory();
-@@ -10088,6 +10365,18 @@ const deleteMessage = (index) => {
+@@ -10088,6 +10375,18 @@ const deleteMessage = (index) => {
  
    focusedMessageIndex.value = null;
    scheduleAutoSave({ reason: 'message-deleted', immediate: true });
@@ -7578,7 +7601,7 @@ index 68ac2ff..aeab69c 100644
  };
  
  const clearHistory = async () => {
-@@ -10428,6 +10717,600 @@ const scrollToMessageByIndex = async (index) => {
+@@ -10428,6 +10727,600 @@ const scrollToMessageByIndex = async (index) => {
    }
    return didResolveTarget;
  };
