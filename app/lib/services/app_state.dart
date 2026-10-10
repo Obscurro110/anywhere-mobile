@@ -196,6 +196,9 @@ class AppState extends ChangeNotifier {
   final Set<String> _detachedConversationIds = {};
   final Map<String, Future<void>> _historyWrites = {};
 
+  /// dispose 后置真：延时的历史拉取回调据此直接返回，不再碰已释放的对象。
+  bool _disposed = false;
+
   // ---------------------------------------------------------------------------
   // 多会话并行的「后台收件箱」
   //
@@ -474,6 +477,13 @@ class AppState extends ChangeNotifier {
       if (s == RelayStatus.connected) {
         // Ask the desktop for its model / MCP / skill list on (re)connect.
         Future.delayed(const Duration(milliseconds: 600), requestCapabilities);
+        // 重连 / 冷启动：把「上次接的会话」的历史拉一遍。
+        // 冷启动时 _loadHistory 只从本地磁盘读，离线期间电脑端产生的消息
+        // 本地根本没有 —— 不拉就一直是「会话名在、内容空」。
+        final cid = _activeConversationId;
+        if (cid != null && cid.isNotEmpty) {
+          _scheduleConversationHydration(cid);
+        }
       }
       notifyListeners();
     });
@@ -802,6 +812,182 @@ class AppState extends ChangeNotifier {
         'conversationId': cid,
       },
     ));
+  }
+
+  /// 拉取某个会话的**历史消息**，合并进当前聊天记录。
+  ///
+  /// ⚠️ 这是「打开电脑端会话时能看到它已有的消息」的关键一步。
+  /// 以前绑定会话（conversation-open-result）只从本地磁盘读 `_historyKey`，
+  /// 电脑端早已存在的消息、或手机离线期间电脑端产生的消息，永远拉不到 ——
+  /// 界面就是「会话名对得上、点进去却空空如也」（还没有消息）。
+  /// 现在打开 / 重连时主动向电脑端要一份，回包由 [ChatRole.conversationMessages]
+  /// 分支合并进 `messages`（见 [_mergeDesktopMessagesIntoChat]）。
+  ///
+  /// 和 [requestConversationMessages]（详情页用）的区别：这里**不**动
+  /// `_viewingConversationId`，避免污染「当前查看的会话」，也不走详情页 loading。
+  bool syncConversationHistory(String conversationId) {
+    final cid = conversationId.trim();
+    if (cid.isEmpty) return false;
+    if (_detachedConversationIds.contains(cid)) return false;
+    if (!_client.isConnected) return false;
+    return _client.send(Envelope(
+      type: MsgType.chat,
+      from: config.deviceId,
+      to: targetDeviceId ?? '*',
+      payload: {
+        'role': ChatRole.conversationMessagesRequest,
+        'text': '',
+        'conversationId': cid,
+      },
+    ));
+  }
+
+  /// 打开 / 重连到某个会话后，安排一次「历史拉取」。
+  ///
+  /// 为什么要延后 + 重试：conversation-open-result 回来时，电脑端那个窗口
+  /// 可能刚建好、chat_show 还没 bootstrap，这时要消息只会拿到空列表。
+  /// 所以第一次稍等窗口就绪，之后若仍是空的再兜底要一次。
+  void _scheduleConversationHydration(String conversationId) {
+    final cid = conversationId.trim();
+    if (cid.isEmpty) return;
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      if (_disposed || !_client.isConnected) return;
+      if (_activeConversationId != cid) return;
+      syncConversationHistory(cid);
+    });
+    Future.delayed(const Duration(milliseconds: 5000), () {
+      if (_disposed || !_client.isConnected) return;
+      if (_activeConversationId != cid) return;
+      // 第一次可能撞上窗口未就绪（拿到空列表），这时再要一次。
+      if (messages.isEmpty) syncConversationHistory(cid);
+    });
+  }
+
+  /// 电脑端一条消息（ConvMessage）→ 手机聊天消息（ChatMessage）。
+  ///
+  /// id 用一个带前缀的稳定串：电脑端的展示 id（`m.id`）只是整数序号，
+  /// 直接当本地 id 会和手机自己发的消息（uuid）撞语义，这里隔离一层。
+  /// 真正的「同一条」靠 [AssistantMeta.messageId] 去重（见合并逻辑）。
+  ChatMessage _convToChatMessage(ConvMessage m, String convId) {
+    final isUser = m.isUser;
+    final isSystem = m.isSystem;
+    final id = m.id.isNotEmpty
+        ? 'desktop:$convId:${m.id}'
+        : 'desktop:$convId:idx:${m.index}';
+    return ChatMessage(
+      id: id,
+      role: isUser
+          ? ChatRole.user
+          : (isSystem ? ChatRole.system : ChatRole.assistant),
+      text: m.text,
+      // 电脑端给的时间是「2026-10-05 10:02」这种字符串，尽量解析出来；
+      // 解析失败退回当前时间（只影响气泡头部显示，不影响排序）。
+      time: _parseDesktopTime(m.time) ?? DateTime.now(),
+      outgoing: isUser,
+      conversationId: convId,
+      desktopMeta: AssistantMeta(
+        messageId: m.id,
+        index: m.index,
+        conversationId: convId,
+      ),
+    );
+  }
+
+  /// 解析电脑端回传的时间字符串「2026-10-05 10:02」；解析不了返回 null。
+  DateTime? _parseDesktopTime(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return null;
+    final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})').firstMatch(t);
+    if (m != null) {
+      return DateTime(
+        int.parse(m.group(1)!),
+        int.parse(m.group(2)!),
+        int.parse(m.group(3)!),
+        int.parse(m.group(4)!),
+        int.parse(m.group(5)!),
+      );
+    }
+    return DateTime.tryParse(t);
+  }
+
+  /// 把电脑端返回的会话消息合并进**当前会话**的聊天记录。
+  ///
+  /// 只在 `convId == _activeConversationId` 时生效 —— 别的会话（详情页正在看的、
+  /// 或被删除的）一律不动，避免把别的会话内容串进当前界面。
+  ///
+  /// 合并策略（电脑端是这一份的权威）：
+  ///   · 以电脑端返回的顺序（按 index 排过）为骨架；
+  ///   · 本地已有的同一条（按 desktopMeta.messageId 认，其次按 角色+正文 认）
+  ///     复用本地对象，保住本地 id / outgoing，正文与桌面定位以电脑端为准；
+  ///   · 本地有、电脑端这份没有的（刚发出还在飞的、pending 占位）追加到末尾，
+  ///     绝不丢弃 —— 否则用户会看到自己刚发的消息凭空消失；
+  ///   · 电脑端的 pending 占位（还没跑完的空 assistant）不入正式历史。
+  void _mergeDesktopMessagesIntoChat(String convId, List<ConvMessage> incoming) {
+    if (convId.isEmpty || convId != _activeConversationId) return;
+    if (_detachedConversationIds.contains(convId)) return;
+
+    final converted = <ChatMessage>[];
+    for (final m in incoming) {
+      if (m.pending) continue;
+      if (m.text.trim().isEmpty && !m.isUser) continue;
+      converted.add(_convToChatMessage(m, convId));
+    }
+
+    // 本地已有消息建两份索引：带 desktopMeta.messageId 的按 id 认；
+    // 没带 id 的（电脑端回执丢失等）退回按「角色+正文」认 —— 双保险防重复。
+    final localByMsgId = <String, ChatMessage>{};
+    final localByText = <String, List<ChatMessage>>{};
+    for (final m in messages) {
+      final mid = m.desktopMeta?.messageId ?? '';
+      if (mid.isNotEmpty) {
+        localByMsgId['m:$mid'] = m;
+      } else {
+        localByText
+            .putIfAbsent('${m.role}\u0000${m.text}', () => <ChatMessage>[])
+            .add(m);
+      }
+    }
+
+    final merged = <ChatMessage>[];
+    final usedLocalIds = <String>{};
+    for (final d in converted) {
+      final mid = d.desktopMeta?.messageId ?? '';
+      ChatMessage? local = mid.isNotEmpty ? localByMsgId['m:$mid'] : null;
+      if (local == null) {
+        final bucket = localByText['${d.role}\u0000${d.text}'];
+        if (bucket != null && bucket.isNotEmpty) local = bucket.removeAt(0);
+      }
+      if (local != null) {
+        usedLocalIds.add(local.id);
+        merged.add(ChatMessage(
+          id: local.id,
+          role: d.role,
+          text: d.text,
+          time: local.time,
+          outgoing: local.outgoing,
+          conversationId: convId,
+          attachments: (local.attachments?.isNotEmpty ?? false)
+              ? local.attachments
+              : d.attachments,
+          pending: false,
+          desktopMeta: d.desktopMeta,
+          modelTag: local.modelTag.isNotEmpty ? local.modelTag : d.modelTag,
+          choice: d.choice ?? local.choice,
+        ));
+      } else {
+        merged.add(d);
+      }
+    }
+    for (final m in messages) {
+      if (usedLocalIds.contains(m.id)) continue;
+      merged.add(m);
+    }
+
+    messages
+      ..clear()
+      ..addAll(merged);
+    unawaited(_persistHistory());
+    notifyListeners();
   }
 
   /// 详情页退出时调用，避免它退出后还影响别的页面
@@ -1484,9 +1670,15 @@ class AppState extends ChangeNotifier {
         }
 
         final raw = (r['messages'] as List?) ?? const [];
-        _convMessagesByConv[cid] = raw
+        final list = raw
             .map((e) => ConvMessage.fromJson((e as Map).cast<String, dynamic>()))
             .toList();
+        _convMessagesByConv[cid] = list;
+        // 如果这份就是「当前正在聊的会话」，顺手把历史并进聊天记录 ——
+        // 这是「打开电脑端会话能看到它已有消息」的落地点（见 syncConversationHistory）。
+        if (r['ok'] != false) {
+          _mergeDesktopMessagesIntoChat(cid, list);
+        }
 
         final ok = r['ok'] != false;
         if (ok) {
@@ -1739,6 +1931,9 @@ class AppState extends ChangeNotifier {
           if (sessionModel.isNotEmpty && sessionModel != options.model) {
             options = options.copyWith(model: sessionModel);
           }
+          // 打开会话后把它的历史消息拉过来 —— 否则手机只显示本地缓存，
+          // 电脑端早已存在的消息（或手机离线期间产生的）永远看不到。
+          _scheduleConversationHydration(r['conversationId']?.toString() ?? '');
         }
         lastConversationOpen = {
           'ok': ok,
@@ -2426,6 +2621,7 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _client.dispose();
     super.dispose();
   }

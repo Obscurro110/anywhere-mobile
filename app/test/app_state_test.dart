@@ -45,6 +45,13 @@ class FakeRelay extends RelayClient {
         'messageId': 'desktop-message', 'index': 1,
       }})},
   ));
+  void history(String id, List<Map<String, dynamic>> msgs) => incoming.add(Envelope(
+    type: MsgType.chat,
+    payload: {'role': ChatRole.conversationMessages,
+      'text': jsonEncode({'__relayConversationMessages': {
+        'conversationId': id, 'ok': true, 'messages': msgs,
+      }})},
+  ));
   @override
   void dispose() {
     incoming.close();
@@ -116,5 +123,38 @@ void main() {
     await expectLater(state.shareFile(File('unused-test-file')), throwsStateError);
     expect(state.messages, isEmpty);
     expect(state.receivedFiles, isEmpty);
+  });
+
+  test('opening a conversation hydrates its desktop history', () async {
+    relay.opened('conversation-A', 'A');
+    await settle();
+    expect(state.activeConversationId, 'conversation-A');
+    // 电脑端返回这个会话已有的历史（手机本地原本是空的）
+    relay.history('conversation-A', [
+      {'id': '1', 'index': 0, 'role': 'user', 'text': '你觉得亚马逊怎么样?', 'time': ''},
+      {'id': '2', 'index': 1, 'role': 'assistant', 'text': '挺好的', 'time': ''},
+    ]);
+    await settle();
+    expect(state.messages.length, 2);
+    expect(state.messages.first.text, '你觉得亚马逊怎么样?');
+    expect(state.messages.first.outgoing, isTrue);
+    expect(state.messages.last.text, '挺好的');
+    expect(state.messages.last.desktopMeta?.messageId, '2');
+  });
+
+  test('hydrating does not duplicate a message already on the desktop', () async {
+    relay.opened('conversation-A', 'A');
+    await settle();
+    expect(state.sendChat('hi'), isTrue);
+    final clientId = relay.sent.last.id;
+    // 电脑端回执：这条 user 消息在电脑端的 id 是 'desktop-message'
+    relay.metadata('conversation-A', clientId);
+    await settle();
+    // 随后历史里又带回同一条（同一个 desktop id）—— 合并时不能变成两条
+    relay.history('conversation-A', [
+      {'id': 'desktop-message', 'index': 1, 'role': 'user', 'text': 'hi', 'time': ''},
+    ]);
+    await settle();
+    expect(state.messages.where((m) => m.role == 'user').length, 1);
   });
 }
