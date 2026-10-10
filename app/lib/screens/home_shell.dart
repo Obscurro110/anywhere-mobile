@@ -189,8 +189,6 @@ class _HomeShellState extends State<HomeShell> {
         children: [
           // 电脑端正在生成时发的消息会进「缓冲区」，这里明确告诉用户没丢
           _BufferBanner(),
-          // 「当前会话 + 助手」绑定条：让「我在哪个会话、用的哪个助手」一眼可见
-          _ConversationBindingBar(),
           Expanded(child: ChatScreen()),
         ],
       ),
@@ -599,87 +597,4 @@ class _BufferBanner extends StatelessWidget {
   }
 }
 
-/// 「当前会话 ↔ 助手」绑定条。
-///
-/// 用户反馈「会话和助手绑定不严格」—— 根子之一是**看不出来**：
-/// 聊天页只有消息列表，没有地方告诉你「现在挂在哪个会话上、
-/// 这个会话用的是哪个助手」。这里把绑定关系显式画出来；
-/// 没绑定时明确写「下一条消息会创建新会话」。
-class _ConversationBindingBar extends StatelessWidget {
-  const _ConversationBindingBar();
 
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final convId = state.activeConversationId;
-    final inConv = convId != null && convId.isNotEmpty;
-    final title = state.activeConversationTitle;
-    final prompt = state.activePrompt;
-    final key = state.options.promptKey ?? '';
-    final promptLabel = prompt != null
-        ? prompt.label
-        : (key.isEmpty ? '默认（跟随电脑端）' : key);
-
-    // 没进会话时这行只写「新会话」。换助手本身就会开新会话，这行没有信息量。
-    if (!inConv) return const SizedBox.shrink();
-
-    return Material(
-      color: const Color(0xFF141821),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-        child: Row(
-          children: [
-            Icon(inConv ? Icons.link : Icons.add_circle_outline,
-                size: 15,
-                color: inConv ? Colors.lightBlueAccent : Colors.white38),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                inConv ? '会话：${title.isEmpty ? convId : title}' : '新会话（下一条消息创建）',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: 11.5,
-                    color: inConv ? Colors.lightBlueAccent : Colors.white54),
-              ),
-            ),
-            // 助手标签：当前生效的助手
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFF262C3D),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.auto_awesome,
-                      size: 11, color: Colors.amberAccent),
-                  const SizedBox(width: 4),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 110),
-                    child: Text(promptLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 10.5, color: Colors.amberAccent)),
-                  ),
-                ],
-              ),
-            ),
-            if (inConv)
-              IconButton(
-                tooltip: '退出会话（回到新会话）',
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
-                icon: const Icon(Icons.link_off, size: 15, color: Colors.white38),
-                onPressed: () =>
-                    context.read<AppState>().leaveDesktopConversation(),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
