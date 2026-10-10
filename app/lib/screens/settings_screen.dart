@@ -89,7 +89,7 @@ class SettingsPage extends StatelessWidget {
             SettingTile(
               icon: Icons.cleaning_services_outlined,
               title: '清空本机聊天记录',
-              subtitle: '仅清空这台手机上的显示缓存；电脑端的会话不受影响',
+              subtitle: '清掉这台手机上所有会话的显示缓存（不影响电脑端）',
               onTap: () => _confirmClear(context, state),
             ),
           ]),
@@ -121,10 +121,12 @@ class SettingsPage extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('清空本机聊天记录'),
         content: const Text(
-          '仅清空这台手机上显示的聊天记录。\n\n'
-          '电脑端的会话和 AI 的记忆都不受影响——'
-          '下次发消息时，电脑端仍会带着完整上下文回答。\n\n'
-          '如需真正删除某个会话，请到「电脑端对话」里操作。',
+          '清空这台手机上**所有**会话的聊天记录。\n\n'
+          '以前只清当前那一个，所以切换到别的会话时旧记录又会冒出来——'
+          '现在一次清干净。\n\n'
+          '电脑端的会话和 AI 的记忆都不受影响，下次发消息时电脑端仍会带着'
+          '完整上下文回答。\n\n'
+          '如需真正删除某个会话，请到「选择会话」里对它执行「删除会话」。',
         ),
         actions: [
           TextButton(

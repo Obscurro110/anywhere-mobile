@@ -2383,9 +2383,36 @@ class AppState extends ChangeNotifier {
     await p.setString('inbox', jsonEncode(inbox.take(200).toList()));
   }
 
+  /// 清空**本机**的聊天记录。
+  ///
+  /// ⚠️ 以前只清「当前会话」那一份 key —— 别的会话的 `chat_history:<id>`
+  /// 原封不动躺在手机上。用户切到别的会话再切回来，`_switchHistoryTo` 就从
+  /// 本地磁盘把它们读了回来，看起来就是「删了又回来」。
+  /// 现在：删掉所有 `chat_history` 开头的 key，并把内存里的后台收件箱也清掉。
+  /// 电脑端的会话不受影响（想删电脑端的要去会话列表里「删除会话」）。
   Future<void> clearHistory() async {
     messages.clear();
-    await _persistHistory();
+    // 正在进行的后台收件箱也要清，否则切回去时会被并回界面
+    _backgroundByConv.clear();
+    _backgroundPendingByConv.clear();
+    try {
+      final p = await SharedPreferences.getInstance();
+      final keys = p.getKeys().where((k) => k.startsWith('chat_history')).toList();
+      for (final k in keys) {
+        await p.remove(k);
+      }
+      // 顺手把「上次打开的是哪个会话」也忘掉：否则重开 App 会按旧 id
+      // 去读一份已经不存在的记录（读到空没关系，但别留个悬空指向）。
+      await p.remove('active_conversation_id');
+      await p.remove('active_conversation_title');
+      await p.remove('active_conversation_prompt');
+      _activeConversationId = null;
+      _activeConversationTitle = '';
+      _localSessionId = '';
+      debugPrint('[AppState] clearHistory: removed ${keys.length} history keys');
+    } catch (e) {
+      debugPrint('[AppState] clearHistory failed: $e');
+    }
     notifyListeners();
   }
 
