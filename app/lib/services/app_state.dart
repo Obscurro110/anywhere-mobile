@@ -1971,6 +1971,14 @@ class AppState extends ChangeNotifier {
       final idx = messages.indexWhere((m) => m.desktopMeta?.messageId == mid);
       if (idx >= 0) {
         final prev = messages[idx];
+        // 晚到的流式增量：最终完整版已经落过地（streaming != true），
+        // 而电脑端那条在结束前发起的流式推送此时才到 —— 它会把我本地
+        // 已经结束的气泡又标回 streaming=true，界面上「停止」按钮就再也
+        // 不会复位（用户反馈：会话没在跑，却一直显示停止键）。直接丢弃。
+        if (p.assistantMeta?.streaming == true &&
+            prev.desktopMeta?.streaming != true) {
+          return;
+        }
         messages[idx] = ChatMessage(
           id: prev.id,
           role: p.role,
