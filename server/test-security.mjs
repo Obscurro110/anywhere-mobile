@@ -74,6 +74,12 @@ check('非法 token 被 4001 拒绝', badRejected);
 const un = await fetch(`${HTTP}/file/nonexistent`);
 check('未认证 /file 返回 401', un.status === 401);
 
+// 7.1 支持通过 Authorization: Bearer Header 下载
+const authedHeader = await fetch(`${HTTP}/file/nonexistent`, {
+  headers: { 'Authorization': `Bearer ${A}` }
+});
+check('合法 Authorization Header 通过认证（404 而非 401）', authedHeader.status === 404);
+
 // 8. 健康检查
 const h = await fetch(`${HTTP}/health`);
 const hj = await h.json();

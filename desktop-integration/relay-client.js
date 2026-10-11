@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import http from 'node:http';
+import https from 'node:https';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
@@ -47,6 +48,7 @@ export class RelayClient extends EventEmitter {
     this.ws = null;
     this._closedByUser = false;
     this._retry = 0;
+    this._reconnectTimer = null;
     this._peers = new Map();
     this._pending = new Map(); // id -> { resolve, reject }
   }
@@ -54,6 +56,16 @@ export class RelayClient extends EventEmitter {
   // ---- lifecycle ----
   connect() {
     this._closedByUser = false;
+    // 取消排队中的自动重连，否则手动 connect 会和它各建一条连接
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    // 拆掉上一条 socket：不摘监听就直接覆盖 this.ws 的话，
+    // 旧 socket 的 close 回调仍会触发 _scheduleReconnect，
+    // 越滚越多，最后同时存在好几条连接互相抢消息。
+    this._teardownSocket();
+
     const url =
       `${this.serverUrl}?token=${encodeURIComponent(this.token)}` +
       `&deviceId=${encodeURIComponent(this.deviceId)}` +
@@ -74,21 +86,56 @@ export class RelayClient extends EventEmitter {
       if (!this._closedByUser) this._scheduleReconnect();
     });
 
-    this.ws.on('error', (err) => this.emit('error', err));
+    // ⚠️ 不能直接 emit('error')：Node 的 EventEmitter 在**没有 error 监听者**时
+    // 会把错误当未捕获异常抛出。中继这边只要网络抖一下（DNS/TLS/断网）就会触发，
+    // 主进程日志被刷爆，严重时整个 relay 静默死掉。
+    // 这里改成：有人监听 'error' 才转发，否则降级成 'relay_error' + 日志。
+    this.ws.on('error', (err) => {
+      if (this.listenerCount('error') > 0) this.emit('error', err);
+      else this.emit('relay_error', { message: String(err?.message || err) });
+    });
     return this;
   }
 
+  /** 摘掉当前 socket 的所有监听并关闭（不触发重连）。 */
+  _teardownSocket() {
+    const ws = this.ws;
+    this.ws = null;
+    if (!ws) return;
+    try {
+      ws.removeAllListeners();
+    } catch {}
+    try {
+      // readyState: 0 CONNECTING / 1 OPEN / 2 CLOSING / 3 CLOSED
+      // ⚠️ 以前写 `ws.terminate?.() ?? ws.close()`：terminate() **返回 undefined**，
+      // 所以 ?? 不会短路，close() 还会跟着执行一次（对已销毁的 socket 调 close
+      // 会抛，被这里吞掉）。虽然结果无害，但意图不清。改成明确的分支。
+      if (ws.readyState === 0 || ws.readyState === 1) {
+        if (typeof ws.terminate === 'function') ws.terminate()
+        else ws.close()
+      }
+    } catch {}
+  }
+
   _scheduleReconnect() {
+    if (this._closedByUser) return;
+    // 已经排了重连就别再排（close 和 error 可能都会走到这里）
+    if (this._reconnectTimer) return;
     const delay = Math.min(30000, 2000 + this._retry * 2000);
     this._retry++;
-    setTimeout(() => !this._closedByUser && this.connect(), delay);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (!this._closedByUser) this.connect();
+    }, delay);
   }
 
   disconnect() {
     this._closedByUser = true;
-    try {
-      this.ws?.close();
-    } catch {}
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._teardownSocket();
   }
 
   get connected() {
@@ -157,13 +204,22 @@ export class RelayClient extends EventEmitter {
   }
 
   /** Chat from desktop -> phone. to='*' broadcasts to all other devices. */
-  sendChat(text, { role = 'assistant', to = '*', conversationId } = {}) {
+  sendChat(text, { role = 'assistant', to = '*', conversationId, extra } = {}) {
+    const payload = { role, text, conversationId };
+    // extra: 透传附加字段。手机端要靠它拿到电脑端那条消息的 id / 下标，
+    // 这样气泡上的「重新回答 / 删除这条」才能定位到正确的消息。
+    if (extra && typeof extra === 'object') {
+      for (const [k, v] of Object.entries(extra)) {
+        if (v === undefined || k === 'role' || k === 'text') continue;
+        payload[k] = v;
+      }
+    }
     return this._send({
       v: 1,
       type: 'chat',
       id: randomUUID(),
       to,
-      payload: { role, text, conversationId },
+      payload,
     });
   }
 
@@ -184,25 +240,29 @@ export class RelayClient extends EventEmitter {
     const fname = name || filePath.split(/[\\/]/).pop();
     const buf = await readFile(filePath);
     const res = await httpRequest(
-      `${base}/upload?token=${encodeURIComponent(this.token)}&name=${encodeURIComponent(fname)}`,
+      `${base}/upload?name=${encodeURIComponent(fname)}`,
       buf,
+      { 'Authorization': `Bearer ${this.token}` }
     );
     const json = JSON.parse(res);
     if (!json.ok) throw new Error('upload failed: ' + res);
-    this._send({
+    const sent = this._send({
       v: 1,
       type: 'file_share',
       id: randomUUID(),
       to,
       payload: { file: json.file },
     });
+    if (!sent) throw new Error('file share not sent: relay disconnected');
     return json.file;
   }
 
   /** Download a relayed file to a local path. */
   async downloadFile(fileId, savePath) {
     const base = this._httpBase();
-    const buf = await httpGet(`${base}/file/${fileId}?token=${encodeURIComponent(this.token)}`);
+    const buf = await httpGet(`${base}/file/${fileId}`, {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
     const { writeFile } = await import('node:fs/promises');
     await writeFile(savePath, buf);
     return savePath;
@@ -212,8 +272,8 @@ export class RelayClient extends EventEmitter {
     let u = this.serverUrl;
     if (u.startsWith('wss://')) u = u.replace('wss://', 'https://');
     else if (u.startsWith('ws://')) u = u.replace('ws://', 'http://');
-    const i = u.indexOf('/ws');
-    return i >= 0 ? u.slice(0, i) : u;
+    const i = u.lastIndexOf('/ws');
+    return i >= 0 && i + 3 === u.length ? u.slice(0, i) : u;
   }
 
   _resolvePending(id, payload) {
@@ -234,30 +294,52 @@ export class RelayClient extends EventEmitter {
 }
 
 // ---- tiny http helpers (no extra deps) ----
-function httpRequest(url, body) {
+// 必须带超时：中继不可达时 http.request 会一直挂着，
+// 手机那边就永远停在「发送中」。
+const HTTP_TIMEOUT_MS = 3 * 60 * 1000;
+
+function httpRequest(url, body, headers = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    const transport = new URL(url).protocol === 'https:' ? https : http;
+    const req = transport.request(
       url,
-      { method: 'POST', headers: { 'content-type': 'application/octet-stream' } },
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', ...headers },
+        timeout: HTTP_TIMEOUT_MS
+      },
       (res) => {
         let data = '';
         res.on('data', (c) => (data += c));
         res.on('end', () => resolve(data));
+        res.on('error', reject);
       },
     );
+    req.on('timeout', () => {
+      req.destroy(new Error(`upload timeout after ${HTTP_TIMEOUT_MS}ms`));
+    });
     req.on('error', reject);
     req.end(body);
   });
 }
 
-function httpGet(url) {
+function httpGet(url, options = {}) {
   return new Promise((resolve, reject) => {
-    http
-      .get(url, (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve(Buffer.concat(chunks)));
-      })
-      .on('error', reject);
+    const transport = new URL(url).protocol === 'https:' ? https : http;
+    const req = transport.get(url, { timeout: HTTP_TIMEOUT_MS, ...options }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`download failed ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error(`download timeout after ${HTTP_TIMEOUT_MS}ms`));
+    });
+    req.on('error', reject);
   });
 }

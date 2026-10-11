@@ -199,32 +199,36 @@ class _RelaySettingsScreenState extends State<RelaySettingsScreen> {
   /// 手动改名的弹窗
   Future<void> _renameName() async {
     final ctrl = TextEditingController(text: _deviceName.text);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('重命名本机'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: '例如：我的手机',
-            border: OutlineInputBorder(),
+    try {
+      final name = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('重命名本机'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: '例如：我的手机',
+              border: OutlineInputBorder(),
+            ),
           ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+                child: const Text('确定')),
+          ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-              child: const Text('确定')),
-        ],
-      ),
-    );
-    if (name == null || name.isEmpty || !mounted) return;
-    setState(() => _deviceName.text = name);
-    // 立刻保存，免得用户忘了点「保存并重连」
-    final state = context.read<AppState>();
-    state.setDeviceName(name);
+      );
+      if (name == null || name.isEmpty || !mounted) return;
+      setState(() => _deviceName.text = name);
+      // 立刻保存，免得用户忘了点「保存并重连」
+      final state = context.read<AppState>();
+      state.setDeviceName(name);
+    } finally {
+      ctrl.dispose();
+    }
   }
 
   Widget _field(String label, TextEditingController c, {String? hint}) {

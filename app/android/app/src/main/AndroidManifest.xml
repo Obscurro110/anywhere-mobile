@@ -40,6 +40,7 @@
         android:label="Anywhere"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true">
         <activity

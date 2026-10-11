@@ -185,16 +185,20 @@ class RelayClient {
   Future<FileMeta> uploadFile(File file, {String? name}) async {
     final fileName = name ?? file.path.split(Platform.pathSeparator).last;
     final uri = Uri.parse(
-      '${config.httpBase}/upload?token=${Uri.encodeComponent(config.token)}&name=${Uri.encodeComponent(fileName)}',
+      '${config.httpBase}/upload?name=${Uri.encodeComponent(fileName)}',
     );
     // The relay accepts a raw byte stream as the request body.
     final bytes = await file.readAsBytes();
     // 必须加超时：中继不可达时 http.post 会一直挂着，
     // 界面上的「发送中」永远不结束。
+    // Token 优先放入 Authorization Header，避免被反向代理记录进 access.log
     final resp = await http
         .post(
           uri,
-          headers: {'content-type': 'application/octet-stream'},
+          headers: {
+            'content-type': 'application/octet-stream',
+            'authorization': 'Bearer ${config.token}',
+          },
           body: bytes,
         )
         .timeout(_httpTimeout);
@@ -208,10 +212,14 @@ class RelayClient {
 
   /// Download a relayed file to [savePath].
   Future<File> downloadFile(String fileId, String savePath) async {
-    final uri = Uri.parse(
-      '${config.httpBase}/file/$fileId?token=${Uri.encodeComponent(config.token)}',
-    );
-    final resp = await http.get(uri).timeout(_httpTimeout);
+    final uri = Uri.parse('${config.httpBase}/file/$fileId');
+    // Token 放入 Authorization Header 传递
+    final resp = await http.get(
+      uri,
+      headers: {
+        'authorization': 'Bearer ${config.token}',
+      },
+    ).timeout(_httpTimeout);
     if (resp.statusCode != 200) {
       throw Exception('download failed ${resp.statusCode}');
     }

@@ -81,6 +81,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+function extractToken(req, url) {
+  // 1. 优先从 Header 读取：Authorization: Bearer <token> 或 x-relay-token: <token>
+  // 这样 Token 不会被反向代理（Nginx / Caddy 等）记入 access.log
+  const authHeader = req.headers['authorization'];
+  if (typeof authHeader === 'string') {
+    const m = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (m && m[1]) return m[1].trim();
+  }
+  const xToken = req.headers['x-relay-token'];
+  if (typeof xToken === 'string' && xToken.trim()) {
+    return xToken.trim();
+  }
+  // 2. 兼容兜底：URL Query 参数
+  return url.searchParams.get('token');
+}
+
 async function handleHttp(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -89,13 +105,13 @@ async function handleHttp(req, res) {
     return json(res, 200, { ok: true, service: 'anywhere-relay', version: 1 });
   }
 
-  // download a relayed file: /file/:id?token=...
+  // download a relayed file: /file/:id
   const fileMatch = url.pathname.match(/^\/file\/([\w-]+)$/);
   if (fileMatch) {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       return json(res, 405, { ok: false, error: 'method_not_allowed' });
     }
-    const token = url.searchParams.get('token');
+    const token = extractToken(req, url);
     const user = token ? userForToken(tokens, token) : null;
     if (!user) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
@@ -105,9 +121,9 @@ async function handleHttp(req, res) {
   }
 
   // upload a file (used for large files instead of ws chunks):
-  // POST /upload?token=...&name=...  (raw body)
+  // POST /upload?name=...  (raw body, Token via Authorization Header or Query)
   if (url.pathname === '/upload' && req.method === 'POST') {
-    const token = url.searchParams.get('token');
+    const token = extractToken(req, url);
     const user = token ? userForToken(tokens, token) : null;
     if (!user) {
       return json(res, 401, { ok: false, error: 'unauthorized' });
