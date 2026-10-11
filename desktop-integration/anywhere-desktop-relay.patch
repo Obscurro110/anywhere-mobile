@@ -68,10 +68,10 @@ index 24faf63..c744df9 100644
    provider: github
    releaseType: release
 diff --git a/main/core/conversationStore.js b/main/core/conversationStore.js
-index a9f0178..27d15d2 100644
+index a9f0178..9eedc38 100644
 --- a/main/core/conversationStore.js
 +++ b/main/core/conversationStore.js
-@@ -1,1764 +1,1804 @@
+@@ -1,1764 +1,1806 @@
 -import fs from 'node:fs/promises'
 -import path from 'node:path'
 -import crypto from 'node:crypto'
@@ -1878,6 +1878,8 @@ index a9f0178..27d15d2 100644
 +  }
 +}
 +
++
++const nowIso = () => new Date().toISOString()
 +
 +function safeParseJson(raw, fallback = null) {
 +  if (typeof raw !== 'string') return fallback
