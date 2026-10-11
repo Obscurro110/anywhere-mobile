@@ -90,42 +90,47 @@ class _RelaySettingsScreenState extends State<RelaySettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(14, 8, 14, 28),
         children: [
-          // 当前状态
+          // 状态提示条（轻量紧凑，避免与设置首页大卡片功能重复）
           Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: const Color(0xFF1B1F2B),
-              borderRadius: BorderRadius.circular(12),
+              color: connected
+                  ? const Color(0x1A22C55E)
+                  : const Color(0x1AEF4444),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: connected
+                    ? const Color(0x3322C55E)
+                    : const Color(0x33EF4444),
+              ),
             ),
             child: Row(
               children: [
                 Icon(connected ? Icons.cloud_done : Icons.cloud_off,
-                    size: 20,
+                    size: 18,
                     color: connected ? Colors.greenAccent : Colors.redAccent),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(connected ? '已连接中继' : '未连接',
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 2),
-                      Text(
-                        '本机 ID：${state.config.deviceId}',
-                        style: const TextStyle(fontSize: 11, color: Colors.white38),
-                      ),
-                    ],
+                  child: Text(
+                    connected
+                        ? '当前已连接至中继服务 · 本机 ID: ${state.config.deviceId}'
+                        : '尚未连接到中继服务，请检查下方配置',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: connected ? Colors.greenAccent : Colors.redAccent,
+                    ),
                   ),
                 ),
                 IconButton(
                   tooltip: '重新连接',
-                  icon: const Icon(Icons.refresh, size: 20),
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.refresh, size: 18),
                   onPressed: () => context.read<AppState>().reconnect(),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 14),
 
           const Padding(
             padding: EdgeInsets.fromLTRB(6, 0, 6, 10),

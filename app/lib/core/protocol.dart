@@ -1115,6 +1115,7 @@ class TaskOption {
   final bool autoSave;
   final String autoSaveProjectId;
   final bool autoClose;
+  final List<Map<String, dynamic>> appliedDevices;
   final int historyCount;
 
   TaskOption({
@@ -1142,6 +1143,7 @@ class TaskOption {
     this.autoSave = true,
     this.autoSaveProjectId = '',
     this.autoClose = false,
+    this.appliedDevices = const [],
     this.historyCount = 0,
   });
 
@@ -1199,6 +1201,12 @@ class TaskOption {
         autoSave: j['autoSave'] as bool? ?? true,
         autoSaveProjectId: j['autoSaveProjectId'] as String? ?? '',
         autoClose: j['autoClose'] as bool? ?? false,
+        appliedDevices: (j['appliedDevices'] is List)
+            ? (j['appliedDevices'] as List)
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList()
+            : const [],
         historyCount: (j['historyCount'] as num?)?.toInt() ?? 0,
       );
 }

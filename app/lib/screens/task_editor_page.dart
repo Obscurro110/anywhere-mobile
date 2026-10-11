@@ -50,6 +50,7 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
   late bool _autoSave;
   late String _projectId;
   late bool _autoClose;
+  late List<Map<String, dynamic>> _appliedDevices;
 
   @override
   void initState() {
@@ -74,6 +75,7 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
     _autoSave = t.autoSave;
     _projectId = t.autoSaveProjectId;
     _autoClose = t.autoClose;
+    _appliedDevices = t.appliedDevices.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
   @override
@@ -137,22 +139,26 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
                   )),
             ],
           ),
-          if (_promptKey == '__DEFAULT__') ...[
-            const SizedBox(height: 12),
-            const Text('默认助手模型能力',
-                style: TextStyle(fontSize: 12, color: Colors.white54)),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              children: _routes
-                  .map((e) => ChoiceChip(
-                        label: Text(e.$2),
-                        selected: _modelRoute == e.$1,
-                        onSelected: (_) => setState(() => _modelRoute = e.$1),
-                      ))
-                  .toList(),
-            ),
-          ],
+          const SizedBox(height: 12),
+          Text(
+            _promptKey == '__DEFAULT__' ? '默认助手模型能力' : '助手覆盖模型能力（可选）',
+            style: const TextStyle(fontSize: 12, color: Colors.white54),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: _routes
+                .map((e) => ChoiceChip(
+                      label: Text(e.$2),
+                      selected: _modelRoute == e.$1,
+                      onSelected: (selected) {
+                        setState(() {
+                          _modelRoute = selected ? e.$1 : 'general';
+                        });
+                      },
+                    ))
+                .toList(),
+          ),
           const SizedBox(height: 12),
           TextField(
             controller: _prompt,
@@ -206,6 +212,80 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
             value: _autoClose,
             onChanged: (v) => setState(() => _autoClose = v),
           ),
+          const SizedBox(height: 18),
+          _title('启用设备列表 (Applied Devices)'),
+          const SizedBox(height: 4),
+          const Text('只有在下列启用的电脑设备上，该任务才会自动执行：',
+              style: TextStyle(fontSize: 12, color: Colors.white54)),
+          const SizedBox(height: 8),
+          if (_appliedDevices.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0x1AEF4444),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text('暂无启用设备；任务不会在任何设备自动执行。',
+                  style: TextStyle(fontSize: 12, color: Colors.redAccent)),
+            )
+          else
+            ..._appliedDevices.asMap().entries.map((entry) {
+              final idx = entry.key;
+              final d = entry.value;
+              final name = (d['deviceName'] ?? d['id'] ?? '未命名设备').toString();
+              return Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1F2430),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.computer, size: 18, color: Colors.white70),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(name,
+                          style: const TextStyle(fontWeight: FontWeight.w500)),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+                      onPressed: () {
+                        setState(() {
+                          _appliedDevices.removeAt(idx);
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }),
+          const SizedBox(height: 6),
+          if (state.peers.isNotEmpty) ...[
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: state.peers.map((peer) {
+                final alreadyAdded = _appliedDevices.any((d) =>
+                    (d['deviceId'] != null && d['deviceId'] == peer.deviceId) ||
+                    (d['deviceName'] != null && d['deviceName'] == peer.deviceName));
+                if (alreadyAdded) return const SizedBox.shrink();
+                return ActionChip(
+                  avatar: const Icon(Icons.add, size: 16),
+                  label: Text('添加 ${peer.deviceName}'),
+                  onPressed: () {
+                    setState(() {
+                      _appliedDevices.add({
+                        'deviceId': peer.deviceId,
+                        'deviceName': peer.deviceName,
+                      });
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+          ],
         ],
       ),
     );
@@ -420,6 +500,7 @@ class _TaskEditorPageState extends State<TaskEditorPage> {
       'autoSave': _autoSave,
       'autoSaveProjectId': _projectId,
       'autoClose': _autoClose,
+      'appliedDevices': _appliedDevices,
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(sent ? '已保存' : '发送失败')),
